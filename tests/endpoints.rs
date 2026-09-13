@@ -662,3 +662,38 @@ fn an_items_identity_survives_having_its_content_rewritten() {
     assert!(after.contains(&before), "the IRI is unchanged: {after}");
     assert!(after.contains("A completely different title"), "{after}");
 }
+
+/// ★ Reverse-engineered and pinned, because nothing in `ikigai-store`'s documentation says
+/// it and this module now depends on it: a **multi-operation** SPARQL UPDATE sent as one
+/// `urn:iki:store:update` is one request — so a malformed operation anywhere in the
+/// sequence means NONE of it ran.
+///
+/// That is what makes `batch()` an atomicity device rather than only a round-trip saving:
+/// a close is "status, reason and stamp" in one statement, and an item cannot be observed
+/// closed-with-no-reason between them. (It pins the parse boundary specifically, which is
+/// the failure this code can actually produce — every operation here is generated, so a
+/// runtime failure mid-sequence would be exotic.)
+#[test]
+fn a_multi_operation_update_is_refused_whole() {
+    let kernel = kernel();
+    let refused = try_verb(
+        &kernel,
+        Verb::Sink,
+        "urn:iki:store:update",
+        &[(
+            "content",
+            "INSERT DATA { GRAPH <urn:iki:ledger:graph> { \
+             <urn:example:first> <urn:example:p> \"landed\" } } ;\n\
+             THIS IS NOT SPARQL",
+        )],
+    );
+    assert!(refused.is_err(), "a malformed request must be refused");
+    let after = select(
+        &kernel,
+        "SELECT ?o WHERE { GRAPH ?g { <urn:example:first> ?p ?o } }",
+    );
+    assert!(
+        !after.contains("landed"),
+        "the first operation must not have run: {after}"
+    );
+}

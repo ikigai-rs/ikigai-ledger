@@ -273,6 +273,29 @@ fn graph_block(body: &str) -> String {
     format!("GRAPH <{}> {{ {body} }}", v::GRAPH)
 }
 
+/// Several SPARQL operations as ONE update request.
+///
+/// ★ Not a round-trip optimization (though it is one): a state change that takes three
+/// statements can be observed half-applied between them — an item closed but with no
+/// reason, a claim held by nobody. A SPARQL 1.1 update request is a SEQUENCE of
+/// operations and the store applies the request as one, so the intermediate states are
+/// never visible and a parse error in the third operation means the first two did not
+/// happen either.
+fn batch(operations: &[String]) -> String {
+    operations
+        .iter()
+        .filter(|op| !op.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ;\n")
+}
+
+/// Remove every value of a property.
+fn retract(item: &str, predicate: &str) -> String {
+    let pattern = graph_block(&format!("<{item}> <{predicate}> ?was"));
+    format!("DELETE {{ {pattern} }} WHERE {{ {pattern} }}")
+}
+
 /// Stamp an item as modified, as part of the same update that changed it.
 fn touch(item: &str, now: u64) -> String {
     format!(
@@ -320,9 +343,11 @@ async fn write_comment(
         ));
     }
     client
-        .update(&format!("INSERT DATA {{ {} }}", graph_block(&triples)))
+        .update(&batch(&[
+            format!("INSERT DATA {{ {} }}", graph_block(&triples)),
+            touch(item, now),
+        ]))
         .await?;
-    client.update(&touch(item, now)).await?;
     Ok(comment)
 }
 
@@ -633,10 +658,8 @@ impl Endpoint for ItemEndpoint {
                 if updates.is_empty() {
                     return Err(Error::MissingArgument("content".to_string()));
                 }
-                for update in &updates {
-                    client.update(update).await?;
-                }
-                client.update(&touch(&item.iri, now)).await?;
+                updates.push(touch(&item.iri, now));
+                client.update(&batch(&updates)).await?;
                 Ok(plain(format!("updated {} {}\n", item.short(), item.iri)))
             }
             Verb::Delete => {
@@ -1191,18 +1214,11 @@ impl Endpoint for CloseEndpoint {
             ),
         })?;
         client
-            .update(&replace_one(
-                &item.iri,
-                v::STATUS,
-                &format!("<{}>", v::CLOSED),
-            ))
-            .await?;
-        client
-            .update(&replace_one(
-                &item.iri,
-                v::CLOSED_REASON,
-                &format!("<{reason}>"),
-            ))
+            .update(&batch(&[
+                replace_one(&item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
+                replace_one(&item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
+                touch(&item.iri, now),
+            ]))
             .await?;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
@@ -1216,7 +1232,6 @@ impl Endpoint for CloseEndpoint {
                 .await?;
             }
         }
-        client.update(&touch(&item.iri, now)).await?;
         Ok(plain(format!("closed {} ({name})\n", item.short())))
     }
 
@@ -1282,18 +1297,11 @@ impl Endpoint for ReopenEndpoint {
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         client
-            .update(&replace_one(
-                &item.iri,
-                v::STATUS,
-                &format!("<{}>", v::OPEN),
-            ))
-            .await?;
-        client
-            .update(&format!(
-                "DELETE {{ {} }} WHERE {{ {} }}",
-                graph_block(&format!("<{}> <{}> ?was", item.iri, v::CLOSED_REASON)),
-                graph_block(&format!("<{}> <{}> ?was", item.iri, v::CLOSED_REASON))
-            ))
+            .update(&batch(&[
+                replace_one(&item.iri, v::STATUS, &format!("<{}>", v::OPEN)),
+                retract(&item.iri, v::CLOSED_REASON),
+                touch(&item.iri, now),
+            ]))
             .await?;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
@@ -1307,7 +1315,6 @@ impl Endpoint for ReopenEndpoint {
                 .await?;
             }
         }
-        client.update(&touch(&item.iri, now)).await?;
         Ok(plain(format!("reopened {}\n", item.short())))
     }
 
@@ -1381,36 +1388,31 @@ impl Endpoint for ClaimEndpoint {
                         )));
                     }
                 }
-                client
-                    .update(&replace_one(&item.iri, v::CLAIMED_BY, &literal(&holder)))
-                    .await?;
-                client
-                    .update(&replace_one(&item.iri, v::CLAIMED_AT, &datetime(now)))
-                    .await?;
+                let mut operations = vec![
+                    replace_one(&item.iri, v::CLAIMED_BY, &literal(&holder)),
+                    replace_one(&item.iri, v::CLAIMED_AT, &datetime(now)),
+                ];
                 if let Ok(purpose) = inv.inline_str("purpose") {
-                    client
-                        .update(&replace_one(&item.iri, v::PURPOSE, &literal(purpose)))
-                        .await?;
+                    operations.push(replace_one(&item.iri, v::PURPOSE, &literal(purpose)));
                 }
-                client.update(&touch(&item.iri, now)).await?;
+                operations.push(touch(&item.iri, now));
+                client.update(&batch(&operations)).await?;
                 Ok(plain(format!("{} claimed by {holder}\n", item.short())))
             }
             Verb::Delete => {
-                for predicate in [v::CLAIMED_BY, v::CLAIMED_AT, v::PURPOSE] {
-                    client
-                        .update(&format!(
-                            "DELETE {{ {} }} WHERE {{ {} }}",
-                            graph_block(&format!("<{}> <{predicate}> ?was", item.iri)),
-                            graph_block(&format!("<{}> <{predicate}> ?was", item.iri))
-                        ))
-                        .await?;
-                }
+                client
+                    .update(&batch(&[
+                        retract(&item.iri, v::CLAIMED_BY),
+                        retract(&item.iri, v::CLAIMED_AT),
+                        retract(&item.iri, v::PURPOSE),
+                        touch(&item.iri, now),
+                    ]))
+                    .await?;
                 if let Ok(note) = inv.inline_str("content") {
                     if !note.trim().is_empty() {
                         write_comment(&client, &item.iri, note.trim(), None, now).await?;
                     }
                 }
-                client.update(&touch(&item.iri, now)).await?;
                 Ok(plain(format!("{} released\n", item.short())))
             }
             other => Err(unsupported("ledger-claim", other)),
@@ -1480,23 +1482,17 @@ impl Endpoint for DeferEndpoint {
                 replace_one(&item.iri, v::DEFERRED, &boolean(true)),
                 "deferred",
             ),
-            Verb::Delete => (
-                format!(
-                    "DELETE {{ {} }} WHERE {{ {} }}",
-                    graph_block(&format!("<{}> <{}> ?was", item.iri, v::DEFERRED)),
-                    graph_block(&format!("<{}> <{}> ?was", item.iri, v::DEFERRED))
-                ),
-                "resumed",
-            ),
+            Verb::Delete => (retract(&item.iri, v::DEFERRED), "resumed"),
             other => return Err(unsupported("ledger-defer", other)),
         };
-        client.update(&update).await?;
+        client
+            .update(&batch(&[update, touch(&item.iri, now)]))
+            .await?;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
                 write_comment(&client, &item.iri, note.trim(), None, now).await?;
             }
         }
-        client.update(&touch(&item.iri, now)).await?;
         Ok(plain(format!("{} {said}\n", item.short())))
     }
 
@@ -1590,8 +1586,9 @@ impl Endpoint for LinkEndpoint {
             ),
             other => return Err(unsupported("ledger-link", other)),
         };
-        client.update(&update).await?;
-        client.update(&touch(&from.iri, now)).await?;
+        client
+            .update(&batch(&[update, touch(&from.iri, now)]))
+            .await?;
         Ok(plain(format!(
             "{said} {} {name} {}\n",
             from.short(),
@@ -1685,8 +1682,9 @@ impl Endpoint for LabelEndpoint {
             ),
             other => return Err(unsupported("ledger-label", other)),
         };
-        client.update(&update).await?;
-        client.update(&touch(&item.iri, now)).await?;
+        client
+            .update(&batch(&[update, touch(&item.iri, now)]))
+            .await?;
         Ok(plain(format!("{said} {} {label}\n", item.short())))
     }
 
