@@ -249,9 +249,23 @@ async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<I
     } else {
         model::resolve_id(client, reference).await?
     };
-    model::load_item(client, &iri)
-        .await?
-        .ok_or_else(|| Error::NotFound(format!("no ledger item at `{iri}`")))
+    if let Some(item) = model::load_item(client, &iri).await? {
+        return Ok(item);
+    }
+    // Present but unreadable is a different fact from absent, and only one of them is
+    // fixable by the person reading the error.
+    let missing = model::defects_of(client, &iri).await?;
+    if missing.is_empty() {
+        Err(Error::NotFound(format!("no ledger item at `{iri}`")))
+    } else {
+        Err(Error::Endpoint(format!(
+            "`{iri}` is in the ledger graph but is missing {} — so nothing here can read \
+             it. Some write did not pass through a ledger Sink (an editor, a merge, a bulk \
+             load); add the missing propert{} or delete the subject",
+            missing.join(", "),
+            if missing.len() == 1 { "y" } else { "ies" }
+        )))
+    }
 }
 
 /// The `GRAPH <…> { … }` wrapper.
@@ -408,7 +422,7 @@ impl Endpoint for ItemsEndpoint {
             }
             return face(String::new(), Some(graph), want);
         }
-        let text = if items.is_empty() {
+        let mut text = if items.is_empty() {
             "no items match\n".to_string()
         } else {
             let mut out: String = items
@@ -418,6 +432,22 @@ impl Endpoint for ItemsEndpoint {
             out.push_str(&format!("\n{} item(s)\n", items.len()));
             out
         };
+        // ★ The corpus check, on the read side. Anyone holding the store's write scope can
+        // change this graph without passing through a ledger Sink — an editor, a merge, a
+        // bulk load — and that is a supported path, not corruption. What is NOT supported
+        // is an item quietly disappearing from every listing because a hand edit left it
+        // unreadable, so a malformed item is REPORTED here rather than skipped.
+        let broken = model::defects(&client).await?;
+        if !broken.is_empty() {
+            text.push_str(&format!(
+                "\n⚠ {} item(s) in the graph could not be read and are not listed above \
+                 (a write that did not pass through a ledger Sink):\n",
+                broken.len()
+            ));
+            for (iri, missing) in &broken {
+                text.push_str(&format!("  {iri} — missing {}\n", missing.join(", ")));
+            }
+        }
         face(text, None, want)
     }
 

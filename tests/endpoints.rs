@@ -602,3 +602,63 @@ fn an_unknown_item_is_not_found_rather_than_silently_ignored() {
         Err(Error::NotFound(_))
     ));
 }
+
+// ------------------------------------------------- writes that bypassed the ledger Sink
+
+/// ★ **Assume an editor got there first.** The ledger's graph is reachable by anything
+/// holding the store's write scope — an editor, a merge, a bulk load — and that is a
+/// supported path rather than corruption. The Sink's refusals never ran on such a write,
+/// so the model is checked on READ too, and an item a hand edit left unreadable is
+/// REPORTED rather than quietly dropped from every listing.
+#[test]
+fn an_item_written_around_the_sink_is_reported_not_silently_skipped() {
+    let kernel = kernel();
+    append(&kernel, "Filed properly", &[]);
+    // Straight into the store, bypassing `urn:iki:ledger:append` entirely: typed as an
+    // item, and missing everything a reader needs.
+    sink(
+        &kernel,
+        "urn:iki:store:load",
+        &[
+            (
+                "content",
+                "<urn:iki:ledger:item:handedited> \
+                 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                 <https://ikigai-rs.dev/ns/ledger#Item> ; \
+                 <http://purl.org/dc/terms/title> \"Edited in by hand\" .",
+            ),
+            ("graph", "urn:iki:ledger:graph"),
+        ],
+    );
+
+    let list = source(&kernel, "urn:iki:ledger:items", &[("status", "all")]);
+    assert!(list.contains("Filed properly"), "{list}");
+    assert!(list.contains("could not be read"), "{list}");
+    assert!(list.contains("urn:iki:ledger:item:handedited"), "{list}");
+    assert!(list.contains("ledger:number"), "{list}");
+
+    // …and asking for it directly says what is wrong with it, which "not found" would not.
+    let failed = try_verb(&kernel, Verb::Source, "urn:iki:ledger:item:handedited", &[]);
+    let message = failed.expect_err("unreadable").to_string();
+    assert!(message.contains("missing"), "{message}");
+    assert!(message.contains("ledger:status"), "{message}");
+    assert!(message.contains("Sink"), "{message}");
+}
+
+/// The other half of the same rule: an item's IRI must survive editing. It is minted from
+/// the clock and a digest of what was filed, and then STORED — never derived from the
+/// item's content, its number or its position — so renaming the title, renumbering, or
+/// rewriting the body in an editor cannot silently rename the thing.
+#[test]
+fn an_items_identity_survives_having_its_content_rewritten() {
+    let kernel = kernel();
+    let before = append_iri(&kernel, "The original title\n\nOriginal body.", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:item:1",
+        &[("content", "A completely different title\n\nAnd body.")],
+    );
+    let after = source(&kernel, "urn:iki:ledger:item:1", &[]);
+    assert!(after.contains(&before), "the IRI is unchanged: {after}");
+    assert!(after.contains("A completely different title"), "{after}");
+}

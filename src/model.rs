@@ -454,6 +454,81 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
     Ok(clauses)
 }
 
+/// The properties an item must carry for anything here to read it.
+///
+/// ★ **Assume an editor got there first.** A ledger whose items can only be changed
+/// through its own Sink is not the thing anyone wants: the point of durable, inspectable
+/// state is that a human in an editor — or an LLM harness, or a merge — can touch it out
+/// of band, and this backend is no different (`urn:iki:store:load` and
+/// `urn:iki:store:update` are both open to anyone holding the store's write scope). So an
+/// out-of-band write is a FIRST-CLASS PATH, not corruption, and the consequence is that
+/// the model has to be checked on READ as well as on write: the Sink's refusal never ran.
+///
+/// This list is that hook, used by both directions — the reader ([`defects`]) and any
+/// future lint over the corpus.
+pub const REQUIRED: [&str; 5] = [
+    v::NUMBER,
+    v::ext::TITLE,
+    v::STATUS,
+    v::ext::CREATED,
+    v::ext::MODIFIED,
+];
+
+/// Items in the graph that the readers here cannot see, and what each is missing.
+///
+/// Reported rather than silently skipped: an item a hand-edit made unreadable would
+/// otherwise vanish from every listing while still being *in* the ledger, which is the
+/// worst of both — the work is neither visible nor gone.
+pub async fn defects(client: &StoreClient<'_, '_>) -> Result<Vec<(String, Vec<String>)>> {
+    let values = REQUIRED
+        .iter()
+        .map(|p| format!("<{p}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let query = format!(
+        "SELECT ?item ?missing WHERE {{ {} }} ORDER BY ?item ?missing",
+        in_graph(&format!(
+            "?item <{type_}> <{class}> .\nVALUES ?missing {{ {values} }}\n\
+             FILTER NOT EXISTS {{ ?item ?missing ?any }}",
+            type_ = v::ext::TYPE,
+            class = v::ITEM_CLASS,
+        ))
+    );
+    let mut by_item: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for row in client.select(&query).await? {
+        let (Some(item), Some(missing)) = (row.get("item"), row.get("missing")) else {
+            continue;
+        };
+        by_item
+            .entry(item.value.clone())
+            .or_default()
+            .push(short_name(&missing.value));
+    }
+    Ok(by_item.into_iter().collect())
+}
+
+/// A predicate IRI as a reader recognizes it.
+fn short_name(iri: &str) -> String {
+    match iri {
+        p if p == v::NUMBER => "ledger:number".to_string(),
+        p if p == v::STATUS => "ledger:status".to_string(),
+        p if p == v::ext::TITLE => "dcterms:title".to_string(),
+        p if p == v::ext::CREATED => "dcterms:created".to_string(),
+        p if p == v::ext::MODIFIED => "dcterms:modified".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// What one subject is missing, for the error a single-item read gives.
+pub async fn defects_of(client: &StoreClient<'_, '_>, iri: &str) -> Result<Vec<String>> {
+    Ok(defects(client)
+        .await?
+        .into_iter()
+        .find(|(item, _)| item == iri)
+        .map(|(_, missing)| missing)
+        .unwrap_or_default())
+}
+
 /// Load the items a filter selects, newest-updated first (kata's order, and the one a
 /// human reading a list expects).
 pub async fn load_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Vec<Item>> {

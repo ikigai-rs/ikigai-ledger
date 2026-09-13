@@ -127,6 +127,28 @@ reference anybody wrote down.
 Numbers are per **store**. There are no projects yet; when there are, this is where that
 decision lands.
 
+## Assume an editor got there first
+
+A ledger whose items can only change through its own `Sink` is not what anyone wants from
+durable, inspectable state: the value of a record you can keep is that a human in an editor
+— or a merge, or an LLM harness, or a bulk load — can touch it out of band. Here that is
+literally true already: anything holding `urn:cap:store:write` can rewrite this graph
+without passing through a ledger endpoint. So an **out-of-band write is a supported path,
+not corruption**, and two things follow.
+
+**Identity survives editing.** An item's IRI is minted once from the clock and a digest of
+what was filed, and then *stored*. It is never derived from the item's content, its number
+or its position, so rewriting a title, renumbering, or reformatting in an editor cannot
+silently rename the thing. This is the decision that would be worst to retrofit and it is
+made here, at the first commit.
+
+**The model is checked on read, not only on write.** A hand edit bypassed the Sink's
+refusals, so `urn:iki:ledger:items` runs a corpus check beside the listing: an item typed
+`ledger:Item` that is missing anything a reader needs is **reported**, with the properties
+it lacks, rather than quietly dropped — the worst outcome being work that is neither
+visible nor gone. Asking for such an item directly says what is wrong with it, which "not
+found" would not. `model::REQUIRED` is the one list both directions use.
+
 ## What `Delete` does — the part worth arguing about
 
 A ledger that silently forgets is not a ledger. So there are three different acts, and they
