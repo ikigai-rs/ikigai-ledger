@@ -1,0 +1,70 @@
+[package]
+name = "ikigai-ledger"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Brian Sletten <brian.sletten@gmail.com>"]
+repository = "https://github.com/ikigai-rs/ikigai-ledger"
+homepage = "https://github.com/ikigai-rs/ikigai-ledger"
+keywords = ["ikigai", "roc", "issues", "rdf", "ledger"]
+categories = ["development-tools"]
+description = "The work ledger for ikigai: items, comments, labels, links and claims as RDF in a durable store, with view/query/append/comment/close/delete as capability-gated resources — and `urn:iki:ledger:next`, a deterministic ready set under a pluggable ordering policy that refuses a blocked cycle and explains its own ranking."
+
+# ★ WHY THIS CRATE OWNS NO BYTES. Everything here is authored as SPARQL and issued
+# through the kernel at `urn:iki:store:*` — `ikigai-store` owns the dataset, the write
+# lock and the golden threads. That is not a layering preference: `DurableStore`'s
+# handle is `pub(crate)` by design (handing it out forfeits cacheability for the life
+# of the store), so an in-process consumer reaches the data the same way a remote one
+# does. The consequence a host must know: this module is inert unless a store space is
+# bound in the same kernel. See `README.md`, "Composition".
+
+[dependencies]
+ikigai-core = "0.1.57"
+# The store's namespace and capability constants, named rather than copied: this crate
+# declares `urn:cap:store:{read,write}` on its own actions because a ledger write really
+# does need them (sub-requests carry the CALLER's capability unchanged), and a copied
+# constant would drift from the endpoint that enforces it. 0.2.0 is the true minimum —
+# the version that owns `urn:iki:store:` and is publishable at all. Default features
+# only: the RocksDB backend is the HOST's choice, taken in the host's manifest, and
+# nothing in this library needs it. ⚠ `"0.2"` is a range `>=0.2.0, <0.3.0`; when the
+# store reaches 0.3 this line must move or this crate freezes out of it.
+ikigai-store = { version = "0.2", default-features = false }
+
+# `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
+# the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
+# `FnEndpoint` closures.
+async-trait = "0.1"
+
+# Reading and writing RDF without hand-rolling either. ★ Hand-built Turtle is how an
+# escaping bug ships: a title containing a quote, a newline or a backslash is ordinary
+# ledger content, and `oxrdfio`'s serializer is the only thing here that is not guessing.
+# The same pair ikigai-log and ikigai-sign parse with, and pure Rust.
+oxrdf = "0.3"
+oxrdfio = "0.2"
+
+# SPARQL SELECT results arrive as `application/sparql-results+json` from
+# `urn:iki:store:select` — the store's default and the only result face that is both
+# typed and trivially parseable. Nothing else here is JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The tombstone's content hash: what a purge destroyed, in a form a later claim about
+# it can be checked against. `sha256:` tagged, the digest convention ikigai-sign set and
+# ikigai-log took, so the three join in a query instead of colliding.
+sha2 = "0.10"
+
+[dev-dependencies]
+futures = "0.3"
+# The module recipe as one test. 0.2.0 is the floor: DECLARATIONS (a declaration whose
+# target the walk never reached is reported) is what keeps this suite honest.
+ikigai-conformance = "0.2"
+# The store this ledger is written against, with the durable backend ON — so
+# `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
+# only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
+# `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
+# costs an `oxrocksdb-sys` compile once per cache.
+ikigai-store = { version = "0.2", features = ["persistent"] }
+# `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
+# routing cannot be observed at all (it fails open onto an input named `in`), so the
+# conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
+ikigai-vocab = "0.1"
