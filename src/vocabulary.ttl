@@ -1,0 +1,319 @@
+# The ikigai-ledger vocabulary.
+#
+# Self-contained under `https://ikigai-rs.dev/ns/ledger#` — the `sig:` and `log:`
+# precedent (ikigai-sign, ikigai-log) — so no arc here blocks on a manual
+# /ns deploy, and a domain this size stays out of the kernel's vocabulary. A term is
+# promoted into the shared `vocabulary.ttl` when it earns a second consumer.
+#
+# ★ THE ONE TERM THAT SHOULD PROBABLY NOT LIVE HERE: `ledger:about`. It is the join
+# between an item and the FILE, COMMIT, PR or BRIEF it is about, and its whole value is
+# that everything filed against a resource answers one query. `ikigai-browse` already
+# has the same edge under a different name — `ik:annotates`, in the kernel's own
+# vocabulary, flattening `oa:hasTarget` away — so today "everything filed against this
+# file" is a UNION of two predicates that mean the same thing. The right fix is a
+# general `ik:about` in `ikigai-vocab` with `ik:annotates` and this term as
+# sub-properties; that is a core change, so it is REPORTED rather than reached, and
+# migrating this predicate later is one SPARQL UPDATE over one graph.
+#
+# Reused rather than reinvented, so a consumer's existing queries work:
+#   dcterms:title      an item's title
+#   dcterms:created    when it was filed
+#   dcterms:modified   when it last changed
+#   prov:Entity        what an item and a comment ARE
+#   prov:Activity      what a selection IS (something that ran, at a time)
+#   prov:generatedAtTime / prov:invalidatedAtTime  when it ran / when it died
+#   sig:contentHash    the tagged digest convention (ikigai-sign's term, so a
+#                      tombstone's hash JOINS with a signature graph instead of
+#                      colliding with it)
+
+@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+@prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix prov:   <http://www.w3.org/ns/prov#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+@prefix sig:    <https://ikigai-rs.dev/ns/sign#> .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The spine
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:Item a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Item" ;
+    rdfs:comment "One unit of work in the ledger. Skolemized as urn:iki:ledger:item:{id}, where {id} is opaque and time-ordered; the human-facing `#12` is ledger:number, a LABEL on that IRI and never the identifier. A prov:Entity because it is a thing that exists over time and is revised, not an occurrent. ★ THE BASE CLASS OF A TYPED FAMILY: every item asserts rdf:type ledger:Item, and an item may ALSO assert a more specific class (rdfs:subClassOf ledger:Item) for its level — a decision record, a review finding, a state transition. Different levels really do have different scope, responsibility and granularity, so they are different CLASSES with their own shapes; what they share is the plumbing — one identity scheme, five verbs, one manifold, one capability model, one set of golden threads, one query surface, one selection surface. The base type is asserted on every item DELIBERATELY, so \"everything in the ledger\" is one triple pattern and needs no reasoner, and a new level is additive: a class IRI, a shape, and a `kind=` argument value. Nothing in this module enumerates the subclasses." .
+
+ledger:Comment a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Comment" ;
+    rdfs:comment "A note appended to an item, stamped and attributed, never edited in place. Skolemized as urn:iki:ledger:comment:{id}." .
+
+ledger:Tombstone a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Tombstone" ;
+    rdfs:comment "The evidence a deleted item leaves behind: which number existed, when it was removed, by whom, why, how many quads went, and the sha256 of exactly what went. A ledger that silently forgets is not a ledger, so nothing leaves without one — including a purge, where the tombstone is all that remains. Skolemized as urn:iki:ledger:tombstone:{id}, keeping the deleted item's id so the two are joinable." .
+
+ledger:Counter a rdfs:Class ;
+    rdfs:label "Counter" ;
+    rdfs:comment "The short-id allocator, as a resource in the graph rather than as process state: urn:iki:ledger:counter carries ledger:lastNumber. It is read at every append and never decremented, so a restart continues where the last writer stopped and a purge cannot make a number be reused." .
+
+ledger:Policy a rdfs:Class ;
+    rdfs:label "Policy" ;
+    rdfs:comment "An ordering policy for urn:iki:ledger:next: what it weighs and in what order, resolvable at urn:iki:ledger:policy:{name}. The READY SET is a query and needs no policy; a policy only orders what is already ready." .
+
+ledger:Selection a rdfs:Class ;
+    rdfs:subClassOf prov:Activity ;
+    rdfs:label "Selection" ;
+    rdfs:comment "One run of urn:iki:ledger:next: which policy ran, over how many candidates, what it ranked, and what it excluded and why. A prov:Activity because it is an occurrent — the answer is only true of the moment it was computed. ⚠ A selection OFFERS; it never authorizes. Acting on it still requires the actor's own capability." .
+
+ledger:Ranking a rdfs:Class ;
+    rdfs:label "Ranking" ;
+    rdfs:comment "One ranked candidate within a ledger:Selection: its position, the item, the score the policy gave it, and the reasons in the policy's own words. Skolemized as {selection}:rank:{n}." .
+
+ledger:Exclusion a rdfs:Class ;
+    rdfs:label "Exclusion" ;
+    rdfs:comment "One open item the ready-set query REFUSED to offer, and the deterministic reason (blocked, claimed, deferred, filtered). Recorded because \"why not that one\" is the question a selection gets asked, and an answer that cannot say is overridden and then ignored. Skolemized as {selection}:excluded:{n}." .
+
+ledger:Status a rdfs:Class ;
+    rdfs:label "Status" ;
+    rdfs:comment "The state of an item. An IRI rather than a string, so the values are a closed, dereferenceable set that a mapping from a relational source can target directly (kata's CHECK-constrained enum is exactly this, waiting for an IRI)." .
+
+ledger:CloseReason a rdfs:Class ;
+    rdfs:label "CloseReason" ;
+    rdfs:comment "Why an item was closed. An IRI, for the same reason as ledger:Status." .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The closed value sets
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:open a ledger:Status ;
+    rdfs:label "open" ;
+    rdfs:comment "Filed and not finished. Eligible for the ready set unless claimed, deferred or blocked." .
+
+ledger:closed a ledger:Status ;
+    rdfs:label "closed" ;
+    rdfs:comment "Finished, with a ledger:closedReason. Closing is NOT deleting: a closed item is still in the graph, still queryable, and still a blocker that no longer blocks." .
+
+ledger:done a ledger:CloseReason ;
+    rdfs:label "done" ;
+    rdfs:comment "The work was done." .
+
+ledger:wontfix a ledger:CloseReason ;
+    rdfs:label "wontfix" ;
+    rdfs:comment "A decision not to do it. The decision is the value; the note that explains it is a comment." .
+
+ledger:duplicate a ledger:CloseReason ;
+    rdfs:label "duplicate" ;
+    rdfs:comment "Another item covers it. Link the survivor with ledger:related so the pair stays navigable." .
+
+ledger:superseded a ledger:CloseReason ;
+    rdfs:label "superseded" ;
+    rdfs:comment "Overtaken by later work or a later decision." .
+
+ledger:auditNoChange a ledger:CloseReason ;
+    rdfs:label "audit-no-change" ;
+    rdfs:comment "Investigated, and the correct outcome was to change nothing. Taken from kata, which had it for the same reason our review arcs keep needing it: \"looked, found it fine\" is a real verdict and recording it as `done` loses the finding." .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Item properties
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:number a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:integer ;
+    rdfs:label "number" ;
+    rdfs:comment "The human-facing short id — `#12`. A LABEL on a stable IRI, never the identifier: it is allocated from ledger:lastNumber by the one process that owns the store, is unique per store (not per project — this ledger has no projects yet), and is never reused, because the counter is not lowered by a delete or a purge." .
+
+ledger:body a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "body" ;
+    rdfs:comment "The prose of an item or a comment. An item's title is dcterms:title and its body is everything after the first blank line of what was filed." .
+
+ledger:status a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range ledger:Status ;
+    rdfs:label "status" .
+
+ledger:closedReason a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range ledger:CloseReason ;
+    rdfs:label "closedReason" .
+
+ledger:priority a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:integer ;
+    rdfs:label "priority" ;
+    rdfs:comment "0 highest … 4 lowest, kata's convention kept deliberately so behaviour can be diffed against the tool being replaced. ABSENT means unset, and absent is not 4: the default policy ranks any item with a priority above every item without one, which is only meaningful if \"unset\" is a distinct state." .
+
+ledger:deferred a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "deferred" ;
+    rdfs:comment "Not now — open, not blocked by anything, not claimed, and still deliberately not offered. Modelled as a property because kata's equivalent (`someday`) is a flag inside a metadata JSON blob that exactly one query understands, which is a real concept wearing a hiding place. ⚠ Deliberately a BOOLEAN and not a deferred-until date: readiness that turns on the wall clock would go stale in the cache with no golden thread to cut it, so resuming is an act (Delete urn:iki:ledger:defer) rather than the passage of time." .
+
+ledger:about a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "about" ;
+    rdfs:comment "The resource this item is ABOUT — a file, a commit, a PR, a brief, a repo, an endpoint. The point of the ledger being RDF: \"what is open against this file\" is a query, not an index someone maintains, and it joins items to the five other node types (commits, PRs, reviews, annotations, log entries) that already carry resource IRIs. ⚠ See the header: ik:annotates is the same edge under another name, and the general term belongs in the kernel's vocabulary." .
+
+ledger:revision a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:string ;
+    rdfs:label "revision" ;
+    rdfs:comment "The revision the item was filed against — a commit sha, a tag, a version. The commonest way a review ledger rots is a finding about line 40 of a file that has since moved, and this is the pin. One per item rather than one per ledger:about target, deliberately: it states what the tree looked like when the item was FILED, which stays unambiguous when an item is about several resources. Where the target IRI can carry its own revision, prefer that and this is the coarse stamp." .
+
+ledger:label a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:string ;
+    rdfs:label "label" ;
+    rdfs:comment "A free tag. Filtering by label — must have ALL of these, must have NONE of those — belongs to the READY QUERY, not to an ordering policy; that is why kata's ranker can be six lines." .
+
+ledger:author a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "author" ;
+    rdfs:comment "Who filed an item or a comment, as a plain name. ⚠ A string and not a prov:Agent IRI, knowingly: this ecosystem's identity story (signature graphs, per-identity grants, session ids) is real but not yet one IRI scheme, and minting urn:iki:ledger:agent:{slug} now would create a second, private identity namespace to migrate later. prov:wasAttributedTo wants an IRI, so it is deliberately NOT used here." .
+
+ledger:claimedBy a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:string ;
+    rdfs:label "claimedBy" ;
+    rdfs:comment "Who holds this item. The ready set never offers a claimed item, which is most of what \"what should I do next\" means when more than one worker shares a ledger. ⚠ A HARD claim only: kata also has timed claims that lapse, which is our 90-minute auto-claim by another name and is not modelled here yet." .
+
+ledger:claimedAt a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "claimedAt" .
+
+ledger:purpose a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:string ;
+    rdfs:label "purpose" ;
+    rdfs:comment "Why the holder took the claim — kata's `purpose` column, and our brief name. Free text, for a human reading `items`." .
+
+ledger:onItem a rdf:Property ;
+    rdfs:domain ledger:Comment ;
+    rdfs:range ledger:Item ;
+    rdfs:label "onItem" ;
+    rdfs:comment "The item a comment is on. The edge points from the comment so appending one is a pure INSERT that touches no existing triple." .
+
+# ---- links between items ----------------------------------------------------
+# Typed predicates rather than a link node with a type column: an edge is one
+# triple, the ready query is one NOT EXISTS, and cycle detection walks the
+# predicate directly. kata's three link types, kept.
+
+ledger:blocks a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range ledger:Item ;
+    rdfs:label "blocks" ;
+    rdfs:comment "This item must finish before the object can start. ⚠ These edges are meant to be a DAG and NOTHING ENFORCES IT: a cycle makes the ready set silently empty, which is indistinguishable from a finished backlog. urn:iki:ledger:next walks the open subgraph by hand and REFUSES with the cycle named rather than answering \"nothing is ready\"." .
+
+ledger:parent a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range ledger:Item ;
+    rdfs:label "parent" ;
+    rdfs:comment "This item is part of that one. Structural only — it does not block, and the ready set ignores it." .
+
+ledger:related a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range ledger:Item ;
+    rdfs:label "related" ;
+    rdfs:comment "See also. Symmetric in intent; written one way and queried both." .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Deletion
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:deletedItem a rdf:Property ;
+    rdfs:domain ledger:Tombstone ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "deletedItem" ;
+    rdfs:comment "The IRI that was deleted. It no longer resolves to an item; it resolves to this." .
+
+ledger:recoverable a rdf:Property ;
+    rdfs:domain ledger:Tombstone ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "recoverable" ;
+    rdfs:comment "true: the item's quads were MOVED to the quarantine graph urn:iki:ledger:graph:deleted and can be brought back. false: they were destroyed, and this tombstone plus its sig:contentHash is all the evidence there is." .
+
+ledger:quadCount a rdf:Property ;
+    rdfs:domain ledger:Tombstone ;
+    rdfs:range xsd:integer ;
+    rdfs:label "quadCount" ;
+    rdfs:comment "How many quads the delete removed — the size of what is gone, which the hash alone does not say." .
+
+ledger:reason a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "reason" ;
+    rdfs:comment "Free text: why an item was deleted, or why a candidate was excluded from a selection." .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Selection
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:lastNumber a rdf:Property ;
+    rdfs:domain ledger:Counter ;
+    rdfs:range xsd:integer ;
+    rdfs:label "lastNumber" .
+
+ledger:policy a rdf:Property ;
+    rdfs:domain ledger:Selection ;
+    rdfs:range ledger:Policy ;
+    rdfs:label "policy" ;
+    rdfs:comment "Which policy produced this answer. Being able to SAY which policy ranked this matters more than having several policies." .
+
+ledger:weighs a rdf:Property ;
+    rdfs:domain ledger:Policy ;
+    rdfs:range xsd:string ;
+    rdfs:label "weighs" ;
+    rdfs:comment "One signal this policy uses, in the order it uses them. Meta on the policy resource says the same thing in prose." .
+
+ledger:readyCount a rdf:Property ;
+    rdfs:domain ledger:Selection ;
+    rdfs:range xsd:integer ;
+    rdfs:label "readyCount" ;
+    rdfs:comment "How many items the deterministic ready query returned — the narrowing, before any policy ran." .
+
+ledger:excludedCount a rdf:Property ;
+    rdfs:domain ledger:Selection ;
+    rdfs:range xsd:integer ;
+    rdfs:label "excludedCount" .
+
+ledger:ranking a rdf:Property ;
+    rdfs:domain ledger:Selection ;
+    rdfs:range ledger:Ranking ;
+    rdfs:label "ranking" .
+
+ledger:excluded a rdf:Property ;
+    rdfs:domain ledger:Selection ;
+    rdfs:range ledger:Exclusion ;
+    rdfs:label "excluded" .
+
+ledger:rank a rdf:Property ;
+    rdfs:domain ledger:Ranking ;
+    rdfs:range xsd:integer ;
+    rdfs:label "rank" ;
+    rdfs:comment "1 is the answer. The rest are what it beat, in order — a ranking that cannot be interrogated gets overridden and then ignored." .
+
+ledger:item a rdf:Property ;
+    rdfs:range ledger:Item ;
+    rdfs:label "item" ;
+    rdfs:comment "The item a ranking or an exclusion is about. No domain: both classes use it." .
+
+ledger:score a rdf:Property ;
+    rdfs:domain ledger:Ranking ;
+    rdfs:range xsd:string ;
+    rdfs:label "score" ;
+    rdfs:comment "The policy's own score, as it computed it. A string because a score is only comparable WITHIN one policy — publishing it as a number invites comparison across policies, which means nothing." .
+
+ledger:because a rdf:Property ;
+    rdfs:domain ledger:Ranking ;
+    rdfs:range xsd:string ;
+    rdfs:label "because" ;
+    rdfs:comment "One reason, in the policy's words, for where this item landed. Several per ranking." .
+
+ledger:leverage a rdf:Property ;
+    rdfs:domain ledger:Ranking ;
+    rdfs:range xsd:integer ;
+    rdfs:label "leverage" ;
+    rdfs:comment "How many OPEN items this one blocks, transitively. It falls out of the link graph for free and is usually the best single signal, because finishing a blocker converts several unready items into ready ones — and a priority sort cannot see it at all." .
