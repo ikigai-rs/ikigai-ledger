@@ -263,16 +263,17 @@ one graph.
 
 ## Not built, on purpose
 
-- **No HTML face.** The browse/XSLT/htmx register is real and is a separate arc; a
-  `text/plain` list you can read in the REPL is what "view ASAP" needs.
+- **No HTML face.** Items serve `text/turtle` and `text/plain`. A rendered face belongs with
+  the rest of the browse stack, which dispatches XSLT on `rdf:type`; nothing here forecloses
+  it.
 - **No event graph.** kata records every mutation as an event row. Here the mutation history
   is the kernel's to tell — `ikigai-log`'s tracer already writes resolutions, cache hits and
   capability denials — and duplicating it in the domain graph would be two records to
   disagree.
-- **No timed claims.** kata has hard and timed claims; this has hard ones only. The 90-minute
-  lapse our own dispatch fence uses has no analogue here yet, and a claim race between two
-  requests in one process is possible: RDF has no partial unique index and SHACL cannot see
-  a race. Safe for one operator, and the first thing to harden when there are two.
+- **No timed claims.** Claims are held until released; nothing expires them. A claim race
+  between two requests in one process is also possible — RDF has no partial unique index, and
+  SHACL cannot see a race. Both are safe for a single operator and are the first things to
+  harden for more than one.
 - **No `about` removal, no comment editing.** Comments are append-only by design; `about`
   removal is an omission, not a principle.
 - **No `deferred-until` date.** Readiness that turns on the wall clock would go stale in the
@@ -281,5 +282,8 @@ one graph.
 
 ## Status
 
-Bound and tested; **not yet wired into a host** — that is a follow-on `ikigai-cli` arc.
-`ikigai-conformance` walks all thirteen resources clean. Publishing to crates.io is Brian's.
+All thirteen resources are bound, tested, and walked clean by `ikigai-conformance`.
+
+**A host must bind this crate's space for the resources to resolve.** It composes with
+`ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
+`DurableStore::open` is what names the dataset on disk. See "Composition" above.
