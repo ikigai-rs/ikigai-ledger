@@ -1,20 +1,28 @@
-//! The thirteen resources this crate binds.
+//! The fourteen resources this crate binds, each of them **per ledger**.
 //!
 //! ```text
-//! urn:iki:ledger:items          Source              the list, filtered
-//! urn:iki:ledger:item:{id}      Source Sink Delete  one item, edit it, delete it
-//! urn:iki:ledger:append         Sink                file a new item
-//! urn:iki:ledger:comment        Sink                append a comment
-//! urn:iki:ledger:close          Sink                close with a reason
-//! urn:iki:ledger:reopen         Sink                undo a close
-//! urn:iki:ledger:claim          Sink Delete         take it / hand it back
-//! urn:iki:ledger:defer          Sink Delete         not now / now again
-//! urn:iki:ledger:link           Sink Delete         blocks / parent / related
-//! urn:iki:ledger:label          Sink Delete         tag / untag
-//! urn:iki:ledger:purge          Delete              destroy, leaving a tombstone
-//! urn:iki:ledger:next           Source              the ready set, ranked
-//! urn:iki:ledger:policy:{name}  Source              what a policy weighs
+//! urn:iki:ledger:{ledger}:items          Source              the list, filtered
+//! urn:iki:ledger:{ledger}:item:{id}      Source Sink Delete  one item, edit it, delete it
+//! urn:iki:ledger:{ledger}:append         Sink                file a new item
+//! urn:iki:ledger:{ledger}:comment        Sink                append a comment
+//! urn:iki:ledger:{ledger}:close          Sink                close with a reason
+//! urn:iki:ledger:{ledger}:reopen         Sink                undo a close
+//! urn:iki:ledger:{ledger}:claim          Sink Delete         take it / hand it back
+//! urn:iki:ledger:{ledger}:defer          Sink Delete         not now / now again
+//! urn:iki:ledger:{ledger}:link           Sink Delete         blocks / parent / related
+//! urn:iki:ledger:{ledger}:label          Sink Delete         tag / untag
+//! urn:iki:ledger:{ledger}:purge          Delete              destroy, leaving a tombstone
+//! urn:iki:ledger:{ledger}:next           Source              the ready set, ranked
+//! urn:iki:ledger:ledgers                 Source              which ledgers exist
+//! urn:iki:ledger:policy:{name}           Source              what a policy weighs
 //! ```
+//!
+//! Omit the `{ledger}` segment and you address the ledger called `default`, through the
+//! same grammar match and therefore the same capability — see [`crate::ledger`].
+//!
+//! The last two have no `{ledger}` segment because neither is a ledger's own state:
+//! `ledgers` is the inventory across them and a policy is a property of the host's
+//! configuration.
 //!
 //! # Why `purge` is a resource and not an argument
 //!
@@ -25,12 +33,36 @@
 //! ordinary delete. So the authority difference gets its own IRI, exactly as
 //! `ikigai-store` gives each SPARQL form its own.
 //!
-//! # Capabilities, and the store scopes every action also declares
+//! The same reasoning is why the ledger is a name and not a `ledger=` argument: an
+//! argument is a value, and a value cannot be what a capability binds to.
+//!
+//! # Capabilities: a wildcard is declared, an exact grant is enforced
+//!
+//! The ledger is in the IRI, and the kernel's capability pre-check runs before `invoke`
+//! can read it. So each action declares the **family** — `urn:cap:ledger:write:*`,
+//! meaning "holds some ledger write grant" — and the exact scope for the ledger actually
+//! named is checked here, in `ledger_for`. Declared and enforced are the same scope;
+//! the wildcard is the only form the pre-check can express. `ikigai-store`'s per-graph
+//! write door is shaped identically, and for the same reason.
+//!
+//! ⚠ **The name goes LAST in the token** — `urn:cap:ledger:read:acme`, not
+//! `urn:cap:ledger:acme:read` — because `ikigai-core` matches a wildcard only as a
+//! trailing `*`. There is no infix form, so a parameter that is not last cannot be
+//! declared as a family at all.
+//!
+//! # The store scopes every action also declares, and the boundary that is not there yet
 //!
 //! A sub-request carries the **caller's** capability unchanged — `Invocation::issue` has
 //! no attenuating or elevating form — so a ledger write is reachable only by a caller who
-//! also holds `urn:cap:store:write`. Every action here declares those scopes too. It is
-//! honest, and it is coarser than it should be: see `README.md`.
+//! also holds `urn:cap:store:write`, which is the keys to the whole store. Every action
+//! here declares those scopes too, because an action that enforces a scope it does not
+//! declare makes the manifold over-offer.
+//!
+//! ⚠ **So the ledger capabilities segment the ledger's own doors and nothing else.** A
+//! caller holding `urn:cap:store:read` can query any ledger's graph at
+//! `urn:iki:store:select` without passing through here at all. That is stated plainly in
+//! `README.md` rather than papered over: the module's capability model is real for
+//! everyone who comes through the module, and it is not yet a tenancy boundary.
 //!
 //! # Freshness
 //!
@@ -52,27 +84,84 @@ use ikigai_core::{
 use oxrdf::Graph;
 use sha2::{Digest, Sha256};
 
+use crate::ledger::{Ledger, LedgerGrammar};
 use crate::model::{self, Deferred, Filter, Holder, Item, Status};
 use crate::policy::{OrderingPolicy, Policies};
 use crate::select;
 use crate::sparql::{boolean, datetime, integer, iri_term, literal, StoreClient};
 use crate::vocabulary as v;
 
-/// Reading the ledger. A ledger holds whatever anyone filed, so an unrestricted read is
-/// not free — the same argument `ikigai-store` makes for gating its query face.
-pub const CAP_READ: &str = "urn:cap:ledger:read";
+/// Reading a ledger, as **declared**: the family, meaning "holds some ledger read grant".
+/// A held grant names one ledger — [`Ledger::cap_read`].
+///
+/// A ledger holds whatever anyone filed, so an unrestricted read is not free — the same
+/// argument `ikigai-store` makes for gating its query face, now per partition.
+pub const CAP_READ: &str = "urn:cap:ledger:read:*";
 
-/// The capability every ordinary mutation requires: filing, commenting, closing,
-/// claiming, linking, labelling, deferring, editing.
-pub const CAP_WRITE: &str = "urn:cap:ledger:write";
+/// Every ordinary mutation — filing, commenting, closing, claiming, linking, labelling,
+/// deferring, editing — as declared. A held grant names one ledger:
+/// [`Ledger::cap_write`].
+pub const CAP_WRITE: &str = "urn:cap:ledger:write:*";
 
 /// Removing an item from view. Separate from [`CAP_WRITE`] because a delete takes work
 /// OUT of the ledger, and the everyday grant should not carry it.
-pub const CAP_DELETE: &str = "urn:cap:ledger:delete";
+pub const CAP_DELETE: &str = "urn:cap:ledger:delete:*";
 
 /// Destroying an item's content irreversibly. Separate again, and the narrowest grant in
 /// this module: a tombstone survives a purge, but nothing else does.
-pub const CAP_PURGE: &str = "urn:cap:ledger:purge";
+pub const CAP_PURGE: &str = "urn:cap:ledger:purge:*";
+
+/// What an action needs from the ledger it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Need {
+    Read,
+    Write,
+    Delete,
+    Purge,
+}
+
+impl Need {
+    /// The exact grant for one ledger.
+    fn scope(self, ledger: &Ledger) -> String {
+        match self {
+            Need::Read => ledger.cap_read(),
+            Need::Write => ledger.cap_write(),
+            Need::Delete => ledger.cap_delete(),
+            Need::Purge => ledger.cap_purge(),
+        }
+    }
+
+    /// The family this crate declares for it.
+    fn declared(self) -> &'static str {
+        match self {
+            Need::Read => CAP_READ,
+            Need::Write => CAP_WRITE,
+            Need::Delete => CAP_DELETE,
+            Need::Purge => CAP_PURGE,
+        }
+    }
+}
+
+/// The ledger a request named, once the caller's grant for **that ledger** is checked.
+///
+/// ★ This is the parameterized half of the capability, and it is the reason named
+/// ledgers are a boundary rather than a filter. The kernel's pre-check saw only
+/// [`Need::declared`] — that the caller holds *some* grant under the family — because the
+/// ledger is in the IRI and the check runs before `invoke` can read it. Declared and
+/// enforced name the same scope; only the exactness differs, and the exact half is here.
+fn ledger_for(inv: &Invocation<'_>, need: Need) -> Result<Ledger> {
+    let ledger = Ledger::from_bindings(inv.bindings)?;
+    let scope = need.scope(&ledger);
+    if !inv.capability.allows(&scope) {
+        return Err(Error::Denied(format!(
+            "this capability does not hold `{scope}`. A ledger grant names exactly one \
+             ledger — holding a grant over another ledger satisfies the declared family \
+             `{}` but not this resource, which is the point of naming them",
+            need.declared()
+        )));
+    }
+    Ok(ledger)
+}
 
 /// `text/plain` — the default face, and what "view ASAP" actually needs.
 const PLAIN: &str = "text/plain";
@@ -98,31 +187,31 @@ pub fn space() -> EndpointSpace {
 /// manifest is, not at the first request.
 pub fn space_with_policies(policies: Vec<Arc<dyn OrderingPolicy>>) -> EndpointSpace {
     let policies = Arc::new(Policies::new(policies));
+    // ⚠ **Bind order is resolution order** (`EndpointSpace` takes the first grammar that
+    // matches), and the two ledger-less resources go FIRST. `urn:iki:ledger:policy:next`
+    // would otherwise be read as the `next` resource of a ledger called `policy` — which
+    // is also why `policy` and `ledgers` are in `ledger::RESERVED`. Putting them ahead
+    // makes the tie deterministic instead of alphabetical.
     EndpointSpace::new()
-        .bind(Exact::new("urn:iki:ledger:items"), ItemsEndpoint)
+        .bind(Exact::new("urn:iki:ledger:ledgers"), LedgersEndpoint)
         .bind(
-            UriTemplate::parse("urn:iki:ledger:item:{id}").expect("a constant template"),
-            ItemEndpoint,
-        )
-        .bind(Exact::new("urn:iki:ledger:append"), AppendEndpoint)
-        .bind(Exact::new("urn:iki:ledger:comment"), CommentEndpoint)
-        .bind(Exact::new("urn:iki:ledger:close"), CloseEndpoint)
-        .bind(Exact::new("urn:iki:ledger:reopen"), ReopenEndpoint)
-        .bind(Exact::new("urn:iki:ledger:claim"), ClaimEndpoint)
-        .bind(Exact::new("urn:iki:ledger:defer"), DeferEndpoint)
-        .bind(Exact::new("urn:iki:ledger:link"), LinkEndpoint)
-        .bind(Exact::new("urn:iki:ledger:label"), LabelEndpoint)
-        .bind(Exact::new("urn:iki:ledger:purge"), PurgeEndpoint)
-        .bind(
-            Exact::new("urn:iki:ledger:next"),
-            NextEndpoint {
+            UriTemplate::parse("urn:iki:ledger:policy:{name}").expect("a constant template"),
+            PolicyEndpoint {
                 policies: Arc::clone(&policies),
             },
         )
-        .bind(
-            UriTemplate::parse("urn:iki:ledger:policy:{name}").expect("a constant template"),
-            PolicyEndpoint { policies },
-        )
+        .bind(LedgerGrammar::action("items"), ItemsEndpoint)
+        .bind(LedgerGrammar::with_id("item"), ItemEndpoint)
+        .bind(LedgerGrammar::action("append"), AppendEndpoint)
+        .bind(LedgerGrammar::action("comment"), CommentEndpoint)
+        .bind(LedgerGrammar::action("close"), CloseEndpoint)
+        .bind(LedgerGrammar::action("reopen"), ReopenEndpoint)
+        .bind(LedgerGrammar::action("claim"), ClaimEndpoint)
+        .bind(LedgerGrammar::action("defer"), DeferEndpoint)
+        .bind(LedgerGrammar::action("link"), LinkEndpoint)
+        .bind(LedgerGrammar::action("label"), LabelEndpoint)
+        .bind(LedgerGrammar::action("purge"), PurgeEndpoint)
+        .bind(LedgerGrammar::action("next"), NextEndpoint { policies })
 }
 
 // ------------------------------------------------------------------------- helpers
@@ -241,11 +330,39 @@ fn split_content(content: &str) -> Result<(String, String)> {
     Ok((title, body))
 }
 
-/// Resolve an item reference — `#12`, `12`, an opaque id, or a full IRI — to its IRI, and
-/// fail with a sentence naming what was looked for when there is no such item.
+/// Resolve an item reference — `#12`, `12`, `acme#12`, an opaque id, or a full IRI — to
+/// its IRI, and fail with a sentence naming what was looked for when there is no such
+/// item.
+///
+/// ★ **Every reference resolves inside THIS client's ledger, and a reference to another
+/// one is refused rather than looked up.** That is where the cross-ledger question is
+/// actually settled: a `blocks` edge to an item in another ledger cannot be filed,
+/// because the object cannot be named here. The reasoning is in
+/// [`LinkEndpoint::describe`]; the refusal is here, once, for every endpoint that takes
+/// an item.
 async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<Item> {
+    let here = client.ledger();
     let iri = if reference.starts_with("urn:") {
-        reference.to_string()
+        match Ledger::item_iri(reference) {
+            Some((other, _)) if &other != here => {
+                return Err(Error::InvalidArgument {
+                    name: "item".to_string(),
+                    detail: format!(
+                        "`{reference}` is an item of the ledger `{}`, and this resource is \
+                         `{}`. A ledger is a boundary: an item is read, changed and linked \
+                         within its own ledger, and `ledger:about` is how a reference \
+                         crosses one. Address it at `{}`",
+                        other.name(),
+                        here.name(),
+                        other.prefix()
+                    ),
+                })
+            }
+            Some((_, canonical)) => canonical,
+            // Not a ledger item IRI. Left verbatim so the error can name what was asked
+            // for rather than a guess at what was meant.
+            None => reference.to_string(),
+        }
     } else {
         model::resolve_id(client, reference).await?
     };
@@ -268,11 +385,6 @@ async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<I
     }
 }
 
-/// The `GRAPH <…> { … }` wrapper.
-fn graph_block(body: &str) -> String {
-    format!("GRAPH <{}> {{ {body} }}", v::GRAPH)
-}
-
 /// Several SPARQL operations as ONE update request.
 ///
 /// ★ Not a round-trip optimization (though it is one): a state change that takes three
@@ -291,22 +403,22 @@ fn batch(operations: &[String]) -> String {
 }
 
 /// Remove every value of a property.
-fn retract(item: &str, predicate: &str) -> String {
-    let pattern = graph_block(&format!("<{item}> <{predicate}> ?was"));
+fn retract(client: &StoreClient<'_, '_>, item: &str, predicate: &str) -> String {
+    let pattern = client.in_graph(&format!("<{item}> <{predicate}> ?was"));
     format!("DELETE {{ {pattern} }} WHERE {{ {pattern} }}")
 }
 
 /// Stamp an item as modified, as part of the same update that changed it.
-fn touch(item: &str, now: u64) -> String {
+fn touch(client: &StoreClient<'_, '_>, item: &str, now: u64) -> String {
     format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
-        graph_block(&format!("<{item}> <{}> ?was", v::ext::MODIFIED)),
-        graph_block(&format!(
+        client.in_graph(&format!("<{item}> <{}> ?was", v::ext::MODIFIED)),
+        client.in_graph(&format!(
             "<{item}> <{}> {}",
             v::ext::MODIFIED,
             datetime(now)
         )),
-        graph_block(&format!(
+        client.in_graph(&format!(
             "OPTIONAL {{ <{item}> <{}> ?was }}",
             v::ext::MODIFIED
         ))
@@ -324,7 +436,7 @@ async fn write_comment(
     now: u64,
 ) -> Result<String> {
     let id = mint_id(now, text, author.unwrap_or_default());
-    let comment = format!("{}{id}", v::iri::COMMENT);
+    let comment = client.ledger().comment(&id);
     let mut triples = format!(
         "<{comment}> <{type_}> <{class}> ; <{on}> <{item}> ; <{body}> {text} ; <{created}> {when} .",
         type_ = v::ext::TYPE,
@@ -344,8 +456,8 @@ async fn write_comment(
     }
     client
         .update(&batch(&[
-            format!("INSERT DATA {{ {} }}", graph_block(&triples)),
-            touch(item, now),
+            format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
+            touch(client, item, now),
         ]))
         .await?;
     Ok(comment)
@@ -362,6 +474,26 @@ fn write_scopes(spec: ikigai_core::ActionSpec, own: &str) -> ikigai_core::Action
     spec.requires(own)
         .requires(ikigai_store::CAP_READ)
         .requires(ikigai_store::CAP_WRITE)
+}
+
+/// The `{ledger}` binding every per-ledger resource declares.
+///
+/// ★ Declared as a binding with a DEFAULT, which is exactly what the bare-form sugar is:
+/// the segment may be absent, and absent means `default`. A caller reading only the
+/// contract — the engine, the MCP projection, an agent — can form either spelling from
+/// it, and a catalog probe expands the template with the default rather than a
+/// placeholder.
+fn ledger_arg() -> ArgSpec {
+    ArgSpec::new("ledger")
+        .summary(
+            "Which ledger. Omit the segment entirely (`urn:iki:ledger:append`) for the \
+             ledger called `default` — the same resource under a shorter name, gated by \
+             the same capability. Lowercase letters, digits, `-` and `_`.",
+        )
+        .class(v::ext::XSD_STRING)
+        .default_value(crate::ledger::DEFAULT)
+        .binding()
+        .optional()
 }
 
 /// The `as` ArgSpec every read face declares.
@@ -404,7 +536,7 @@ impl Endpoint for ItemsEndpoint {
         if inv.request.verb != Verb::Source {
             return Err(unsupported("ledger-items", inv.request.verb));
         }
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv)?;
         let filter = Filter {
             status: match inv.inline_str("status").unwrap_or("open") {
@@ -491,6 +623,7 @@ impl Endpoint for ItemsEndpoint {
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)
+                .input(ledger_arg())
                 .input(
                     ArgSpec::new("status")
                         .summary("Which items: open (the default), closed, or all.")
@@ -585,11 +718,21 @@ struct ItemEndpoint;
 #[async_trait]
 impl Endpoint for ItemEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let client = StoreClient::new(inv);
+        let need = match inv.request.verb {
+            Verb::Source | Verb::Exists => Need::Read,
+            Verb::Sink => Need::Write,
+            // ⚠ A Delete needs the delete grant, and an unsupported verb must not be
+            // able to probe a ledger's existence under a read grant — so it is refused
+            // here, before any capability is checked at all.
+            Verb::Delete => Need::Delete,
+            other => return Err(unsupported("ledger-item", other)),
+        };
+        let client = StoreClient::new(inv, ledger_for(inv, need)?);
         let id = inv.bindings.get("id").ok_or_else(|| {
             Error::Endpoint(
-                "no `id` captured: this endpoint is bound to `urn:iki:ledger:item:{id}` and \
-                 was invoked without the template's capture"
+                "no `id` captured: this endpoint is bound to \
+                 `urn:iki:ledger:{ledger}:item:{id}` and was invoked without the grammar's \
+                 capture"
                     .to_string(),
             )
         })?;
@@ -629,24 +772,35 @@ impl Endpoint for ItemEndpoint {
                 let mut updates = Vec::new();
                 if let Ok(content) = inv.inline_str("content") {
                     let (title, body) = split_content(content)?;
-                    updates.push(replace_one(&item.iri, v::ext::TITLE, &literal(&title)));
-                    updates.push(replace_one(&item.iri, v::BODY, &literal(&body)));
+                    updates.push(replace_one(
+                        &client,
+                        &item.iri,
+                        v::ext::TITLE,
+                        &literal(&title),
+                    ));
+                    updates.push(replace_one(&client, &item.iri, v::BODY, &literal(&body)));
                 }
                 if let Ok(priority) = inv.inline_str("priority") {
                     updates.push(replace_one(
+                        &client,
                         &item.iri,
                         v::PRIORITY,
                         &integer(parse_priority(priority)?),
                     ));
                 }
                 if let Ok(revision) = inv.inline_str("revision") {
-                    updates.push(replace_one(&item.iri, v::REVISION, &literal(revision)));
+                    updates.push(replace_one(
+                        &client,
+                        &item.iri,
+                        v::REVISION,
+                        &literal(revision),
+                    ));
                 }
                 if let Ok(about) = inv.inline_str("about") {
                     for target in about.split_whitespace() {
                         updates.push(format!(
                             "INSERT DATA {{ {} }}",
-                            graph_block(&format!(
+                            client.in_graph(&format!(
                                 "<{}> <{}> {} .",
                                 item.iri,
                                 v::ABOUT,
@@ -658,7 +812,7 @@ impl Endpoint for ItemEndpoint {
                 if updates.is_empty() {
                     return Err(Error::MissingArgument("content".to_string()));
                 }
-                updates.push(touch(&item.iri, now));
+                updates.push(touch(&client, &item.iri, now));
                 client.update(&batch(&updates)).await?;
                 Ok(plain(format!("updated {} {}\n", item.short(), item.iri)))
             }
@@ -671,13 +825,12 @@ impl Endpoint for ItemEndpoint {
                     delete_item(&client, &item, &reason, author.as_deref(), now, false).await?;
                 Ok(plain(format!(
                     "deleted {} {}\n  {} quad(s) moved to <{}> and recoverable\n  tombstone: \
-                     {}{}\n",
+                     {}\n",
                     item.short(),
                     item.iri,
                     removed.quads,
-                    v::DELETED_GRAPH,
-                    v::iri::TOMBSTONE,
-                    removed.id
+                    client.ledger().deleted_graph(),
+                    removed.tombstone
                 )))
             }
             other => Err(unsupported("ledger-item", other)),
@@ -707,6 +860,7 @@ impl Endpoint for ItemEndpoint {
             .verb(Verb::Meta)
             .action(read_action(
                 ikigai_core::ActionSpec::new(Verb::Source)
+                    .input(ledger_arg())
                     .summary("The item, its metadata, its links and its comments.")
                     .input(id_input())
                     .input(as_arg())
@@ -715,12 +869,14 @@ impl Endpoint for ItemEndpoint {
             ))
             .action(read_action(
                 ikigai_core::ActionSpec::new(Verb::Exists)
+                    .input(ledger_arg())
                     .summary("Whether the item exists.")
                     .input(id_input())
                     .output(PLAIN),
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg())
                     .summary(
                         "Edit the item: `content` replaces the title and body (first line, \
                          then the rest), `priority` replaces the priority, `about` ADDS a \
@@ -760,9 +916,10 @@ impl Endpoint for ItemEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
+                    .input(ledger_arg())
                     .summary(
                         "Delete the item: its quads and its comments MOVE to \
-                         `urn:iki:ledger:graph:deleted`, and a tombstone stays behind \
+                         `urn:iki:ledger:graph:{ledger}:deleted`, and a tombstone stays behind \
                          carrying the number, the time, the actor, the reason, the quad \
                          count and the sha256 of what was removed. Recoverable. To destroy \
                          the content, `urn:iki:ledger:purge` — a different resource because \
@@ -793,12 +950,12 @@ fn read_action(spec: ikigai_core::ActionSpec) -> ikigai_core::ActionSpec {
 }
 
 /// Replace a single-valued property.
-fn replace_one(item: &str, predicate: &str, value: &str) -> String {
+fn replace_one(client: &StoreClient<'_, '_>, item: &str, predicate: &str, value: &str) -> String {
     format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
-        graph_block(&format!("<{item}> <{predicate}> ?was")),
-        graph_block(&format!("<{item}> <{predicate}> {value}")),
-        graph_block(&format!("OPTIONAL {{ <{item}> <{predicate}> ?was }}"))
+        client.in_graph(&format!("<{item}> <{predicate}> ?was")),
+        client.in_graph(&format!("<{item}> <{predicate}> {value}")),
+        client.in_graph(&format!("OPTIONAL {{ <{item}> <{predicate}> ?was }}"))
     )
 }
 
@@ -814,7 +971,8 @@ fn parse_priority(value: &str) -> Result<i64> {
 
 /// What a delete removed.
 struct Removed {
-    id: String,
+    /// The tombstone's IRI, in the ledger the item was in.
+    tombstone: String,
     quads: usize,
 }
 
@@ -840,7 +998,7 @@ async fn delete_item(
     let rows = client
         .select(&format!(
             "SELECT ?s ?p ?o WHERE {{ {} }} ORDER BY ?s ?p ?o",
-            graph_block(&selector)
+            client.in_graph(&selector)
         ))
         .await?;
 
@@ -873,25 +1031,25 @@ async fn delete_item(
             .update(&format!(
                 "DELETE {{ {live_t} }} WHERE {{ {live_w} }};\n\
                  DELETE {{ {dead_t} }} WHERE {{ {dead_w} }}",
-                live_t = graph_block("?s ?p ?o"),
-                live_w = graph_block(&selector),
-                dead_t = format_args!("GRAPH <{}> {{ ?s ?p ?o }}", v::DELETED_GRAPH),
-                dead_w = format_args!("GRAPH <{}> {{ {selector} }}", v::DELETED_GRAPH),
+                live_t = client.in_graph("?s ?p ?o"),
+                live_w = client.in_graph(&selector),
+                dead_t = client.in_deleted_graph("?s ?p ?o"),
+                dead_w = client.in_deleted_graph(&selector),
             ))
             .await?;
     } else {
         client
             .update(&format!(
                 "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
-                graph_block("?s ?p ?o"),
-                format_args!("GRAPH <{}> {{ ?s ?p ?o }}", v::DELETED_GRAPH),
-                graph_block(&selector)
+                client.in_graph("?s ?p ?o"),
+                client.in_deleted_graph("?s ?p ?o"),
+                client.in_graph(&selector)
             ))
             .await?;
     }
 
     let id = item.iri.rsplit(':').next().unwrap_or("unknown").to_string();
-    let tombstone = format!("{}{id}", v::iri::TOMBSTONE);
+    let tombstone = client.ledger().tombstone(&id);
     let mut triples = format!(
         "<{tombstone}> <{type_}> <{class}> ; <{deleted}> <{item_iri}> ; <{number}> {n} ; \
          <{invalidated}> {when} ; <{recoverable}> {recoverable_value} ; <{quads}> {count} ; \
@@ -926,10 +1084,10 @@ async fn delete_item(
         ));
     }
     client
-        .update(&format!("INSERT DATA {{ {} }}", graph_block(&triples)))
+        .update(&format!("INSERT DATA {{ {} }}", client.in_graph(&triples)))
         .await?;
     Ok(Removed {
-        id,
+        tombstone,
         quads: rows.len(),
     })
 }
@@ -945,12 +1103,12 @@ impl Endpoint for AppendEndpoint {
         if inv.request.verb != Verb::Sink {
             return Err(unsupported("ledger-append", inv.request.verb));
         }
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let (title, body) = split_content(inv.inline_str("content")?)?;
         let author = inv.inline_str("author").ok();
         let id = mint_id(now, &title, author.unwrap_or_default());
-        let iri = format!("{}{id}", v::iri::ITEM);
+        let iri = client.ledger().item(&id);
 
         let mut triples = format!(
             "<{iri}> <{type_}> <{class}> ; <{number}> ?new ; <{title_p}> {title_v} ; \
@@ -1009,23 +1167,29 @@ impl Endpoint for AppendEndpoint {
         // UPDATE — a read-modify-write across two round trips would race two concurrent
         // appends in the same process, and the store's one-writer rule says nothing about
         // that (it excludes other PROCESSES, not other requests).
+        //
+        // ★ The counter is PER LEDGER — a subject in the ledger's own graph — so numbers
+        // restart at 1 in each one, which is why a display number carries the ledger's
+        // name (`acme#12`) as soon as there is more than the default. Sharing one counter
+        // across ledgers would have leaked the other ledgers' activity through the gaps
+        // in the sequence, which is a small thing to leak and an unnecessary one.
+        let counter = client.ledger().counter();
         let update = format!(
             "DELETE {{ {delete} }}\nINSERT {{ {insert} }}\nWHERE {{\n  \
              {{ {{ SELECT ?last WHERE {{ {last_q} }} ORDER BY DESC(?last) LIMIT 1 }}\n    \
              UNION\n    {{ BIND({zero} AS ?last) FILTER NOT EXISTS {{ {any_q} }} }} }}\n  \
              OPTIONAL {{ {old_q} }}\n  BIND(?last + 1 AS ?new)\n}}",
-            delete = graph_block(&format!("<{}> <{}> ?old", v::COUNTER, v::LAST_NUMBER)),
-            insert = graph_block(&format!(
+            delete = client.in_graph(&format!("<{counter}> <{}> ?old", v::LAST_NUMBER)),
+            insert = client.in_graph(&format!(
                 "<{counter}> <{type_}> <{class}> ; <{last}> ?new .\n{triples}",
-                counter = v::COUNTER,
                 type_ = v::ext::TYPE,
                 class = v::COUNTER_CLASS,
                 last = v::LAST_NUMBER,
             )),
-            last_q = graph_block(&format!("<{}> <{}> ?last", v::COUNTER, v::LAST_NUMBER)),
+            last_q = client.in_graph(&format!("<{counter}> <{}> ?last", v::LAST_NUMBER)),
             zero = integer(0),
-            any_q = graph_block(&format!("<{}> <{}> ?any", v::COUNTER, v::LAST_NUMBER)),
-            old_q = graph_block(&format!("<{}> <{}> ?old", v::COUNTER, v::LAST_NUMBER)),
+            any_q = client.in_graph(&format!("<{counter}> <{}> ?any", v::LAST_NUMBER)),
+            old_q = client.in_graph(&format!("<{counter}> <{}> ?old", v::LAST_NUMBER)),
         );
         client.update(&update).await?;
 
@@ -1045,6 +1209,7 @@ impl Endpoint for AppendEndpoint {
     fn describe(&self) -> Description {
         let spec = write_scopes(
             ikigai_core::ActionSpec::new(Verb::Sink)
+                .input(ledger_arg())
                 .summary(
                     "File a new item. The number is allocated from the ledger's counter in \
                      the same statement that writes the item, so two concurrent appends \
@@ -1129,7 +1294,7 @@ impl Endpoint for CommentEndpoint {
         if inv.request.verb != Verb::Sink {
             return Err(unsupported("ledger-comment", inv.request.verb));
         }
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let text = inv.inline_str("content")?;
@@ -1168,6 +1333,7 @@ impl Endpoint for CommentEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg())
                     .summary("Append a stamped, attributed comment.")
                     .input(item_arg("The item to comment on."))
                     .input(
@@ -1198,7 +1364,7 @@ impl Endpoint for CloseEndpoint {
         if inv.request.verb != Verb::Sink {
             return Err(unsupported("ledger-close", inv.request.verb));
         }
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let name = inv.inline_str("reason").unwrap_or("done");
@@ -1215,9 +1381,9 @@ impl Endpoint for CloseEndpoint {
         })?;
         client
             .update(&batch(&[
-                replace_one(&item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
-                replace_one(&item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
-                touch(&item.iri, now),
+                replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
+                replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
+                touch(&client, &item.iri, now),
             ]))
             .await?;
         if let Ok(note) = inv.inline_str("content") {
@@ -1249,6 +1415,7 @@ impl Endpoint for CloseEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg())
                     .summary("Set the status to closed and record why.")
                     .input(item_arg("The item to close."))
                     .input(
@@ -1293,14 +1460,14 @@ impl Endpoint for ReopenEndpoint {
         if inv.request.verb != Verb::Sink {
             return Err(unsupported("ledger-reopen", inv.request.verb));
         }
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         client
             .update(&batch(&[
-                replace_one(&item.iri, v::STATUS, &format!("<{}>", v::OPEN)),
-                retract(&item.iri, v::CLOSED_REASON),
-                touch(&item.iri, now),
+                replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::OPEN)),
+                retract(&client, &item.iri, v::CLOSED_REASON),
+                touch(&client, &item.iri, now),
             ]))
             .await?;
         if let Ok(note) = inv.inline_str("content") {
@@ -1329,6 +1496,7 @@ impl Endpoint for ReopenEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg())
                     .summary("Set the status back to open.")
                     .input(item_arg("The item to reopen."))
                     .input(
@@ -1357,7 +1525,7 @@ struct ClaimEndpoint;
 #[async_trait]
 impl Endpoint for ClaimEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         match inv.request.verb {
@@ -1389,23 +1557,28 @@ impl Endpoint for ClaimEndpoint {
                     }
                 }
                 let mut operations = vec![
-                    replace_one(&item.iri, v::CLAIMED_BY, &literal(&holder)),
-                    replace_one(&item.iri, v::CLAIMED_AT, &datetime(now)),
+                    replace_one(&client, &item.iri, v::CLAIMED_BY, &literal(&holder)),
+                    replace_one(&client, &item.iri, v::CLAIMED_AT, &datetime(now)),
                 ];
                 if let Ok(purpose) = inv.inline_str("purpose") {
-                    operations.push(replace_one(&item.iri, v::PURPOSE, &literal(purpose)));
+                    operations.push(replace_one(
+                        &client,
+                        &item.iri,
+                        v::PURPOSE,
+                        &literal(purpose),
+                    ));
                 }
-                operations.push(touch(&item.iri, now));
+                operations.push(touch(&client, &item.iri, now));
                 client.update(&batch(&operations)).await?;
                 Ok(plain(format!("{} claimed by {holder}\n", item.short())))
             }
             Verb::Delete => {
                 client
                     .update(&batch(&[
-                        retract(&item.iri, v::CLAIMED_BY),
-                        retract(&item.iri, v::CLAIMED_AT),
-                        retract(&item.iri, v::PURPOSE),
-                        touch(&item.iri, now),
+                        retract(&client, &item.iri, v::CLAIMED_BY),
+                        retract(&client, &item.iri, v::CLAIMED_AT),
+                        retract(&client, &item.iri, v::PURPOSE),
+                        touch(&client, &item.iri, now),
                     ]))
                     .await?;
                 if let Ok(note) = inv.inline_str("content") {
@@ -1434,6 +1607,7 @@ impl Endpoint for ClaimEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg())
                     .summary("Claim the item for a holder; refuses if someone else holds it.")
                     .input(item_arg("The item to claim."))
                     .input(
@@ -1452,6 +1626,7 @@ impl Endpoint for ClaimEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
+                    .input(ledger_arg())
                     .summary("Release the claim, whoever holds it.")
                     .input(item_arg("The item to release."))
                     .input(
@@ -1474,19 +1649,19 @@ struct DeferEndpoint;
 #[async_trait]
 impl Endpoint for DeferEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let (update, said) = match inv.request.verb {
             Verb::Sink => (
-                replace_one(&item.iri, v::DEFERRED, &boolean(true)),
+                replace_one(&client, &item.iri, v::DEFERRED, &boolean(true)),
                 "deferred",
             ),
-            Verb::Delete => (retract(&item.iri, v::DEFERRED), "resumed"),
+            Verb::Delete => (retract(&client, &item.iri, v::DEFERRED), "resumed"),
             other => return Err(unsupported("ledger-defer", other)),
         };
         client
-            .update(&batch(&[update, touch(&item.iri, now)]))
+            .update(&batch(&[update, touch(&client, &item.iri, now)]))
             .await?;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
@@ -1513,6 +1688,7 @@ impl Endpoint for DeferEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg())
                     .summary("Mark the item deferred.")
                     .input(item_arg("The item to defer."))
                     .input(
@@ -1526,6 +1702,7 @@ impl Endpoint for DeferEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
+                    .input(ledger_arg())
                     .summary("Undefer: the item becomes eligible for the ready set again.")
                     .input(item_arg("The item to resume."))
                     .input(
@@ -1548,7 +1725,7 @@ struct LinkEndpoint;
 #[async_trait]
 impl Endpoint for LinkEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let from = require_item(&client, inv.inline_str("item")?).await?;
         let to = require_item(&client, inv.inline_str("content")?).await?;
@@ -1577,17 +1754,17 @@ impl Endpoint for LinkEndpoint {
         let triple = format!("<{}> <{predicate}> <{}> .", from.iri, to.iri);
         let (update, said) = match inv.request.verb {
             Verb::Sink => (
-                format!("INSERT DATA {{ {} }}", graph_block(&triple)),
+                format!("INSERT DATA {{ {} }}", client.in_graph(&triple)),
                 "linked",
             ),
             Verb::Delete => (
-                format!("DELETE DATA {{ {} }}", graph_block(&triple)),
+                format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
                 "unlinked",
             ),
             other => return Err(unsupported("ledger-link", other)),
         };
         client
-            .update(&batch(&[update, touch(&from.iri, now)]))
+            .update(&batch(&[update, touch(&client, &from.iri, now)]))
             .await?;
         Ok(plain(format!(
             "{said} {} {name} {}\n",
@@ -1622,6 +1799,7 @@ impl Endpoint for LinkEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg())
                     .summary("Add the edge.")
                     .input(item_arg("The subject item."))
                     .input(
@@ -1638,6 +1816,7 @@ impl Endpoint for LinkEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
+                    .input(ledger_arg())
                     .summary("Remove the edge — how a block cycle is broken.")
                     .input(item_arg("The subject item."))
                     .input(
@@ -1660,7 +1839,7 @@ struct LabelEndpoint;
 #[async_trait]
 impl Endpoint for LabelEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let label = inv.inline_str("content")?.trim();
@@ -1673,17 +1852,17 @@ impl Endpoint for LabelEndpoint {
         let triple = format!("<{}> <{}> {} .", item.iri, v::LABEL, literal(label));
         let (update, said) = match inv.request.verb {
             Verb::Sink => (
-                format!("INSERT DATA {{ {} }}", graph_block(&triple)),
+                format!("INSERT DATA {{ {} }}", client.in_graph(&triple)),
                 "labelled",
             ),
             Verb::Delete => (
-                format!("DELETE DATA {{ {} }}", graph_block(&triple)),
+                format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
                 "unlabelled",
             ),
             other => return Err(unsupported("ledger-label", other)),
         };
         client
-            .update(&batch(&[update, touch(&item.iri, now)]))
+            .update(&batch(&[update, touch(&client, &item.iri, now)]))
             .await?;
         Ok(plain(format!("{said} {} {label}\n", item.short())))
     }
@@ -1703,6 +1882,7 @@ impl Endpoint for LabelEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg())
                     .summary("Add the label.")
                     .input(item_arg("The item to tag."))
                     .input(
@@ -1715,6 +1895,7 @@ impl Endpoint for LabelEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
+                    .input(ledger_arg())
                     .summary("Remove the label.")
                     .input(item_arg("The item to untag."))
                     .input(
@@ -1739,7 +1920,7 @@ impl Endpoint for PurgeEndpoint {
         if inv.request.verb != Verb::Delete {
             return Err(unsupported("ledger-purge", inv.request.verb));
         }
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Purge)?);
         let now = now_ms(inv)?;
         let reference = inv.inline_str("content")?;
         let item = require_item(&client, reference).await?;
@@ -1754,12 +1935,11 @@ impl Endpoint for PurgeEndpoint {
         )
         .await?;
         Ok(plain(format!(
-            "purged {} {}\n  {} quad(s) destroyed, NOT recoverable\n  tombstone: {}{}\n",
+            "purged {} {}\n  {} quad(s) destroyed, NOT recoverable\n  tombstone: {}\n",
             item.short(),
             item.iri,
             removed.quads,
-            v::iri::TOMBSTONE,
-            removed.id
+            removed.tombstone
         )))
     }
 
@@ -1780,6 +1960,7 @@ impl Endpoint for PurgeEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
+                    .input(ledger_arg())
                     .summary("Destroy the item's content, leaving only its tombstone.")
                     .input(
                         ArgSpec::new("content")
@@ -1820,7 +2001,7 @@ impl Endpoint for NextEndpoint {
         if inv.request.verb != Verb::Source {
             return Err(unsupported("ledger-next", inv.request.verb));
         }
-        let client = StoreClient::new(inv);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv)?;
         let now = now_ms(inv)?;
         let name = inv
@@ -1850,7 +2031,7 @@ impl Endpoint for NextEndpoint {
             .and_then(|l| l.parse().ok())
             .unwrap_or(3);
         let set = select::ready(&client, &filter).await?;
-        let selection = select::rank(set, policy.as_ref(), now, limit);
+        let selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
         if want == TURTLE {
             return Ok(Representation::new(
                 ReprType::new(TURTLE).with_param("charset", "utf-8"),
@@ -1880,6 +2061,7 @@ impl Endpoint for NextEndpoint {
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)
+                .input(ledger_arg())
                 .input(
                     ArgSpec::new("policy")
                         .summary(format!(
@@ -2037,6 +2219,149 @@ impl Endpoint for PolicyEndpoint {
                     .output(PLAIN),
             )
     }
+}
+
+// ------------------------------------------------------------------------- ledgers
+
+/// `urn:iki:ledger:ledgers` — which ledgers exist, filtered to the ones this caller may
+/// read.
+///
+/// ★ **Naming ledgers costs discoverability, and this is what buys it back.** The
+/// per-ledger resources are bound by a grammar, and a grammar does not enumerate: a
+/// catalog can say `urn:iki:ledger:{ledger}:items` exists, and cannot say that `acme` and
+/// `bosatsu` are the ledgers it can be asked about. Without this resource a caller who
+/// was not *told* a name could not find one, which would make the partition a secret
+/// rather than a boundary.
+///
+/// ⚠ The listing is filtered by the caller's own read grants, so it says what this
+/// capability may read and not what the store holds. That is the honest answer to the
+/// question asked, and it is also the only one that does not leak a client list to a
+/// caller granted one ledger.
+#[derive(Clone)]
+struct LedgersEndpoint;
+
+#[async_trait]
+impl Endpoint for LedgersEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(unsupported("ledger-ledgers", inv.request.verb));
+        }
+        let want = wanted_face(inv)?;
+        // Scoped to `default` only so the client has a graph to name; every query below
+        // names its own graph variable, so the scoping is inert here.
+        let client = StoreClient::new(inv, Ledger::default());
+        // A ledger exists once something has been filed in it — the counter is what
+        // survives closing and deleting everything, so it, and not the item count, is
+        // what says a ledger is there at all.
+        let rows = client
+            .select(&format!(
+                "SELECT ?g (COUNT(?item) AS ?items) (SUM(IF(?status = <{open}>, 1, 0)) AS ?open) \
+                 WHERE {{\n  GRAPH ?g {{ ?counter <{type_}> <{counter_class}> }}\n  \
+                 OPTIONAL {{ GRAPH ?g {{ ?item <{type_}> <{item_class}> ; <{status}> ?status }} }}\n\
+                 }} GROUP BY ?g ORDER BY ?g",
+                open = v::OPEN,
+                type_ = v::ext::TYPE,
+                counter_class = v::COUNTER_CLASS,
+                item_class = v::ITEM_CLASS,
+                status = v::STATUS,
+            ))
+            .await?;
+
+        let mut found: Vec<(Ledger, i64, i64)> = Vec::new();
+        for row in &rows {
+            let Some(graph) = row.get("g") else { continue };
+            // The graph IRI is the ledger's name spelled one way; a graveyard graph and
+            // anything else the host keeps in this store are not ledgers and are skipped
+            // rather than guessed at.
+            let Some(ledger) = ledger_of_graph(&graph.value) else {
+                continue;
+            };
+            if !inv.capability.allows(&ledger.cap_read()) {
+                continue;
+            }
+            let items = row.get("items").and_then(|b| b.as_i64()).unwrap_or(0);
+            let open = row.get("open").and_then(|b| b.as_i64()).unwrap_or(0);
+            found.push((ledger, items, open));
+        }
+
+        if want == TURTLE {
+            let mut graph = Graph::new();
+            for (ledger, items, open) in &found {
+                let Ok(subject) = oxrdf::NamedNode::new(ledger.prefix().trim_end_matches(':'))
+                else {
+                    continue;
+                };
+                let mut push = |p: &str, o: oxrdf::Term| {
+                    if let Ok(predicate) = oxrdf::NamedNode::new(p) {
+                        graph.insert(&oxrdf::Triple::new(subject.clone(), predicate, o));
+                    }
+                };
+                push(v::ext::TYPE, model::named(v::LEDGER_CLASS));
+                push(v::ext::LABEL, model::plain(ledger.name()));
+                push(v::LEDGER_GRAPH, model::named(&ledger.graph()));
+                push(
+                    v::ITEM_COUNT,
+                    model::typed(&items.to_string(), v::ext::XSD_INTEGER),
+                );
+                push(
+                    v::OPEN_COUNT,
+                    model::typed(&open.to_string(), v::ext::XSD_INTEGER),
+                );
+            }
+            return face(String::new(), Some(graph), want);
+        }
+
+        let mut text = if found.is_empty() {
+            "no ledgers this capability may read\n".to_string()
+        } else {
+            found
+                .iter()
+                .map(|(ledger, items, open)| {
+                    format!(
+                        "{:<24}  {open:>5} open  {items:>5} total  {}\n",
+                        ledger.name(),
+                        ledger.graph()
+                    )
+                })
+                .collect()
+        };
+        text.push_str(&format!("\n{} ledger(s)\n", found.len()));
+        face(text, None, want)
+    }
+
+    fn name(&self) -> &str {
+        "ledger-ledgers"
+    }
+
+    fn describe(&self) -> Description {
+        read_scopes(
+            Description::new("ledger-ledgers")
+                .title("Which ledgers exist")
+                .summary(
+                    "Every ledger this capability may read, with how many items each holds \
+                     and the named graph it lives in. A ledger exists once something has \
+                     been filed in it; there is no create and no destroy, because the \
+                     capability is what makes one real. The listing is FILTERED by the \
+                     caller's own read grants, so it answers what you may read rather than \
+                     what the store holds.",
+                )
+                .verb(Verb::Source)
+                .verb(Verb::Meta)
+                .input(as_arg())
+                .output(PLAIN)
+                .output(TURTLE),
+        )
+    }
+}
+
+/// The ledger a graph IRI names, if it names one at all.
+///
+/// ⚠ A graveyard (`…:graph:{name}:deleted`) is deliberately NOT a ledger: it is one
+/// ledger's quarantine, and listing it would invent a partition that has no resources,
+/// no counter and no capability.
+fn ledger_of_graph(graph: &str) -> Option<Ledger> {
+    let name = graph.strip_prefix(&format!("{}graph:", crate::ledger::PREFIX))?;
+    Ledger::parse(name).ok()
 }
 
 #[cfg(test)]

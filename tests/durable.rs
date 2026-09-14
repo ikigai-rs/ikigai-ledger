@@ -122,7 +122,7 @@ fn quarantined_content_survives_a_restart() {
         let quarantined = select(
             &kernel,
             &format!(
-                "SELECT ?o WHERE {{ GRAPH <urn:iki:ledger:graph:deleted> {{ \
+                "SELECT ?o WHERE {{ GRAPH <urn:iki:ledger:graph:default:deleted> {{ \
                  <{iri}> <http://purl.org/dc/terms/title> ?o }} }}"
             ),
         );

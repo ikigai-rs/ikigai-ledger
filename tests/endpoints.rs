@@ -28,13 +28,16 @@ fn append_then_view_then_query() {
     let item = source(&kernel, "urn:iki:ledger:item:1", &[]);
     assert!(item.contains("It is broken."), "{item}");
     assert!(item.contains("by brian"), "{item}");
-    assert!(item.contains("urn:iki:ledger:item:"), "{item}");
+    // The CANONICAL IRI: an item filed through the bare sugar is still minted in the
+    // ledger the sugar names, because the data has to say which ledger it is in even
+    // when the request did not.
+    assert!(item.contains("urn:iki:ledger:default:item:"), "{item}");
 
     // QUERY: through the store's own face, which is the whole point of not binding a
     // second query surface.
     let answer = select(
         &kernel,
-        "SELECT ?t WHERE { GRAPH <urn:iki:ledger:graph> { \
+        "SELECT ?t WHERE { GRAPH <urn:iki:ledger:graph:default> { \
          ?i <https://ikigai-rs.dev/ns/ledger#priority> 1 ; \
          <http://purl.org/dc/terms/title> ?t } }",
     );
@@ -317,7 +320,7 @@ fn a_delete_leaves_a_tombstone_and_the_content_is_recoverable() {
     // The tombstone says what went, and it is queryable.
     let tombstone = select(
         &kernel,
-        "SELECT ?hash ?quads ?reason ?recoverable WHERE { GRAPH <urn:iki:ledger:graph> { \
+        "SELECT ?hash ?quads ?reason ?recoverable WHERE { GRAPH <urn:iki:ledger:graph:default> { \
          ?t a <https://ikigai-rs.dev/ns/ledger#Tombstone> ; \
          <https://ikigai-rs.dev/ns/sign#contentHash> ?hash ; \
          <https://ikigai-rs.dev/ns/ledger#quadCount> ?quads ; \
@@ -332,18 +335,21 @@ fn a_delete_leaves_a_tombstone_and_the_content_is_recoverable() {
     let quarantined = select(
         &kernel,
         &format!(
-            "SELECT ?p ?o WHERE {{ GRAPH <urn:iki:ledger:graph:deleted> {{ <{iri}> ?p ?o }} }}"
+            "SELECT ?p ?o WHERE {{ GRAPH <urn:iki:ledger:graph:default:deleted> {{ <{iri}> ?p ?o }} }}"
         ),
     );
     assert!(quarantined.contains("Filed by mistake"), "{quarantined}");
     let comments = select(
         &kernel,
         &format!(
-            "SELECT ?c WHERE {{ GRAPH <urn:iki:ledger:graph:deleted> {{ \
+            "SELECT ?c WHERE {{ GRAPH <urn:iki:ledger:graph:default:deleted> {{ \
              ?c <https://ikigai-rs.dev/ns/ledger#onItem> <{iri}> }} }}"
         ),
     );
-    assert!(comments.contains("urn:iki:ledger:comment:"), "{comments}");
+    assert!(
+        comments.contains("urn:iki:ledger:default:comment:"),
+        "{comments}"
+    );
 }
 
 #[test]
@@ -366,7 +372,7 @@ fn a_purge_destroys_the_content_and_keeps_the_evidence() {
 
     let tombstone = select(
         &kernel,
-        "SELECT ?hash ?recoverable ?n WHERE { GRAPH <urn:iki:ledger:graph> { \
+        "SELECT ?hash ?recoverable ?n WHERE { GRAPH <urn:iki:ledger:graph:default> { \
          ?t a <https://ikigai-rs.dev/ns/ledger#Tombstone> ; \
          <https://ikigai-rs.dev/ns/sign#contentHash> ?hash ; \
          <https://ikigai-rs.dev/ns/ledger#number> ?n ; \
@@ -403,7 +409,7 @@ fn deleting_an_item_takes_the_edges_pointing_at_it_too() {
     let dangling = select(
         &kernel,
         &format!(
-            "SELECT ?o WHERE {{ GRAPH <urn:iki:ledger:graph> {{ \
+            "SELECT ?o WHERE {{ GRAPH <urn:iki:ledger:graph:default> {{ \
              <{blocker}> <https://ikigai-rs.dev/ns/ledger#blocks> ?o }} }}"
         ),
     );
@@ -449,7 +455,7 @@ fn a_read_capability_cannot_write_and_a_write_capability_cannot_purge() {
     let kernel = kernel();
     append(&kernel, "An item", &[]);
 
-    let reader = Capability::scoped(["urn:cap:ledger:read", "urn:cap:store:read"]);
+    let reader = Capability::scoped(["urn:cap:ledger:read:default", "urn:cap:store:read"]);
     assert!(try_as(&kernel, &reader, Verb::Source, "urn:iki:ledger:items", &[]).is_ok());
     assert!(matches!(
         try_as(
@@ -463,7 +469,7 @@ fn a_read_capability_cannot_write_and_a_write_capability_cannot_purge() {
     ));
 
     let writer = Capability::scoped([
-        "urn:cap:ledger:write",
+        "urn:cap:ledger:write:default",
         "urn:cap:store:read",
         "urn:cap:store:write",
     ]);
@@ -492,12 +498,12 @@ fn a_read_capability_cannot_write_and_a_write_capability_cannot_purge() {
 }
 
 /// ⚠ The friction this composition really has: a ledger write needs the store's coarse
-/// write scope, and holding `urn:cap:ledger:write` alone is not enough. Asserted rather
+/// write scope, and holding `urn:cap:ledger:write:default` alone is not enough. Asserted rather
 /// than described, so the day it stops being true a test says so.
 #[test]
 fn a_ledger_write_also_needs_the_stores_write_scope() {
     let kernel = kernel();
-    let half = Capability::scoped(["urn:cap:ledger:write", "urn:cap:store:read"]);
+    let half = Capability::scoped(["urn:cap:ledger:write:default", "urn:cap:store:read"]);
     let refused = try_as(
         &kernel,
         &half,
@@ -514,7 +520,7 @@ fn a_ledger_write_also_needs_the_stores_write_scope() {
 fn content_that_looks_like_sparql_is_stored_as_text_not_executed() {
     let kernel = kernel();
     append(&kernel, "A real item", &[]);
-    let hostile = "\" } ; DROP ALL ; INSERT DATA { GRAPH <urn:iki:ledger:graph> { \
+    let hostile = "\" } ; DROP ALL ; INSERT DATA { GRAPH <urn:iki:ledger:graph:default> { \
                    <urn:x> <urn:y> \"pwned";
     append(&kernel, hostile, &[]);
     sink(
@@ -622,23 +628,31 @@ fn an_item_written_around_the_sink_is_reported_not_silently_skipped() {
         &[
             (
                 "content",
-                "<urn:iki:ledger:item:handedited> \
+                "<urn:iki:ledger:default:item:handedited> \
                  <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
                  <https://ikigai-rs.dev/ns/ledger#Item> ; \
                  <http://purl.org/dc/terms/title> \"Edited in by hand\" .",
             ),
-            ("graph", "urn:iki:ledger:graph"),
+            ("graph", "urn:iki:ledger:graph:default"),
         ],
     );
 
     let list = source(&kernel, "urn:iki:ledger:items", &[("status", "all")]);
     assert!(list.contains("Filed properly"), "{list}");
     assert!(list.contains("could not be read"), "{list}");
-    assert!(list.contains("urn:iki:ledger:item:handedited"), "{list}");
+    assert!(
+        list.contains("urn:iki:ledger:default:item:handedited"),
+        "{list}"
+    );
     assert!(list.contains("ledger:number"), "{list}");
 
     // …and asking for it directly says what is wrong with it, which "not found" would not.
-    let failed = try_verb(&kernel, Verb::Source, "urn:iki:ledger:item:handedited", &[]);
+    let failed = try_verb(
+        &kernel,
+        Verb::Source,
+        "urn:iki:ledger:default:item:handedited",
+        &[],
+    );
     let message = failed.expect_err("unreadable").to_string();
     assert!(message.contains("missing"), "{message}");
     assert!(message.contains("ledger:status"), "{message}");
@@ -682,7 +696,7 @@ fn a_multi_operation_update_is_refused_whole() {
         "urn:iki:store:update",
         &[(
             "content",
-            "INSERT DATA { GRAPH <urn:iki:ledger:graph> { \
+            "INSERT DATA { GRAPH <urn:iki:ledger:graph:default> { \
              <urn:example:first> <urn:example:p> \"landed\" } } ;\n\
              THIS IS NOT SPARQL",
         )],

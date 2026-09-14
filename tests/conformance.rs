@@ -24,6 +24,12 @@
 //! - **The reads are cacheable under the store's write threads**, which this module
 //!   inherits rather than declaring a thread of its own; `ledger-policy` is `pure` — it
 //!   reads no state at all, which is why it is the one read here with no thread.
+//! - **Every per-ledger resource is walked once, not twice**, even though each answers to
+//!   two spellings. The bare `urn:iki:ledger:append` and the long
+//!   `urn:iki:ledger:default:append` are one grammar match, so the space holds one entry
+//!   — which matters here because the walk probes per ENTRY: a second binding for the
+//!   same endpoint would fire `ledger-purge` and `ledger-item`'s Delete twice, and the
+//!   second firing would be reported as a failure of a module that did nothing wrong.
 
 mod common;
 
@@ -47,9 +53,13 @@ fn seeded() -> (Kernel, String, String, String) {
 }
 
 fn suite(a: &str, b: &str, c: &str) -> Suite {
-    let item = format!("urn:iki:ledger:item:{a}");
-    let target = format!("urn:iki:ledger:item:{b}");
-    let purge_target = format!("urn:iki:ledger:item:{c}");
+    // The CANONICAL spelling, which is what the store holds. The bare
+    // `urn:iki:ledger:item:{id}` sugar resolves to the same items and is covered in
+    // `tests/endpoints.rs`; the walk uses the long form so a failure here is never
+    // ambiguous about which of the two was at fault.
+    let item = format!("urn:iki:ledger:default:item:{a}");
+    let target = format!("urn:iki:ledger:default:item:{b}");
+    let purge_target = format!("urn:iki:ledger:default:item:{c}");
     let store_owned = [
         "store-select",
         "store-ask",
@@ -148,7 +158,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
     // The store's seven are in the walk too (they are bound in this kernel); this test is
-    // about the thirteen THIS crate binds.
+    // about the fourteen THIS crate binds.
     let mut walked: Vec<&str> = report
         .walked
         .iter()
@@ -167,6 +177,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-item",
             "ledger-items",
             "ledger-label",
+            "ledger-ledgers",
             "ledger-link",
             "ledger-next",
             "ledger-policy",

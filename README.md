@@ -5,25 +5,39 @@ links and claims as RDF in a durable store — with view, query, append, comment
 delete as capability-gated resources, and **`urn:iki:ledger:next`**, which answers *what
 should I do next* as a resource rather than as a sort order.
 
+A ledger is **named**, and the name is part of the IRI: `urn:iki:ledger:acme:append` is a
+different resource from `urn:iki:ledger:bosatsu:append`, backed by a different named graph
+and gated by a different capability. Omit the segment and you address the ledger called
+`default`.
+
 ```text
 $ sink urn:iki:ledger:append <<< "Wire the ledger into the embedded host
 
 It needs urn:iki:store:* bound in the same kernel."
-#1 urn:iki:ledger:item:01m2h5t1z80m3b2f
+#1 urn:iki:ledger:default:item:01m2h5t1z80m3b2f
 
-$ sink urn:iki:ledger:append priority=0 labels=core <<< "Publish ikigai-store 0.2.0"
-#2 urn:iki:ledger:item:01m2h5tcq09zs3r3
+$ sink urn:iki:ledger:append priority=0 labels=core <<< "Publish ikigai-store 0.2.1"
+#2 urn:iki:ledger:default:item:01m2h5tcq09zs3r3
 
 $ sink urn:iki:ledger:link item=#2 type=blocks <<< "#1"
 linked #2 blocks #1
 
 $ source urn:iki:ledger:next
- 1.    #2  open    p0  Publish ikigai-store 0.2.0  [core]
+ 1.    #2  open    p0  Publish ikigai-store 0.2.1  [core]
     p0 — priority 0; last updated 2026-09-15T00:00:04.000Z
 
 policy: priority-recency (weighs priority, recency, number)
 ready: 1   excluded: 1
   not #1: blocked by #2
+
+$ sink urn:iki:ledger:acme:append <<< "Their Q4 migration"
+acme#1 urn:iki:ledger:acme:item:01m2h6b41k0we8r2
+
+$ source urn:iki:ledger:ledgers
+default                       2 open      2 total  urn:iki:ledger:graph:default
+acme                          1 open      1 total  urn:iki:ledger:graph:acme
+
+2 ledger(s)
 ```
 
 ## Why an RDF ledger and not a table
@@ -41,9 +55,9 @@ capability-gated, already conformance-walked. A second query surface would be a 
 thing to secure and a second thing to get wrong.
 
 ```sparql
-# what is open against this file, with who filed it and when
-SELECT ?number ?title ?author WHERE {
-  GRAPH <urn:iki:ledger:graph> {
+# what is open against this file, in every ledger at once, with who filed it
+SELECT ?ledger ?number ?title ?author WHERE {
+  GRAPH ?ledger {
     ?item ledger:about <urn:repo:file:ikigai-cli/src/main.rs> ;
           ledger:status ledger:open ;
           ledger:number ?number ;
@@ -52,6 +66,10 @@ SELECT ?number ?title ?author WHERE {
   }
 }
 ```
+
+Name the graph (`GRAPH <urn:iki:ledger:graph:acme>`) to ask one ledger, or bind it as a
+variable to ask across them — which is the second reason a ledger is a named graph rather
+than a column: partitioning by graph costs nothing when you want the whole picture.
 
 ## Composition: this crate owns no bytes
 
@@ -87,45 +105,110 @@ path. That is fine for one operator today; a second reaches the data **over the 
 
 ## The resources
 
+Everything below takes a `{ledger}` segment, and the segment may be omitted for the ledger
+called `default`. The capability column names the grant for **that** ledger.
+
 | resource | verbs | what it does | capability |
 | --- | --- | --- | --- |
-| `urn:iki:ledger:items` | Source | the list, filtered | `ledger:read` |
-| `urn:iki:ledger:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` |
-| `urn:iki:ledger:append` | Sink | file a new item | `ledger:write` |
-| `urn:iki:ledger:comment` | Sink | append a comment | `ledger:write` |
-| `urn:iki:ledger:close` | Sink | close with a reason | `ledger:write` |
-| `urn:iki:ledger:reopen` | Sink | undo a close | `ledger:write` |
-| `urn:iki:ledger:claim` | Sink · Delete | take it / hand it back | `ledger:write` |
-| `urn:iki:ledger:defer` | Sink · Delete | not now / now again | `ledger:write` |
-| `urn:iki:ledger:link` | Sink · Delete | blocks / parent / related | `ledger:write` |
-| `urn:iki:ledger:label` | Sink · Delete | tag / untag | `ledger:write` |
-| `urn:iki:ledger:purge` | Delete | destroy, leaving a tombstone | `ledger:purge` |
-| `urn:iki:ledger:next` | Source | the ready set, ranked | `ledger:read` |
-| `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | `ledger:read` |
+| `…:{ledger}:items` | Source | the list, filtered | `read:{ledger}` |
+| `…:{ledger}:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` of `{ledger}` |
+| `…:{ledger}:append` | Sink | file a new item | `write:{ledger}` |
+| `…:{ledger}:comment` | Sink | append a comment | `write:{ledger}` |
+| `…:{ledger}:close` | Sink | close with a reason | `write:{ledger}` |
+| `…:{ledger}:reopen` | Sink | undo a close | `write:{ledger}` |
+| `…:{ledger}:claim` | Sink · Delete | take it / hand it back | `write:{ledger}` |
+| `…:{ledger}:defer` | Sink · Delete | not now / now again | `write:{ledger}` |
+| `…:{ledger}:link` | Sink · Delete | blocks / parent / related | `write:{ledger}` |
+| `…:{ledger}:label` | Sink · Delete | tag / untag | `write:{ledger}` |
+| `…:{ledger}:purge` | Delete | destroy, leaving a tombstone | `purge:{ledger}` |
+| `…:{ledger}:next` | Source | the ready set, ranked | `read:{ledger}` |
+| `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
+| `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
+
+The last two carry no ledger segment because neither is a ledger's own state: the
+inventory spans them, and a policy is a property of the host's configuration.
 
 Every read serves `text/plain` (the default — a line per item, greppable) and
 `text/turtle` (the graph). An `as=` this module cannot answer in is **refused**, never
 substituted.
 
+## Ledgers: a name, not a tag and not an argument
+
+A label is *data*; a capability binds to a *resource name*. There is nothing for
+`urn:cap:…` to attach to in "items labelled acme", so enforcement would have to live
+inside the endpoint — declared-but-not-enforced, which this ecosystem refuses everywhere
+else. A tag partition is a **view**; only a name can be a **boundary**. A `ledger=`
+*argument* has the same defect: an argument is a value, the manifold still offers one
+action, and a capability still cannot distinguish one ledger from another.
+
+So a ledger is a segment of the IRI, and underneath it is a named graph:
+
+| thing | IRI |
+| --- | --- |
+| the ledger's resources | `urn:iki:ledger:{name}:*` |
+| its graph | `urn:iki:ledger:graph:{name}` |
+| its graveyard | `urn:iki:ledger:graph:{name}:deleted` |
+| its counter | `urn:iki:ledger:{name}:counter` |
+| its items | `urn:iki:ledger:{name}:item:{id}` |
+| its grants | `urn:cap:ledger:{read,write,delete,purge}:{name}` |
+
+One store, one write lock, one process, many ledgers. There is **no create and no
+destroy**: a ledger exists once something is filed in it, and the capability is what makes
+one real. `urn:iki:ledger:ledgers` lists the ones a caller may read — a grammar does not
+enumerate, so without that resource a partition would be a secret rather than a boundary.
+
+**The short form is an alias, not a second door.** `urn:iki:ledger:append` and
+`urn:iki:ledger:default:append` are the *same grammar match*: one binding, one row in the
+catalog, one capability (`urn:cap:ledger:write:default`). A short form implemented as a
+separate binding would carry a separate capability, and a short form that quietly widens
+authority is the hole named ledgers exist to close. The canonical form is the long one —
+an item filed through the sugar is still minted at `urn:iki:ledger:default:item:{id}`,
+because the data has to say which ledger it is in even when the request did not.
+
+⚠ **The sugar costs a reserved-word list.** `urn:iki:ledger:items` has to mean *the
+default ledger's listing* rather than *a ledger called `items`*, and only one of those can
+be true — so `append`, `items`, `next`, `policy`, `ledgers` and eleven others are not
+available as ledger names, and a name that is refused says which word it must not use.
+Names are otherwise lowercase letters, digits, `-` and `_`; the shape is fixed because the
+name becomes a capability token that is matched **exactly**, and a token must not be
+forgeable by spelling.
+
+**A `blocks` edge cannot cross a ledger.** A link is not a reference: it changes the other
+ledger's ready set, so a caller granted one ledger could make work in another
+unschedulable, and the blocked ledger's `next` would have to either name an item its
+reader cannot see or say "something blocks you" — one bit leaked, and no help to anybody.
+`ledger:about` is the edge that crosses, because it names a resource rather than asserting
+a membership, and nothing computes readiness from it.
+
+**Ordering policies are global**, not per ledger: `urn:iki:ledger:policy:{name}` describes
+code the host registered at boot, which is the same for every ledger it serves. Per-ledger
+policy would be configuration living in data with no capability story, and a host that
+really wants different orderings for different partitions already has the seam — `next`
+takes `policy=`.
+
 ## Identity: the IRI is the name, `#12` is a label on it
 
-An item is `urn:iki:ledger:item:{id}`, where `{id}` is 10 characters of Crockford base32
-over the millisecond clock — so ids sort in filing order — plus 6 derived from a SHA-256 of
-what was filed. The clock half makes a raw IRI listing readable; the digest half is what
-keeps two ledgers merged later from colliding on a shared millisecond.
+An item is `urn:iki:ledger:{ledger}:item:{id}`, where `{id}` is 10 characters of Crockford
+base32 over the millisecond clock — so ids sort in filing order — plus 6 derived from a
+SHA-256 of what was filed. The clock half makes a raw IRI listing readable; the digest half
+is what keeps two ledgers merged later from colliding on a shared millisecond.
 
 `ledger:number` — `#12` — is the human handle, and every endpoint accepts either form,
-because a person types `12` and a machine carries the IRI. It is allocated from
-`urn:iki:ledger:counter` **inside the same SPARQL UPDATE that writes the item**, so two
-concurrent appends in one process cannot take the same number (the store's one-writer rule
-excludes other *processes*, not other *requests* — a read-modify-write across two round
-trips would have raced). The counter is a resource in the graph rather than process state,
-which is why a **restart continues the numbering** and why a delete or a purge can never
-make a number be reused: two pieces of work sharing a name would invalidate every
-reference anybody wrote down.
+because a person types `12` and a machine carries the IRI. It is allocated from the
+ledger's own `urn:iki:ledger:{ledger}:counter` **inside the same SPARQL UPDATE that writes
+the item**, so two concurrent appends in one process cannot take the same number (the
+store's one-writer rule excludes other *processes*, not other *requests* — a
+read-modify-write across two round trips would have raced). The counter is a resource in
+the graph rather than process state, which is why a **restart continues the numbering** and
+why a delete or a purge can never make a number be reused: two pieces of work sharing a
+name would invalidate every reference anybody wrote down.
 
-Numbers are per **store**. There are no projects yet; when there are, this is where that
-decision lands.
+**Numbers are per ledger**, so the display form carries the name once there is more than
+one: `acme#12`, and a bare `#12` in the default ledger. Sharing a counter would have made
+`#12` ambiguous, and would have leaked one ledger's activity to another through the gaps
+in its sequence. A number qualified with a *different* ledger's name is refused rather
+than looked up: `acme#12` and `#12` are different items, and silently resolving the wrong
+one is the worst available answer.
 
 ## Assume an editor got there first
 
@@ -156,9 +239,9 @@ are three different resources, because they are three different authorities:
 
 | act | resource | what survives |
 | --- | --- | --- |
-| **close** | `urn:iki:ledger:close` | everything. The item is still in the graph, still queryable, and stops blocking what it blocked. This is the normal end of work. |
-| **delete** | `Delete urn:iki:ledger:item:{id}` (`urn:cap:ledger:delete`) | the item's quads, its comments and the edges pointing at it MOVE to `urn:iki:ledger:graph:deleted`. Out of every ledger read; still there; recoverable. A **tombstone** stays in the live graph. |
-| **purge** | `urn:iki:ledger:purge` (`urn:cap:ledger:purge`) | only the tombstone. The content is destroyed in both graphs. |
+| **close** | `…:{ledger}:close` | everything. The item is still in the graph, still queryable, and stops blocking what it blocked. This is the normal end of work. |
+| **delete** | `Delete …:{ledger}:item:{id}` (`urn:cap:ledger:delete:{ledger}`) | the item's quads, its comments and the edges pointing at it MOVE to that ledger's own `urn:iki:ledger:graph:{ledger}:deleted`. Out of every ledger read; still there; recoverable. A **tombstone** stays in the live graph. |
+| **purge** | `…:{ledger}:purge` (`urn:cap:ledger:purge:{ledger}`) | only the tombstone. The content is destroyed in both graphs. |
 
 The tombstone carries the number, the time, the actor, the reason, the quad count and the
 `sig:contentHash` (`sha256:…`) of exactly what was removed — so a later claim about what an
@@ -166,6 +249,10 @@ item said is checkable, and a ledger that forgot something still records that it
 hash is over sorted triples with their term kinds and datatypes: there are no blank nodes
 in this graph, so that IS a canonical form and the heavyweight dataset canonicalization
 would buy nothing.
+
+The graveyard is **per ledger**, not shared. One graveyard would be a graph that every
+ledger's deletes write into — one graph, one write scope, and therefore a path across the
+boundary the rest of this is built to keep closed.
 
 **Why purge is a resource and not a `purge=true` argument.** A flag could only be enforced
 at runtime, and an action that enforces a scope it does not declare makes the manifold lie —
@@ -225,25 +312,60 @@ Asserting the base class on every item is what makes that cheap in both directio
 "everything in the ledger" stays one triple pattern and needs no reasoner, and a new level
 is additive: a class IRI and a shape. Nothing in this crate enumerates the subclasses.
 
-⚠ A **level** is not a **layer**. Levels are scope and granularity; layers are permissioned
-per-participant graphs. Conflating them would produce a model where granting someone access
-changes what granularity they see.
+⚠ A **level** is not a **ledger** and neither is a **layer**. Three axes, and collapsing
+any two would be a mistake:
 
-## Capabilities, and what we could not make narrower
+| axis | what it separates | mechanism |
+| --- | --- | --- |
+| **level** | granularity — a decision vs an issue vs a finding | an RDF class and its shape |
+| **ledger** | partition and authority — a project, a client | a named graph and a capability |
+| **layer** | participant — a person, a reviewer, an agent, a peer host | a named graph and a capability |
 
-`urn:cap:ledger:{read,write,delete,purge}` gate this module. A ledger holds whatever anyone
-filed, so an unrestricted read is not free — and delete and purge are separated from the
-everyday write grant because they take work *out* of the record.
+Ledger and layer are the *same mechanism on different axes*, which is a unification and
+not a conflation: this crate builds nothing called a layer, but the primitive one would
+need is here and has been driven by a concrete need rather than a design note. A graph that
+is trying to be both is a graph nobody can reason about, so a host that adds the other axis
+gives it its own graphs rather than overloading these.
 
-⚠ **Every action here also declares the store scopes it transitively needs**, and that is
-the honest part of a coarser story than we would like: a sub-request carries the **caller's**
-capability unchanged (`Invocation::issue` has no attenuating or elevating form), so a ledger
-write is only possible for a caller who also holds `urn:cap:store:write` — which is the keys
-to the whole store, `DROP ALL` included. Declaring it is right (an action that enforces a
-scope it does not declare makes the manifold over-offer); *needing* it is a limitation of
-the composition, not of this model. Fixing it properly needs a way for a module to issue a
-sub-request under an authority it holds rather than one its caller does — a kernel question,
-reported rather than worked around.
+## What is enforced, and where
+
+`urn:cap:ledger:{read,write,delete,purge}:{ledger}` gate this module — **one grant per
+ledger, matched exactly**. Delete and purge are separated from the everyday write grant
+because they take work *out* of the record, and a ledger holds whatever anyone filed, so an
+unrestricted read is not free either.
+
+An action declares the **family** (`urn:cap:ledger:write:*`, "holds some ledger write
+grant") and enforces the exact scope for the ledger the IRI named. The two halves are the
+same scope; only the exactness differs, and the split exists because the kernel's
+capability pre-check runs before an endpoint can read the ledger out of its own target.
+`ikigai-store`'s per-graph write door is shaped identically.
+
+⚠ The name goes **last** in the token — `urn:cap:ledger:read:acme`, never
+`urn:cap:ledger:acme:read` — because `ikigai-core` matches a wildcard only as a trailing
+`*`. There is no infix form, so a parameter that is not last cannot be declared as a family
+at all.
+
+### ⚠ Two things this does not do
+
+**A ledger write still needs `urn:cap:store:write`.** A sub-request carries the *caller's*
+capability unchanged (`Invocation::issue` has no attenuating or elevating form), so a
+caller who may file an item also holds the keys to the whole store, `DROP ALL` included.
+Every action declares that scope, because an action that enforces a scope it does not
+declare makes the manifold over-offer. `ikigai-store` 0.2.1 adds
+`urn:iki:store:graph-update` — an update confined to one named graph under
+`urn:cap:store:write:graph:<iri>` — which is exactly the narrow door this needs; this crate
+does not use it yet, because that version is not on crates.io.
+
+**Reads are not partitioned at all.** `urn:cap:store:read` is the whole dataset — there is
+no per-graph read scope in the store yet — so a caller holding it can query any ledger's
+graph at `urn:iki:store:select` without passing through any resource here.
+
+So: **the ledger capabilities govern everyone who comes through the ledger, and they are
+not yet a tenancy boundary.** That distinction is worth having on its own — an agent's
+grants are the set of ledgers it may work in, which is what makes the manifold say what a
+tool may touch — but it is not the same claim, and `tests/ledgers.rs` pins the gap as a
+test (`a_store_read_grant_still_sees_every_ledger`) so it stops being a sentence someone
+has to remember.
 
 ## The vocabulary
 
@@ -282,8 +404,28 @@ one graph.
 
 ## Status
 
-All thirteen resources are bound, tested, and walked clean by `ikigai-conformance`.
+All fourteen resources are bound, tested, and walked clean by `ikigai-conformance`
+(`AUTHORITY` included — every mutating action declares the scope it enforces).
 
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### 0.2.0 renamed every resource and every grant
+
+Named ledgers moved the IRIs and the capability tokens, so 0.2.0 is a breaking change to
+both:
+
+| 0.1.0 | 0.2.0 |
+| --- | --- |
+| `urn:iki:ledger:append` | unchanged — it now means the ledger `default` |
+| `urn:iki:ledger:item:{id}` | resolves, but items are *minted* at `urn:iki:ledger:default:item:{id}` |
+| `urn:iki:ledger:graph` | `urn:iki:ledger:graph:default` |
+| `urn:iki:ledger:graph:deleted` | `urn:iki:ledger:graph:default:deleted` |
+| `urn:iki:ledger:counter` | `urn:iki:ledger:default:counter` |
+| `urn:cap:ledger:write` | `urn:cap:ledger:write:default` |
+
+There is **no migration code**, deliberately: 0.1.0 was published the day before this
+landed and nothing depends on it, so a host with data rewrites the graph and the subject
+prefix by hand rather than carrying a converter nobody will ever run twice. A host whose
+grants are in a config file changes four tokens.

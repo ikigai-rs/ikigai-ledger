@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ikigai_core::{Error, Result};
 use oxrdf::{Graph, NamedNode, Triple};
 
+use crate::ledger::Ledger;
 use crate::model::{self, Filter, Item};
 use crate::policy::{Candidate, OrderingPolicy, Ranked, SelectionInputs};
 use crate::sparql::{self, StoreClient};
@@ -109,19 +110,21 @@ pub async fn ready(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Read
         .collect();
 
     if let Some(cycle) = find_cycle(&edges) {
+        let ledger = client.ledger();
         return Err(Error::Endpoint(format!(
             "the `blocks` graph has a cycle and the ready set cannot be computed: {}. \
              Refusing rather than answering \"nothing is ready\", which is \
              indistinguishable from a finished backlog. Break it with \
-             `delete urn:iki:ledger:link item=<a> to=<b> type=blocks`.",
+             `delete {} item=<a> content=<b> type=blocks`.",
             cycle
                 .iter()
                 .map(|iri| numbers
                     .get(iri.as_str())
-                    .map(|n| format!("#{n}"))
+                    .map(|n| ledger.number(*n))
                     .unwrap_or_else(|| (*iri).to_string()))
                 .collect::<Vec<_>>()
-                .join(" → ")
+                .join(" → "),
+            ledger.resource("link")
         )));
     }
 
@@ -183,6 +186,9 @@ pub async fn ready(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Read
 /// One run of `next`: which policy, over what, in what order, and what it refused.
 #[derive(Debug, Clone)]
 pub struct Selection {
+    /// The ledger this selection is over. A selection is only true of one ledger, and
+    /// its skolemized IRI carries the name so two ledgers' selections never collide.
+    pub ledger: Ledger,
     /// The policy that ranked it.
     pub policy: String,
     /// What that policy weighs, in order.
@@ -200,7 +206,13 @@ pub struct Selection {
 /// Rank a ready set. `limit` is applied **after** ranking, never before — kata's
 /// `ready --limit N` truncates by recency and then ranks, so "the highest-priority ready
 /// issue" silently means "the best of the N most recently touched".
-pub fn rank(set: ReadySet, policy: &dyn OrderingPolicy, now: u64, limit: usize) -> Selection {
+pub fn rank(
+    ledger: &Ledger,
+    set: ReadySet,
+    policy: &dyn OrderingPolicy,
+    now: u64,
+    limit: usize,
+) -> Selection {
     let candidates: Vec<Candidate> = set
         .ready
         .iter()
@@ -234,6 +246,7 @@ pub fn rank(set: ReadySet, policy: &dyn OrderingPolicy, now: u64, limit: usize) 
         .take(if limit == 0 { usize::MAX } else { limit })
         .collect();
     Selection {
+        ledger: ledger.clone(),
         policy: policy.name().to_string(),
         weighs: policy.weighs().into_iter().map(str::to_string).collect(),
         generated_at: now,
@@ -279,7 +292,7 @@ impl Selection {
             self.excluded.len()
         ));
         for (item, why) in &self.excluded {
-            out.push_str(&format!("  not #{}: {}\n", item.number, why.reason()));
+            out.push_str(&format!("  not {}: {}\n", item.short(), why.reason()));
         }
         out
     }
@@ -287,7 +300,7 @@ impl Selection {
     /// The graph face: the reasoning, skolemized, so "why this one" is queryable and not
     /// just printable.
     pub fn turtle(&self) -> Result<Vec<u8>> {
-        let selection = format!("{}{}", v::iri::SELECTION, self.generated_at);
+        let selection = self.ledger.selection(self.generated_at);
         let subject = NamedNode::new(&selection)
             .map_err(|e| Error::Endpoint(format!("selection IRI: {e}")))?;
         let mut graph = Graph::new();

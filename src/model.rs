@@ -130,9 +130,15 @@ pub struct Item {
 }
 
 impl Item {
-    /// `#12`.
+    /// The display number: `#12` in the default ledger, `acme#12` elsewhere.
+    ///
+    /// ★ Read from the item's own IRI rather than passed in, because the IRI is
+    /// canonical: an item minted in `acme` carries `acme` in its name forever, so its
+    /// display form cannot drift from the ledger it is actually in.
     pub fn short(&self) -> String {
-        format!("#{}", self.number)
+        crate::ledger::Ledger::of_subject(&self.iri)
+            .unwrap_or_default()
+            .number(self.number)
     }
 
     /// One greppable line: number, status, priority, labels, title, holder.
@@ -390,11 +396,6 @@ pub fn turtle(graph: &Graph) -> Result<Vec<u8>> {
 
 // ------------------------------------------------------------------ reading the store
 
-/// The `GRAPH <…> { … }` wrapper every ledger query carries.
-fn in_graph(body: &str) -> String {
-    format!("GRAPH <{}> {{ {body} }}", v::GRAPH)
-}
-
 /// The WHERE-clause fragment a [`Filter`] becomes.
 fn filter_clauses(filter: &Filter) -> Result<String> {
     let mut clauses = String::new();
@@ -487,7 +488,7 @@ pub async fn defects(client: &StoreClient<'_, '_>) -> Result<Vec<(String, Vec<St
         .join(" ");
     let query = format!(
         "SELECT ?item ?missing WHERE {{ {} }} ORDER BY ?item ?missing",
-        in_graph(&format!(
+        client.in_graph(&format!(
             "?item <{type_}> <{class}> .\nVALUES ?missing {{ {values} }}\n\
              FILTER NOT EXISTS {{ ?item ?missing ?any }}",
             type_ = v::ext::TYPE,
@@ -537,7 +538,7 @@ pub async fn load_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?holder ?purpose ?created ?modified WHERE {{ {} }} \
          ORDER BY DESC(?modified) DESC(?number) LIMIT {limit}",
-        in_graph(&format!(
+        client.in_graph(&format!(
             "?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
              <{status}> ?status ;\n  <{created}> ?created ;\n  <{modified}> ?modified .\n\
              OPTIONAL {{ ?item <{type_}> ?kind . FILTER(?kind != <{item_class}>) }}\n\
@@ -578,7 +579,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?holder ?purpose ?created ?modified WHERE {{ {} }} LIMIT 1",
-        in_graph(&format!(
+        client.in_graph(&format!(
             "BIND({subject} AS ?item)\n\
              ?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
              <{status}> ?status ;\n  <{created}> ?created ;\n  <{modified}> ?modified .\n\
@@ -615,14 +616,38 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
     Ok(items.into_iter().next())
 }
 
-/// Resolve `{id}` — either a short number (`12`) or an opaque id (`01k5…`) — to an item
-/// IRI. Both are accepted because a human types `#12` and a machine carries the IRI, and
-/// refusing the human form would make the resource unusable from the REPL.
+/// Resolve `{id}` — a short number (`12`, `#12`, `acme#12`) or an opaque id (`01k5…`) —
+/// to an item IRI **in this client's ledger**. All the forms are accepted because a human
+/// types the number and a machine carries the IRI, and refusing the human form would make
+/// the resource unusable from the REPL.
+///
+/// ⚠ **A number qualified with another ledger's name is refused, not looked up.**
+/// Numbers restart per ledger, so `acme#12` and `#12` are different items; silently
+/// resolving `acme#12` inside the default ledger would act on the wrong one, which is the
+/// worst available answer.
 pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String> {
-    if let Ok(number) = id.trim_start_matches('#').parse::<i64>() {
+    let ledger = client.ledger();
+    let bare = match id.split_once('#') {
+        Some((name, rest)) if !name.is_empty() => {
+            if name != ledger.name() {
+                return Err(Error::InvalidArgument {
+                    name: "item".to_string(),
+                    detail: format!(
+                        "`{id}` names the ledger `{name}`, and this resource is \
+                         `{}`. Numbers restart per ledger, so they are different items — \
+                         address it at `urn:iki:ledger:{name}:…` instead",
+                        ledger.name()
+                    ),
+                });
+            }
+            rest
+        }
+        _ => id.trim_start_matches('#'),
+    };
+    if let Ok(number) = bare.parse::<i64>() {
         let query = format!(
             "SELECT ?item WHERE {{ {} }} LIMIT 1",
-            in_graph(&format!(
+            client.in_graph(&format!(
                 "?item <{}> {} .",
                 v::NUMBER,
                 sparql::integer(number)
@@ -633,16 +658,16 @@ pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String
             .first()
             .and_then(|row| row.get("item"))
             .map(|binding| binding.value.clone())
-            .ok_or_else(|| Error::NotFound(format!("no ledger item #{number}")));
+            .ok_or_else(|| Error::NotFound(format!("no ledger item {}", ledger.number(number))));
     }
-    Ok(format!("{}{id}", v::iri::ITEM))
+    Ok(ledger.item(id))
 }
 
 /// Load an item's comments, oldest first — a log is read forwards.
 pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Comment>> {
     let query = format!(
         "SELECT ?comment ?body ?author ?created WHERE {{ {} }} ORDER BY ?created",
-        in_graph(&format!(
+        client.in_graph(&format!(
             "?comment <{on_item}> {subject} ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
              OPTIONAL {{ ?comment <{author}> ?author }}",
             on_item = v::ON_ITEM,
@@ -684,7 +709,7 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
         .join(" ");
     let query = format!(
         "SELECT ?item ?p ?o WHERE {{ {} }}",
-        in_graph(&format!(
+        client.in_graph(&format!(
             "VALUES ?item {{ {values} }}\nVALUES ?p {{ <{}> <{}> <{}> <{}> <{}> }}\n?item ?p ?o .",
             v::LABEL,
             v::ABOUT,

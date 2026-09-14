@@ -41,21 +41,25 @@
 ledger:Item a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
     rdfs:label "Item" ;
-    rdfs:comment "One unit of work in the ledger. Skolemized as urn:iki:ledger:item:{id}, where {id} is opaque and time-ordered; the human-facing `#12` is ledger:number, a LABEL on that IRI and never the identifier. A prov:Entity because it is a thing that exists over time and is revised, not an occurrent. ★ THE BASE CLASS OF A TYPED FAMILY: every item asserts rdf:type ledger:Item, and an item may ALSO assert a more specific class (rdfs:subClassOf ledger:Item) for its level — a decision record, a review finding, a state transition. Different levels really do have different scope, responsibility and granularity, so they are different CLASSES with their own shapes; what they share is the plumbing — one identity scheme, five verbs, one manifold, one capability model, one set of golden threads, one query surface, one selection surface. The base type is asserted on every item DELIBERATELY, so \"everything in the ledger\" is one triple pattern and needs no reasoner, and a new level is additive: a class IRI, a shape, and a `kind=` argument value. Nothing in this module enumerates the subclasses." .
+    rdfs:comment "One unit of work in the ledger. Skolemized as urn:iki:ledger:{ledger}:item:{id}, where {ledger} names the partition the item belongs to and {id} is opaque and time-ordered; the human-facing `#12` is ledger:number, a LABEL on that IRI and never the identifier. A prov:Entity because it is a thing that exists over time and is revised, not an occurrent. ★ THE BASE CLASS OF A TYPED FAMILY: every item asserts rdf:type ledger:Item, and an item may ALSO assert a more specific class (rdfs:subClassOf ledger:Item) for its level — a decision record, a review finding, a state transition. Different levels really do have different scope, responsibility and granularity, so they are different CLASSES with their own shapes; what they share is the plumbing — one identity scheme, five verbs, one manifold, one capability model, one set of golden threads, one query surface, one selection surface. The base type is asserted on every item DELIBERATELY, so \"everything in the ledger\" is one triple pattern and needs no reasoner, and a new level is additive: a class IRI, a shape, and a `kind=` argument value. Nothing in this module enumerates the subclasses." .
 
 ledger:Comment a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
     rdfs:label "Comment" ;
-    rdfs:comment "A note appended to an item, stamped and attributed, never edited in place. Skolemized as urn:iki:ledger:comment:{id}." .
+    rdfs:comment "A note appended to an item, stamped and attributed, never edited in place. Skolemized as urn:iki:ledger:{ledger}:comment:{id}." .
 
 ledger:Tombstone a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
     rdfs:label "Tombstone" ;
-    rdfs:comment "The evidence a deleted item leaves behind: which number existed, when it was removed, by whom, why, how many quads went, and the sha256 of exactly what went. A ledger that silently forgets is not a ledger, so nothing leaves without one — including a purge, where the tombstone is all that remains. Skolemized as urn:iki:ledger:tombstone:{id}, keeping the deleted item's id so the two are joinable." .
+    rdfs:comment "The evidence a deleted item leaves behind: which number existed, when it was removed, by whom, why, how many quads went, and the sha256 of exactly what went. A ledger that silently forgets is not a ledger, so nothing leaves without one — including a purge, where the tombstone is all that remains. Skolemized as urn:iki:ledger:{ledger}:tombstone:{id}, keeping the deleted item's id so the two are joinable." .
 
 ledger:Counter a rdfs:Class ;
     rdfs:label "Counter" ;
-    rdfs:comment "The short-id allocator, as a resource in the graph rather than as process state: urn:iki:ledger:counter carries ledger:lastNumber. It is read at every append and never decremented, so a restart continues where the last writer stopped and a purge cannot make a number be reused." .
+    rdfs:comment "The short-id allocator, as a resource in the graph rather than as process state: urn:iki:ledger:{ledger}:counter carries ledger:lastNumber. It is read at every append and never decremented, so a restart continues where the last writer stopped and a purge cannot make a number be reused. ★ ONE PER LEDGER, because the counter lives in the ledger's own named graph: numbers restart at 1 in each partition, which is why a display number carries the ledger's name (acme#12) once there is more than the default one." .
+
+ledger:Ledger a rdfs:Class ;
+    rdfs:label "Ledger" ;
+    rdfs:comment "One named partition: its own named graph (urn:iki:ledger:graph:{name}), its own counter, its own capabilities (urn:cap:ledger:{read,write,delete,purge}:{name}), and its own IRI family (urn:iki:ledger:{name}:*). ★ A NAME, NOT A TAG: a label is data and a capability binds to a resource name, so a tag partition can only ever be a view while a named one can be a boundary. The bare urn:iki:ledger:* forms address the ledger called `default` through the same grammar match and therefore the same capability — sugar, not a second door. ⚠ A ledger and a LAYER are the same mechanism (a named graph plus a capability) on different axes — partition vs participant — and a graph that is trying to be both is a graph nobody can reason about." .
 
 ledger:Policy a rdfs:Class ;
     rdfs:label "Policy" ;
@@ -267,6 +271,24 @@ ledger:weighs a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "weighs" ;
     rdfs:comment "One signal this policy uses, in the order it uses them. Meta on the policy resource says the same thing in prose." .
+
+ledger:graph a rdf:Property ;
+    rdfs:domain ledger:Ledger ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "graph" ;
+    rdfs:comment "The named graph a ledger's quads live in. Stated rather than left implicit, so a consumer can go straight to urn:iki:store:select over one ledger without reconstructing the IRI from the name." .
+
+ledger:itemCount a rdf:Property ;
+    rdfs:domain ledger:Ledger ;
+    rdfs:range xsd:integer ;
+    rdfs:label "itemCount" ;
+    rdfs:comment "How many items the ledger holds, open and closed together." .
+
+ledger:openCount a rdf:Property ;
+    rdfs:domain ledger:Ledger ;
+    rdfs:range xsd:integer ;
+    rdfs:label "openCount" ;
+    rdfs:comment "How many of them are still open — the number an operator actually reads." .
 
 ledger:readyCount a rdf:Property ;
     rdfs:domain ledger:Selection ;

@@ -1,4 +1,7 @@
-//! The terms this module writes, and the two graphs it writes them in.
+//! The terms this module writes.
+//!
+//! The *graphs* they are written in are not here: a ledger's graph, graveyard, counter
+//! and subject IRIs all carry its name and are derived from it — see [`crate::ledger`].
 //!
 //! The vocabulary is embedded from [`vocabulary.ttl`](https://github.com/ikigai-rs/ikigai-ledger/blob/main/src/vocabulary.ttl)
 //! so the table and its documentation cannot drift apart — there is only one artifact,
@@ -18,35 +21,15 @@ pub const LEDGER_NS: &str = "https://ikigai-rs.dev/ns/ledger#";
 /// The vocabulary source, embedded.
 pub const VOCABULARY_TTL: &str = include_str!("vocabulary.ttl");
 
-/// The named graph every ledger triple lives in.
+/// IRI prefixes for the skolemized nodes this module mints that belong to NO ledger.
+/// Every emitted node has a stable IRI; nothing here is ever a blank node.
 ///
-/// ★ Not the default graph, deliberately. This store holds whatever the host put in it —
-/// an explanation archive, a materialized database — and a ledger that wrote into the
-/// default graph would make every `SELECT * WHERE { ?s ?p ?o }` in the host a ledger
-/// query too. One graph also makes "everything the ledger knows" a `CONSTRUCT` with one
-/// `GRAPH` clause, and makes a delete a `MOVE` rather than a hunt.
-pub const GRAPH: &str = "urn:iki:ledger:graph";
-
-/// Where a recoverable delete puts an item's quads: out of every ledger query, still in
-/// the store, still recoverable by hand.
-pub const DELETED_GRAPH: &str = "urn:iki:ledger:graph:deleted";
-
-/// The short-id allocator, as a resource in the graph rather than as process state.
-pub const COUNTER: &str = "urn:iki:ledger:counter";
-
-/// IRI prefixes for the skolemized nodes this module mints. Every emitted node has a
-/// stable IRI; nothing here is ever a blank node.
+/// A ledger's own subjects — items, comments, tombstones, its counter and its selections
+/// — are minted by [`Ledger`](crate::Ledger), because they carry its name.
 pub mod iri {
-    /// `urn:iki:ledger:item:{id}`
-    pub const ITEM: &str = "urn:iki:ledger:item:";
-    /// `urn:iki:ledger:comment:{id}`
-    pub const COMMENT: &str = "urn:iki:ledger:comment:";
-    /// `urn:iki:ledger:tombstone:{id}` — the deleted item's own id, so the two join.
-    pub const TOMBSTONE: &str = "urn:iki:ledger:tombstone:";
-    /// `urn:iki:ledger:policy:{name}`
+    /// `urn:iki:ledger:policy:{name}` — a property of the host's configuration rather
+    /// than of any one ledger, which is why it has no ledger segment.
     pub const POLICY: &str = "urn:iki:ledger:policy:";
-    /// `urn:iki:ledger:selection:{stamp}`
-    pub const SELECTION: &str = "urn:iki:ledger:selection:";
 }
 
 /// External terms, reused rather than reinvented.
@@ -109,6 +92,8 @@ term! {
     TOMBSTONE_CLASS => "Tombstone";
     /// `ledger:Counter`
     COUNTER_CLASS => "Counter";
+    /// `ledger:Ledger`
+    LEDGER_CLASS => "Ledger";
     /// `ledger:Policy`
     POLICY_CLASS => "Policy";
     /// `ledger:Selection`
@@ -183,6 +168,12 @@ term! {
     POLICY => "policy";
     /// `ledger:weighs`
     WEIGHS => "weighs";
+    /// `ledger:graph`
+    LEDGER_GRAPH => "graph";
+    /// `ledger:itemCount`
+    ITEM_COUNT => "itemCount";
+    /// `ledger:openCount`
+    OPEN_COUNT => "openCount";
     /// `ledger:readyCount`
     READY_COUNT => "readyCount";
     /// `ledger:excludedCount`

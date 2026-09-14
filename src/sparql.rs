@@ -13,10 +13,21 @@
 //! There is no parameter binding to reach for: `urn:iki:store:update` takes a string.
 //! That is the shape of the composition, and it is reported as friction rather than
 //! worked around.
+//!
+//! ⚠ **This escaper is on its way out and is not the one to copy.** `ikigai-store` 0.2.1
+//! carries `ikigai_store::sparql`, which escapes nothing: it builds
+//! `oxigraph::model::Term`s and lets oxigraph serialize them, because the only correct
+//! escaper for a grammar is the one that owns the grammar. Its query endpoints also take
+//! a `bindings=` argument, where the value never reaches the parser at all. This crate
+//! still carries its own because 0.2.1 is not on crates.io; the hostile-content test
+//! below has already been upstreamed, so the two cannot quietly diverge on what they
+//! promise.
 
 use ikigai_core::ArgRef;
 use ikigai_core::{Error, Invocation, Iri, Request, Result, Verb};
 use std::collections::BTreeMap;
+
+use crate::ledger::Ledger;
 
 /// `urn:iki:store:select` — SPARQL SELECT over the host's durable store.
 pub const STORE_SELECT: &str = "urn:iki:store:select";
@@ -164,20 +175,46 @@ impl Binding {
 pub type Row = BTreeMap<String, Binding>;
 
 /// The store, reached the only way an in-process consumer can reach it: through the
-/// kernel, as sub-requests carrying the caller's own capability.
+/// kernel, as sub-requests carrying the caller's own capability — **scoped to one
+/// ledger's graph**.
 ///
 /// ⚠ **The capability is the caller's, unchanged.** `Invocation::issue` has no
 /// attenuating or elevating form, so a ledger write succeeds only for a caller who also
 /// holds `urn:cap:store:write`. That is why every mutating action in this crate declares
-/// the store scopes as well as its own.
+/// the store scopes as well as its own, and it is the half of the tenancy boundary the
+/// substrate does not yet provide — see `README.md`, "What is enforced, and where".
+///
+/// Every query and every update this client issues names [`Ledger::graph`], so an
+/// endpoint cannot read or write another ledger by forgetting to say which one it meant.
+/// That is a *construction*, not an enforcement: it keeps this module honest, and it is
+/// not a fence against a caller who goes to `urn:iki:store:select` directly.
 pub struct StoreClient<'a, 'i> {
     inv: &'a Invocation<'i>,
+    ledger: Ledger,
 }
 
 impl<'a, 'i> StoreClient<'a, 'i> {
-    /// A client over this invocation's kernel.
-    pub fn new(inv: &'a Invocation<'i>) -> Self {
-        StoreClient { inv }
+    /// A client over this invocation's kernel, reading and writing one ledger's graph.
+    pub fn new(inv: &'a Invocation<'i>, ledger: Ledger) -> Self {
+        StoreClient { inv, ledger }
+    }
+
+    /// The ledger this client is scoped to.
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    /// The `GRAPH <…> { … }` wrapper every query and update of this ledger carries.
+    ///
+    /// One method rather than a free function taking a graph IRI: a caller that has to
+    /// *pass* the graph is a caller that can pass the wrong one.
+    pub fn in_graph(&self, body: &str) -> String {
+        format!("GRAPH <{}> {{ {body} }}", self.ledger.graph())
+    }
+
+    /// The same wrapper over this ledger's graveyard.
+    pub fn in_deleted_graph(&self, body: &str) -> String {
+        format!("GRAPH <{}> {{ {body} }}", self.ledger.deleted_graph())
     }
 
     /// Evaluate a SPARQL SELECT and return its rows.
