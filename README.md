@@ -130,7 +130,11 @@ called `default`. The capability column names the grant for **that** ledger.
 | `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
 
 The last two carry no ledger segment because neither is a ledger's own state: the
-inventory spans them, and a policy is a property of the host's configuration.
+inventory spans them, and a policy is a property of the host's configuration. **The
+capability column is only half the grant** — every row but the last also needs the store's
+per-graph token for that ledger; see "What is enforced, and where" for the whole list.
+`urn:iki:ledger:policy:{name}` is the exception that needs no store grant at all: a policy
+is code the host registered at boot and nothing about it is in the graph.
 
 Every read serves `text/plain` (the default — a line per item, greppable) and
 `text/turtle` (the graph). An `as=` this module cannot answer in is **refused**, never
