@@ -1,123 +1,90 @@
-//! Talking to the store: escaping, the sub-request client, and time.
+//! Talking to the store: the narrow doors, the sub-request client, and time.
 //!
-//! # ★ Escaping is a security boundary here, not a formatting detail
+//! # ★ Every read and every write here goes through ONE graph
 //!
-//! Every write is a SPARQL UPDATE string, and the text going into it is ledger content —
-//! a title, a comment, a label, a name — which is to say, whatever a caller typed. A
-//! comment body of `" } ; DROP ALL ; INSERT DATA { <urn:x> <urn:y> "` interpolated
-//! naively is not a rendering bug, it is the keys to the store, since `urn:iki:store:update`
-//! takes an arbitrary update and this module holds `urn:cap:store:write` by the time it
-//! runs. [`literal`] is the only way text becomes a SPARQL term in this crate, and
-//! `an_injected_literal_cannot_escape_its_quotes` is the test that keeps it that way.
+//! `urn:iki:store:{select,update}` are the broad doors: `urn:cap:store:read` is the whole
+//! dataset and `urn:cap:store:write` is `DROP ALL`. A sub-request carries the *caller's*
+//! capability unchanged ([`Invocation::issue`] has no attenuating form), so a ledger built
+//! on the broad doors would make everyone who may file an item hold the keys to the entire
+//! store — and would leave anyone holding the broad read grant able to query another
+//! ledger's graph directly, going around every capability this crate checks.
 //!
-//! There is no parameter binding to reach for: `urn:iki:store:update` takes a string.
-//! That is the shape of the composition, and it is reported as friction rather than
-//! worked around.
+//! So nothing here resolves a broad door. [`StoreClient`] issues
+//! `urn:iki:store:graph-{select,ask}` and `urn:iki:store:graph-update`, each naming
+//! [`Ledger::graph`] or [`Ledger::deleted_graph`], under grants that name that one graph:
 //!
-//! ⚠ **This escaper is on its way out and is not the one to copy.** `ikigai-store` 0.2.1
-//! carries `ikigai_store::sparql`, which escapes nothing: it builds
-//! `oxigraph::model::Term`s and lets oxigraph serialize them, because the only correct
-//! escaper for a grammar is the one that owns the grammar. Its query endpoints also take
-//! a `bindings=` argument, where the value never reaches the parser at all. This crate
-//! still carries its own because 0.2.1 is not on crates.io; the hostile-content test
-//! below has already been upstreamed, so the two cannot quietly diverge on what they
-//! promise.
+//! | what | door | grant a caller must hold |
+//! | --- | --- | --- |
+//! | read this ledger | `urn:iki:store:graph-select` / `graph-ask` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}` |
+//! | write this ledger | `urn:iki:store:graph-update` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{name}` |
+//! | archive / destroy | `urn:iki:store:graph-update` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{name}:deleted` |
+//!
+//! The one exception is `urn:iki:ledger:ledgers`, which is inherently cross-graph and
+//! resolves the broad `urn:iki:store:select` **only under a root capability** — see
+//! `select_every_graph`, which is the only function in this crate that names a broad
+//! door and says at length why.
+//!
+//! ⚠ **A scoped read sees exactly one graph and a scoped write can affect exactly one.**
+//! `graph=G` is the evaluator's dataset specification — precisely `FROM <G> FROM NAMED
+//! <G>` — so a `GRAPH <other>` block matches nothing rather than erroring, and the same
+//! query through the broad door would answer differently. The consequence this crate
+//! actually meets is in [`crate::endpoints`]'s delete path: **moving quads from the live
+//! graph to the graveyard cannot be one update**, because no single scoped update can
+//! touch both.
+//!
+//! # Escaping is not ours any more, and that is the improvement
+//!
+//! Text going into an update is ledger content — a title, a comment, a label — which is to
+//! say whatever a caller typed. A comment body of
+//! `" } ; DROP ALL ; INSERT DATA { <urn:x> <urn:y> "` interpolated naively is not a
+//! rendering bug; it is an arbitrary update under whatever authority this crate is holding.
+//! The terms re-exported below come from [`ikigai_store::sparql`], which **escapes
+//! nothing**: it builds `oxigraph::model::Term`s and lets oxigraph serialize them, because
+//! the only correct escaper for a grammar is the one that owns the grammar. This crate
+//! wrote its own until 0.2.2 was on crates.io; `an_injected_literal_cannot_escape_its_quotes`
+//! moved with it and is kept here too, over the re-export, so the composition is pinned and
+//! not only the upstream function.
 
 use ikigai_core::ArgRef;
-use ikigai_core::{Error, Invocation, Iri, Request, Result, Verb};
+use ikigai_core::{Error, Invocation, Request, Result, Verb};
+use ikigai_store::sparql::{typed_literal, Literal, NamedNode, Term};
 use std::collections::BTreeMap;
 
 use crate::ledger::Ledger;
 
-/// `urn:iki:store:select` — SPARQL SELECT over the host's durable store.
+/// `urn:iki:store:graph-select` — SELECT confined to one named graph.
+pub const STORE_GRAPH_SELECT: &str = "urn:iki:store:graph-select";
+/// `urn:iki:store:graph-ask` — ASK confined to one named graph.
+pub const STORE_GRAPH_ASK: &str = "urn:iki:store:graph-ask";
+/// `urn:iki:store:graph-update` — SPARQL UPDATE confined to one named graph; the Sink
+/// every write in this crate goes through.
+pub const STORE_GRAPH_UPDATE: &str = "urn:iki:store:graph-update";
+/// `urn:iki:store:select` — the BROAD read door, resolved by exactly one caller in this
+/// crate and only under a root capability. See `select_every_graph`.
 pub const STORE_SELECT: &str = "urn:iki:store:select";
-/// `urn:iki:store:ask`
-pub const STORE_ASK: &str = "urn:iki:store:ask";
-/// `urn:iki:store:update` — SPARQL UPDATE; the Sink every write here goes through.
-pub const STORE_UPDATE: &str = "urn:iki:store:update";
 
-/// A SPARQL string literal, escaped so that no content can leave it.
-///
-/// Escapes the two characters that end a literal or start an escape (`\` and `"`) and
-/// the three whitespace characters that would otherwise end the line, then anything else
-/// below U+0020 as `\uXXXX` — because a raw control character in a query is accepted by
-/// some parsers and rejected by others, and "accepted by some" is how a round-trip
-/// silently loses a byte.
+/// A SPARQL string literal, and an IRI term, an integer, a boolean — built as RDF terms
+/// by the crate that owns the grammar, never escaped by this one.
 ///
 /// ```
-/// use ikigai_ledger::sparql::literal;
+/// use ikigai_ledger::sparql::{iri, literal};
 /// assert_eq!(literal("a \"b\" c"), r#""a \"b\" c""#);
-/// assert_eq!(literal("line\nbreak"), r#""line\nbreak""#);
+/// // ⚠ Validation, not escaping: an IRI has no escape for `>`, so a value carrying one
+/// // is REFUSED. Percent-encoding it here would store a different IRI, silently.
+/// assert!(iri("urn:x:a>b", "about").is_err());
 /// ```
-pub fn literal(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+pub use ikigai_store::sparql::{boolean, integer, iri, literal, term};
 
-/// A SPARQL IRI term, `<…>`, after checking that it really is an IRI.
-///
-/// ⚠ Validation, not escaping: an IRI has no escape for `>`, so a value carrying one
-/// cannot be written at all and must be REFUSED. Truncating or stripping would store a
-/// different IRI than the caller named, silently.
-pub fn iri_term(value: &str, arg: &str) -> Result<String> {
-    let parsed = Iri::parse(value).map_err(|_| Error::InvalidArgument {
-        name: arg.to_string(),
-        detail: format!("`{value}` is not an IRI"),
-    })?;
-    let text = parsed.as_str();
-    if text.chars().any(|c| {
-        c == '<'
-            || c == '>'
-            || c == '"'
-            || c == '{'
-            || c == '}'
-            || c == '|'
-            || c == '^'
-            || c == '`'
-            || c == '\\'
-            || (c as u32) <= 0x20
-    }) {
-        return Err(Error::InvalidArgument {
-            name: arg.to_string(),
-            detail: format!(
-                "`{value}` contains a character an IRI term cannot carry (<>\"{{}}|^`\\ or a \
-                 space). Percent-encode it; it is not escaped here because an IRI has no \
-                 escape and quietly storing a different IRI is worse"
-            ),
-        });
-    }
-    Ok(format!("<{text}>"))
-}
-
-/// An `xsd:integer` term.
-pub fn integer(value: i64) -> String {
-    format!("\"{value}\"^^<http://www.w3.org/2001/XMLSchema#integer>")
-}
-
-/// An `xsd:boolean` term.
-pub fn boolean(value: bool) -> String {
-    format!("\"{value}\"^^<http://www.w3.org/2001/XMLSchema#boolean>")
-}
+/// The `xsd:dateTime` datatype, spelled once.
+const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
 /// An `xsd:dateTime` term from milliseconds since the Unix epoch.
+///
+/// The store has no `datetime` constructor — it has [`typed_literal`], and the lexical
+/// form is this crate's ([`iso8601`], pinned against `ikigai-log`'s) — so this is the
+/// composition of the two rather than a fourth hand-built term.
 pub fn datetime(millis: u64) -> String {
-    format!(
-        "\"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime>",
-        iso8601(millis)
-    )
+    typed_literal(&iso8601(millis), XSD_DATE_TIME, "time").expect("a constant datatype IRI parses")
 }
 
 /// `YYYY-MM-DDTHH:MM:SS.mmmZ` — the same lexical form `ikigai-log` writes, so a ledger
@@ -162,6 +129,14 @@ pub struct Binding {
     pub value: String,
     /// The datatype IRI, when the value is a typed literal.
     pub datatype: Option<String>,
+    /// The language tag, when the value is a language-tagged literal.
+    ///
+    /// ⚠ **Nothing in this crate writes one**, and it is carried anyway because a delete
+    /// reads quads back out and writes them into the graveyard: an out-of-band editor is
+    /// a supported path here (see the README), so a hand-written `"titre"@fr` must
+    /// survive being archived. Dropping the tag would store a *different* statement under
+    /// the name of the one that was deleted.
+    pub lang: Option<String>,
 }
 
 impl Binding {
@@ -169,25 +144,76 @@ impl Binding {
     pub fn as_i64(&self) -> Option<i64> {
         self.value.parse().ok()
     }
+
+    /// This binding as an RDF [`Term`], for writing back out.
+    ///
+    /// ⚠ **A blank node is REFUSED rather than round-tripped.** A bnode label in a result
+    /// row is scoped to that result set, and re-inserting it through `INSERT DATA` mints a
+    /// *fresh* blank node — SPARQL says so explicitly — so archiving one would silently
+    /// substitute a different node for the one being deleted. This module skolemizes and
+    /// writes no blank nodes; one can only be here because something wrote the graph out
+    /// of band, and telling that operator is better than quietly losing the edge.
+    pub fn term(&self, arg: &str) -> Result<Term> {
+        match self.kind.as_str() {
+            "uri" => Ok(Term::from(NamedNode::new(&self.value).map_err(|e| {
+                Error::InvalidArgument {
+                    name: arg.to_string(),
+                    detail: format!(
+                        "the store returned `{}`, which is not an IRI: {e}",
+                        self.value
+                    ),
+                }
+            })?)),
+            "bnode" => Err(Error::Endpoint(format!(
+                "this ledger's graph holds a blank node (`_:{}`), which this crate never \
+                 writes — every node it mints is skolemized. Archiving it would mint a \
+                 different node, because a blank-node label does not survive `INSERT DATA`, \
+                 so the delete is refused instead. Replace it with an IRI (one SPARQL \
+                 UPDATE over this graph) and delete again",
+                self.value
+            ))),
+            _ => match (&self.lang, &self.datatype) {
+                (Some(tag), _) => Ok(Term::from(
+                    Literal::new_language_tagged_literal(&self.value, tag).map_err(|e| {
+                        Error::InvalidArgument {
+                            name: arg.to_string(),
+                            detail: format!("the store returned the language tag `{tag}`: {e}"),
+                        }
+                    })?,
+                )),
+                (None, Some(datatype)) => Ok(Term::from(Literal::new_typed_literal(
+                    &self.value,
+                    NamedNode::new(datatype).map_err(|e| Error::InvalidArgument {
+                        name: arg.to_string(),
+                        detail: format!("the store returned the datatype `{datatype}`: {e}"),
+                    })?,
+                ))),
+                (None, None) => Ok(Term::from(Literal::new_simple_literal(&self.value))),
+            },
+        }
+    }
 }
 
 /// One SPARQL result row: variable name → bound value. Unbound variables are absent.
 pub type Row = BTreeMap<String, Binding>;
 
 /// The store, reached the only way an in-process consumer can reach it: through the
-/// kernel, as sub-requests carrying the caller's own capability — **scoped to one
-/// ledger's graph**.
+/// kernel, as sub-requests carrying the caller's own capability — **through the narrow
+/// doors, naming one ledger's graph**.
 ///
 /// ⚠ **The capability is the caller's, unchanged.** `Invocation::issue` has no
-/// attenuating or elevating form, so a ledger write succeeds only for a caller who also
-/// holds `urn:cap:store:write`. That is why every mutating action in this crate declares
-/// the store scopes as well as its own, and it is the half of the tenancy boundary the
-/// substrate does not yet provide — see `README.md`, "What is enforced, and where".
+/// attenuating or elevating form, so a ledger read succeeds only for a caller who also
+/// holds the store's grant for this ledger's graph, and a write only for one holding the
+/// store's write grant for it. That is why every action in this crate declares the store
+/// scopes as well as its own — and because those scopes now name a *graph*, holding them
+/// for `acme` grants nothing over `bosatsu`. See `README.md`, "What is enforced, and
+/// where".
 ///
-/// Every query and every update this client issues names [`Ledger::graph`], so an
-/// endpoint cannot read or write another ledger by forgetting to say which one it meant.
-/// That is a *construction*, not an enforcement: it keeps this module honest, and it is
-/// not a fence against a caller who goes to `urn:iki:store:select` directly.
+/// Every query and every update this client issues names [`Ledger::graph`] or
+/// [`Ledger::deleted_graph`] **twice over**: in the `GRAPH <…>` block of the SPARQL, and
+/// in the `graph=` argument that fixes the store's dataset. The first keeps this module
+/// honest; the second is the fence, and it holds against a caller who tries to go around
+/// this module entirely.
 pub struct StoreClient<'a, 'i> {
     inv: &'a Invocation<'i>,
     ledger: Ledger,
@@ -217,15 +243,19 @@ impl<'a, 'i> StoreClient<'a, 'i> {
         format!("GRAPH <{}> {{ {body} }}", self.ledger.deleted_graph())
     }
 
-    /// Evaluate a SPARQL SELECT and return its rows.
+    /// Evaluate a SPARQL SELECT over this ledger's graph and return its rows.
     pub async fn select(&self, query: &str) -> Result<Vec<Row>> {
-        let bytes = self.query(STORE_SELECT, query).await?;
+        let bytes = self
+            .query(STORE_GRAPH_SELECT, &self.ledger.graph(), query)
+            .await?;
         parse_results(&bytes)
     }
 
-    /// Evaluate a SPARQL ASK.
+    /// Evaluate a SPARQL ASK over this ledger's graph.
     pub async fn ask(&self, query: &str) -> Result<bool> {
-        let bytes = self.query(STORE_ASK, query).await?;
+        let bytes = self
+            .query(STORE_GRAPH_ASK, &self.ledger.graph(), query)
+            .await?;
         let json: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| Error::Endpoint(format!("the store's ASK answer is not JSON: {e}")))?;
         json.get("boolean")
@@ -233,32 +263,90 @@ impl<'a, 'i> StoreClient<'a, 'i> {
             .ok_or_else(|| Error::Endpoint("the store's ASK answer has no `boolean`".to_string()))
     }
 
-    /// Apply a SPARQL UPDATE. The store cuts `urn:iki:store:update` on success, which is
-    /// what makes every cacheable read of this ledger recompute.
+    /// Apply a SPARQL UPDATE to this ledger's graph. The store cuts
+    /// `urn:iki:store:graph-update` on success, which is what makes every cacheable read
+    /// of this ledger recompute.
     pub async fn update(&self, update: &str) -> Result<()> {
-        let target = Iri::parse(STORE_UPDATE).expect("a constant IRI");
+        self.update_graph(&self.ledger.graph(), update).await
+    }
+
+    /// Apply a SPARQL UPDATE to this ledger's **graveyard**.
+    ///
+    /// ★ A second method rather than a graph argument, for the reason [`in_graph`] gives:
+    /// a caller that has to *pass* the graph is a caller that can pass the wrong one. The
+    /// two graphs are two write grants, and the only code that needs this one is the
+    /// delete path — see `endpoints::delete_item`, which explains why archiving and
+    /// removing cannot be one update.
+    ///
+    /// [`in_graph`]: StoreClient::in_graph
+    pub async fn update_deleted(&self, update: &str) -> Result<()> {
+        self.update_graph(&self.ledger.deleted_graph(), update)
+            .await
+    }
+
+    async fn update_graph(&self, graph: &str, update: &str) -> Result<()> {
+        let target = ikigai_core::Iri::parse(STORE_GRAPH_UPDATE).expect("a constant IRI");
         self.inv
             .issue(
                 Request::new(Verb::Sink, target)
-                    .with_arg("content", ArgRef::Inline(update.as_bytes().to_vec())),
+                    .with_arg("content", ArgRef::Inline(update.as_bytes().to_vec()))
+                    .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec())),
             )
             .await
             .map_err(store_missing)?;
         Ok(())
     }
 
-    async fn query(&self, endpoint: &str, query: &str) -> Result<Vec<u8>> {
-        let target = Iri::parse(endpoint).expect("a constant IRI");
+    async fn query(&self, endpoint: &str, graph: &str, query: &str) -> Result<Vec<u8>> {
+        let target = ikigai_core::Iri::parse(endpoint).expect("a constant IRI");
         let repr = self
             .inv
             .issue(
                 Request::new(Verb::Source, target)
-                    .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec())),
+                    .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()))
+                    .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec())),
             )
             .await
             .map_err(store_missing)?;
         Ok(repr.bytes)
     }
+}
+
+/// One SELECT over **every** graph in the store, through the broad
+/// `urn:iki:store:select` door.
+///
+/// ⚠ **This is the one place in this crate that resolves a broad store door, it has one
+/// caller, and that caller resolves it only when `inv.capability.is_root()`.** Read that
+/// as a precondition, not a convention: under any other capability this issues a request
+/// requiring `urn:cap:store:read` — the whole dataset — from an action that declares only
+/// the per-graph family, which is exactly the over-offer the module recipe forbids.
+///
+/// It exists because `urn:iki:ledger:ledgers` asks a question no scoped read can answer:
+/// *which* graphs are there. A scoped read is confined to a graph the caller must already
+/// have named, so enumeration through it is only possible from a set of names known in
+/// advance — which is what a non-root capability carries (its `urn:cap:ledger:read:{name}`
+/// grants) and what a root capability, by construction, does not. Root holds every grant
+/// there is, so asking the whole store under it widens nothing; it is simply the only way
+/// the question can be answered at all.
+///
+/// The alternative considered and rejected was a shared registry graph listing the
+/// ledgers: every ledger write would then need write access to one graph all the others
+/// write too — the same path across the boundary the per-ledger graveyard exists to
+/// avoid — and its read grant would hand out the whole client list.
+pub(crate) async fn select_every_graph(inv: &Invocation<'_>, query: &str) -> Result<Vec<Row>> {
+    debug_assert!(
+        inv.capability.is_root(),
+        "select_every_graph is root-only: see its doc comment"
+    );
+    let target = ikigai_core::Iri::parse(STORE_SELECT).expect("a constant IRI");
+    let repr = inv
+        .issue(
+            Request::new(Verb::Source, target)
+                .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec())),
+        )
+        .await
+        .map_err(store_missing)?;
+    parse_results(&repr.bytes)
 }
 
 /// Make the one composition failure legible rather than letting it surface as the
@@ -274,8 +362,9 @@ fn store_missing(e: Error) -> Error {
     {
         Error::Endpoint(format!(
             "the ledger is bound but the durable store is not: every ledger read and write \
-             is a sub-request to `urn:iki:store:*`, so this host must also bind \
-             `ikigai_store::space(DurableStore::open(..))` in the same kernel. Underlying \
+             is a sub-request to `urn:iki:store:graph-*`, so this host must also bind \
+             `ikigai_store::space(DurableStore::open(..))` — version 0.2.2 or later, which \
+             is where the graph-scoped doors arrive — in the same kernel. Underlying \
              error: {text}"
         ))
     } else {
@@ -315,12 +404,19 @@ fn parse_results(bytes: &[u8]) -> Result<Vec<Row>> {
                 .get("datatype")
                 .and_then(|d| d.as_str())
                 .map(str::to_string);
+            // The SPARQL results JSON spells it `xml:lang`, and a tagged literal carries
+            // no `datatype` key at all — so the two are alternatives, not both.
+            let lang = value
+                .get("xml:lang")
+                .and_then(|l| l.as_str())
+                .map(str::to_string);
             row.insert(
                 var.clone(),
                 Binding {
                     kind,
                     value: lexical,
                     datatype,
+                    lang,
                 },
             );
         }
@@ -333,8 +429,13 @@ fn parse_results(bytes: &[u8]) -> Result<Vec<Row>> {
 mod tests {
     use super::*;
 
-    /// ★ The test this module exists for. A comment body that tries to close the literal
-    /// and start a new statement must come back as ONE literal, quotes and all.
+    /// ★ The test this module exists for, kept after the escaper moved upstream.
+    ///
+    /// It now pins the **composition** rather than an implementation: whatever
+    /// `ikigai_store::sparql::literal` does, a comment body that tries to close the
+    /// literal and start a new statement comes back as ONE literal, quotes and all. An
+    /// upstream regression fails here, in the crate that would be exploited by it, and not
+    /// only in the crate that would have caused it.
     #[test]
     fn an_injected_literal_cannot_escape_its_quotes() {
         let hostile = r#"" } ; DROP ALL ; INSERT DATA { <urn:x> <urn:y> ""#;
@@ -368,11 +469,11 @@ mod tests {
 
     #[test]
     fn an_iri_with_a_closing_bracket_is_refused_not_mangled() {
-        let refused = iri_term("urn:x:a>b", "about");
+        let refused = iri("urn:x:a>b", "about");
         assert!(refused.is_err(), "got {refused:?}");
         // And an ordinary one passes through untouched.
         assert_eq!(
-            iri_term("urn:repo:file:ikigai-cli/src/main.rs", "about").unwrap(),
+            iri("urn:repo:file:ikigai-cli/src/main.rs", "about").unwrap(),
             "<urn:repo:file:ikigai-cli/src/main.rs>"
         );
     }
@@ -395,5 +496,42 @@ mod tests {
         assert_eq!(rows[0]["s"].value, "urn:iki:ledger:item:abc");
         assert_eq!(rows[0]["n"].as_i64(), Some(3));
         assert_eq!(rows[0]["s"].kind, "uri");
+    }
+
+    /// ★ A delete reads quads out and writes them into the graveyard, so every term
+    /// **this crate never writes** still has to survive the round trip — an out-of-band
+    /// editor is a supported path here. The language tag is the one that would have been
+    /// dropped silently: it arrives as `xml:lang` and not as a datatype.
+    #[test]
+    fn a_language_tag_survives_being_read_back_out() {
+        let json = br#"{"head":{"vars":["o"]},"results":{"bindings":[
+            {"o":{"type":"literal","value":"titre","xml:lang":"fr"}}]}}"#;
+        let rows = parse_results(json).unwrap();
+        assert_eq!(rows[0]["o"].lang.as_deref(), Some("fr"));
+        assert_eq!(rows[0]["o"].term("o").unwrap().to_string(), r#""titre"@fr"#);
+
+        // A typed literal and an IRI keep their exact form too.
+        let json = br#"{"head":{"vars":["o"]},"results":{"bindings":[
+            {"o":{"type":"literal","value":"3",
+                  "datatype":"http://www.w3.org/2001/XMLSchema#integer"}}]}}"#;
+        let rows = parse_results(json).unwrap();
+        assert_eq!(
+            rows[0]["o"].term("o").unwrap().to_string(),
+            r#""3"^^<http://www.w3.org/2001/XMLSchema#integer>"#
+        );
+    }
+
+    /// A blank node cannot be archived without becoming a *different* blank node, so it
+    /// is refused with a sentence rather than silently substituted.
+    #[test]
+    fn a_blank_node_is_refused_rather_than_reminted() {
+        let binding = Binding {
+            kind: "bnode".to_string(),
+            value: "b0".to_string(),
+            datatype: None,
+            lang: None,
+        };
+        let message = binding.term("o").expect_err("a bnode").to_string();
+        assert!(message.contains("skolemized"), "{message}");
     }
 }

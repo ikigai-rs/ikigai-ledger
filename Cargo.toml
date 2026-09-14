@@ -25,15 +25,19 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 
 [dependencies]
 ikigai-core = "0.1.57"
-# The store's namespace and capability constants, named rather than copied: this crate
-# declares `urn:cap:store:{read,write}` on its own actions because a ledger write really
-# does need them (sub-requests carry the CALLER's capability unchanged), and a copied
-# constant would drift from the endpoint that enforces it. 0.2.0 is the true minimum —
-# the version that owns `urn:iki:store:` and is publishable at all. Default features
+# The store's namespace, capability constants and term constructors, named rather than
+# copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
+# because a ledger read and write really do need them (sub-requests carry the CALLER's
+# capability unchanged), and a copied constant would drift from the endpoint that
+# enforces it. **0.2.2 is the true minimum**: it is the version carrying both narrow
+# doors — `urn:iki:store:graph-update` (0.2.1) and `urn:iki:store:graph-{select,ask}`
+# with `CAP_READ_GRAPH` (0.2.2) — and this crate resolves nothing through the broad
+# ones except the one root-only listing query documented in `endpoints::LedgersEndpoint`.
+# `ikigai_store::sparql` (0.2.1) is where the term constructors come from. Default features
 # only: the RocksDB backend is the HOST's choice, taken in the host's manifest, and
 # nothing in this library needs it. ⚠ `"0.2"` is a range `>=0.2.0, <0.3.0`; when the
 # store reaches 0.3 this line must move or this crate freezes out of it.
-ikigai-store = { version = "0.2", default-features = false }
+ikigai-store = { version = "0.2.2", default-features = false }
 
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
@@ -70,7 +74,7 @@ ikigai-conformance = "0.3"
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
 # `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
 # costs an `oxrocksdb-sys` compile once per cache.
-ikigai-store = { version = "0.2", features = ["persistent"] }
+ikigai-store = { version = "0.2.2", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.

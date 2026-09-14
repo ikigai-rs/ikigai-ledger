@@ -26,11 +26,12 @@
 //!
 //! # Composition: this crate owns no bytes
 //!
-//! Every read here is a SPARQL query issued at `urn:iki:store:select` or
-//! `urn:iki:store:construct`, and every write is a SPARQL UPDATE at
-//! `urn:iki:store:update`. [`ikigai-store`] owns the dataset, the RocksDB write lock and
-//! the golden threads; this module owns the *domain* — what an item is, what a delete
-//! leaves behind, and what "ready" means.
+//! Every read here is a SPARQL query issued at `urn:iki:store:graph-select` and every
+//! write is a SPARQL UPDATE at `urn:iki:store:graph-update` — the **narrow** doors, each
+//! naming one ledger's graph. [`ikigai-store`] (**0.2.2 or later**, where those doors
+//! arrive) owns the dataset, the RocksDB write lock and the golden threads; this module
+//! owns the *domain* — what an item is, what a delete leaves behind, and what "ready"
+//! means.
 //!
 //! That is not a layering preference. `DurableStore`'s handle is `pub(crate)` by design
 //! (handing it out forfeits cacheable reads for the life of the store), so an in-process
@@ -38,8 +39,8 @@
 //!
 //! **The consequence a host must know: this module is inert unless a store space is
 //! bound in the same kernel.** A ledger resource resolved without one fails with the
-//! kernel's own "no endpoint" error naming `urn:iki:store:select`, which is legible but
-//! is not this module's error. See `README.md`.
+//! kernel's own "no endpoint" error naming `urn:iki:store:graph-select`, which is legible
+//! but is not this module's error. See `README.md`.
 //!
 //! ```no_run
 //! use ikigai_core::Kernel;
@@ -59,7 +60,7 @@
 //! # Ok(()) }
 //! ```
 //!
-//! # Capabilities: per ledger, and only over this module's own doors
+//! # Capabilities: per ledger, at this module's doors AND at the store's
 //!
 //! `urn:cap:ledger:{read,write,delete,purge}:{ledger}` gate this module's actions — one
 //! grant per ledger, matched exactly. An action declares the family
@@ -68,19 +69,25 @@
 //! for the ledger actually named is enforced inside. So **an agent's grants are the set
 //! of ledgers it may touch**, which is what naming them was for.
 //!
-//! ⚠ Two limits, both real and neither hidden:
+//! A sub-request issued from inside an endpoint carries **the caller's** capability
+//! unchanged — `Invocation::issue` has no attenuating or elevating form — so whatever this
+//! crate asks the store for, the caller must hold. It asks only the narrow doors, so what
+//! the caller must hold names one graph:
 //!
-//! - A sub-request issued from inside an endpoint carries **the caller's** capability
-//!   unchanged — `Invocation::issue` has no attenuating or elevating form — so a ledger
-//!   write is only possible for a caller who ALSO holds `urn:cap:store:write`, which is
-//!   the keys to the whole store. Every action declares the store scopes it transitively
-//!   needs, because an action that enforces a scope it does not declare makes the
-//!   manifold over-offer.
-//! - `urn:cap:store:read` is the whole dataset, so a caller holding it can query another
-//!   ledger's graph at `urn:iki:store:select` without coming through here at all.
+//! - `urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}` to read that ledger;
+//! - `urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}` to write it;
+//! - ⚠ **and `…:graph:{ledger}:deleted` as well, for delete and purge** — the graveyard is
+//!   a second graph, and a scoped write cannot reach across.
 //!
-//! **These capabilities therefore segment the ledger's own resources, and are not yet a
-//! tenancy boundary.** See `README.md`, "What is enforced, and where".
+//! Every action declares the store families it transitively needs, because an action that
+//! enforces a scope it does not declare makes the manifold over-offer. **The result is a
+//! tenancy boundary**: a caller holding only the grants above for one ledger cannot reach
+//! another's graph by any route this crate offers or composes over.
+//!
+//! ⚠ What that does *not* claim: a host that hands a ledger caller the store's broad
+//! `urn:cap:store:read` anyway has given it the whole dataset. Nothing here asks for that
+//! grant, so issuing it is now a configuration decision rather than a requirement — and
+//! both facts are pinned as tests. See `README.md`, "What is enforced, and where".
 //!
 //! # The graphs
 //!

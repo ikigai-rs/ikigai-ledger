@@ -135,3 +135,28 @@ pub fn append_iri(kernel: &Kernel, content: &str, args: &[(&str, &str)]) -> Stri
 pub fn select(kernel: &Kernel, query: &str) -> String {
     source(kernel, "urn:iki:store:select", &[("query", query)])
 }
+
+// ------------------------------------------------------------------- the store grants
+//
+// ★ **Spelled out, never computed.** Every token below could be produced by calling
+// `ikigai_store::cap_read_graph(&Ledger::parse(name)?.graph())` — which is exactly what
+// the code under test does, and a test that derives the same string the same way asserts
+// only that a function is deterministic. These are literals so that a change to how a
+// graph IRI or a grant token is spelled fails here, in the place an operator's config
+// file would have to change too.
+
+/// The store grant a caller needs to READ one ledger's graph.
+pub fn graph_read(ledger: &str) -> String {
+    format!("urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}")
+}
+
+/// The store grant a caller needs to WRITE one ledger's graph.
+pub fn graph_write(ledger: &str) -> String {
+    format!("urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}")
+}
+
+/// The store grant a delete or a purge needs **in addition**: the ledger's graveyard is a
+/// second graph and therefore a second token.
+pub fn graveyard_write(ledger: &str) -> String {
+    format!("urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}:deleted")
+}

@@ -50,29 +50,43 @@
 //! trailing `*`. There is no infix form, so a parameter that is not last cannot be
 //! declared as a family at all.
 //!
-//! # The store scopes every action also declares, and the boundary that is not there yet
+//! # The store scopes every action also declares, and the boundary they now make
 //!
 //! A sub-request carries the **caller's** capability unchanged — `Invocation::issue` has
-//! no attenuating or elevating form — so a ledger write is reachable only by a caller who
-//! also holds `urn:cap:store:write`, which is the keys to the whole store. Every action
-//! here declares those scopes too, because an action that enforces a scope it does not
-//! declare makes the manifold over-offer.
+//! no attenuating or elevating form — so whatever this module asks the store for, the
+//! caller must hold. It asks only the **narrow** doors (`urn:iki:store:graph-{select,ask}`
+//! and `urn:iki:store:graph-update`, each naming one graph), so what a caller must hold is
+//! `urn:cap:store:{read,write}:graph:urn:iki:ledger:graph:{ledger}` — plus the graveyard's
+//! write token for delete and purge. Every action declares those families too, because an
+//! action that enforces a scope it does not declare makes the manifold over-offer.
 //!
-//! ⚠ **So the ledger capabilities segment the ledger's own doors and nothing else.** A
-//! caller holding `urn:cap:store:read` can query any ledger's graph at
-//! `urn:iki:store:select` without passing through here at all. That is stated plainly in
-//! `README.md` rather than papered over: the module's capability model is real for
-//! everyone who comes through the module, and it is not yet a tenancy boundary.
+//! ★ **So the ledger capabilities are a tenancy boundary now**, where before 0.2.0 they
+//! segmented this module's own doors and the store underneath was one open room. The
+//! exception is one resource and it is documented on it: `urn:iki:ledger:ledgers` asks
+//! *which graphs exist*, which no scoped read can answer, and resolves the broad
+//! `urn:iki:store:select` **only under a root capability**.
+//!
+//! ⚠ A host that hands a ledger caller `urn:cap:store:read` anyway has still given it every
+//! graph in the store. Nothing here asks for it, so that is a configuration decision rather
+//! than a requirement — the distinction, and both halves as tests, are in `README.md`.
 //!
 //! # Freshness
 //!
-//! Reads are `.cacheable()` and depend on the store's two write threads. This module cuts
-//! **no thread of its own**, deliberately: the kernel cuts the thread named after a
-//! mutating request's target, so `urn:iki:ledger:append` is already cut on every append —
-//! and every read here depends on `urn:iki:store:update` / `urn:iki:store:load`, which the
-//! store cuts on the write this module actually performs. A ledger-specific thread could
-//! only be cut by resolving `urn:kernel:cut`, which needs `urn:cap:kernel:cut` — authority
-//! this module has no business holding for a name nothing would gain by.
+//! Reads are `.cacheable()` and depend on the store's **three** write threads —
+//! `urn:iki:store:{update,load,graph-update}` — the third because that is the door this
+//! module's own writes go through. This module cuts **no thread of its own**, deliberately:
+//! the kernel cuts the thread named after a mutating request's target, so
+//! `urn:iki:ledger:append` is already cut on every append, and the store cuts its own on the
+//! write this module actually performs. A ledger-specific thread could only be cut by
+//! resolving `urn:kernel:cut`, which needs `urn:cap:kernel:cut` — authority this module has
+//! no business holding for a name nothing would gain by.
+//!
+//! ⚠ The `depends_on` calls in `endpoints::face` are belt-and-braces, not the mechanism: a read here
+//! is derived from a sub-request to the store, whose own representation declares all three
+//! threads, and the kernel unions a dependency's threads into the derived one. Measured
+//! 2026-09-13 — removing the declarations leaves every freshness test green. They stay
+//! because they are correct and because the day a read stops going through the store is the
+//! day they become load-bearing, but do not read that list as what keeps the cache honest.
 
 use std::sync::Arc;
 
@@ -88,7 +102,7 @@ use crate::ledger::{Ledger, LedgerGrammar};
 use crate::model::{self, Deferred, Filter, Holder, Item, Status};
 use crate::policy::{OrderingPolicy, Policies};
 use crate::select;
-use crate::sparql::{boolean, datetime, integer, iri_term, literal, StoreClient};
+use crate::sparql::{self, boolean, datetime, integer, literal, StoreClient};
 use crate::vocabulary as v;
 
 /// Reading a ledger, as **declared**: the family, meaning "holds some ledger read grant".
@@ -237,7 +251,13 @@ fn face(item_text: String, graph: Option<Graph>, want: &str) -> Result<Represent
     Ok(repr
         .cacheable()
         .depends_on(ikigai_store::UPDATE_THREAD)
-        .depends_on(ikigai_store::LOAD_THREAD))
+        .depends_on(ikigai_store::LOAD_THREAD)
+        // ★ The third writing IRI means a third thread, and this crate's own writes all go
+        // through it. Depending only on the first two would leave every cacheable read
+        // here serving stale bytes after every ledger write — silently, on the branch that
+        // looks like success. `a_write_through_the_narrow_door_invalidates_a_cached_read`
+        // in `tests/endpoints.rs` is what keeps it true.
+        .depends_on(ikigai_store::GRAPH_UPDATE_THREAD))
 }
 
 /// Which face was asked for. An `as` this endpoint cannot serve is **refused**, never
@@ -464,16 +484,28 @@ async fn write_comment(
 }
 
 /// The store scopes an action that reads the ledger transitively needs.
+///
+/// ★ **The per-graph family, never the broad `urn:cap:store:read`.** A read here is one
+/// `urn:iki:store:graph-select` naming this ledger's graph, so the grant a caller must
+/// actually hold is `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}` — which grants
+/// nothing over any other ledger. The wildcard is the *declared* half (the kernel's
+/// pre-check runs before an endpoint can read the ledger out of its own IRI); the exact
+/// half is enforced by the store, against the graph named in the sub-request.
 fn read_scopes(desc: Description) -> Description {
-    desc.requires(CAP_READ).requires(ikigai_store::CAP_READ)
+    desc.requires(CAP_READ)
+        .requires(ikigai_store::CAP_READ_GRAPH)
 }
 
 /// The store scopes a mutating action transitively needs. Every write here reads first
 /// (to resolve `#12`, to check the item exists), so both store scopes are real.
+///
+/// ⚠ **Delete and purge need a write grant for a SECOND graph** — the ledger's graveyard
+/// — because archiving is a write into it. One family covers both in the declaration; the
+/// operator's grant list does not, and the README's grant table says so per verb.
 fn write_scopes(spec: ikigai_core::ActionSpec, own: &str) -> ikigai_core::ActionSpec {
     spec.requires(own)
-        .requires(ikigai_store::CAP_READ)
-        .requires(ikigai_store::CAP_WRITE)
+        .requires(ikigai_store::CAP_READ_GRAPH)
+        .requires(ikigai_store::CAP_WRITE_GRAPH)
 }
 
 /// The `{ledger}` binding every per-ledger resource declares.
@@ -804,7 +836,7 @@ impl Endpoint for ItemEndpoint {
                                 "<{}> <{}> {} .",
                                 item.iri,
                                 v::ABOUT,
-                                iri_term(target, "about")?
+                                sparql::iri(target, "about")?
                             ))
                         ));
                     }
@@ -982,6 +1014,42 @@ struct Removed {
 /// deleted: the item's own triples, the triples of its comments, and every edge POINTING
 /// AT it (a `blocks` from another item would otherwise name something that no longer
 /// resolves).
+///
+/// # ★ Why this is TWO updates, and what a reader sees between them
+///
+/// A delete moves quads between the ledger's graph and its graveyard, and **a scoped
+/// update can neither read nor write across graphs** — that is the whole point of the
+/// narrow door (`ikigai_store::confine`). So the single
+/// `DELETE { GRAPH live } INSERT { GRAPH deleted } WHERE { GRAPH live }` this used to be
+/// cannot exist, and the move becomes:
+///
+/// 1. a scoped **read** of the live graph — the quads, which this already did for the
+///    tombstone's hash;
+/// 2. a scoped **write to the graveyard**, inserting them as data;
+/// 3. a scoped **write to the live graph**, removing them and writing the tombstone —
+///    which is still one update, so *that* pair is atomic.
+///
+/// ⚠ **The graveyard is touched first and the live graph last, deliberately: the live
+/// graph is the commit point.** Every read in this crate looks at the live graph and none
+/// looks at the graveyard, so a crash between the two writes leaves the item *entirely
+/// present and undeleted* — with a copy already archived, which no reader can see. A
+/// reader therefore never observes a half-deleted item: it sees the item, whole, until the
+/// moment it does not. The state is re-runnable rather than merely recoverable, because
+/// step 2 is `INSERT DATA` of quads the graph may already hold, and a store is a set.
+/// The other order — remove first, archive second — would put the window on the side where
+/// a crash destroys data, which is not a trade worth making for one fewer sentence here.
+///
+/// The same argument runs backwards for `purge`, which must clear both graphs: it empties
+/// the **graveyard** first and the live graph second, so an interrupted purge leaves the
+/// item fully live and re-purgeable, rather than leaving an orphan in a graveyard that no
+/// resource can name once the live item it belonged to is gone.
+///
+/// ⚠ The one wrinkle the re-runnability does not cover: if the item is *edited* between an
+/// interrupted delete and its retry, the graveyard ends up holding the union of both
+/// versions. The tombstone's hash then describes the retry's quads, which is what was
+/// removed and is the honest answer; the archive is a superset. There is no in-band signal
+/// for it, and inventing one would mean a marker quad written before the move that a
+/// reader of the live graph would have to learn to ignore.
 async fn delete_item(
     client: &StoreClient<'_, '_>,
     item: &Item,
@@ -990,7 +1058,7 @@ async fn delete_item(
     now: u64,
     destroy: bool,
 ) -> Result<Removed> {
-    let subject = iri_term(&item.iri, "item")?;
+    let subject = sparql::iri(&item.iri, "item")?;
     let selector = format!(
         "?s ?p ?o . FILTER(?s = {subject} || ?o = {subject} || EXISTS {{ ?s <{on}> {subject} }})",
         on = v::ON_ITEM,
@@ -1015,6 +1083,11 @@ async fn delete_item(
                 hasher.update(binding.value.as_bytes());
                 hasher.update([0x1f]);
                 hasher.update(binding.datatype.clone().unwrap_or_default().as_bytes());
+                hasher.update([0x1f]);
+                // The language tag is in the canonical form because it is in the term:
+                // `"titre"@fr` and `"titre"` are different statements, and a digest that
+                // could not tell them apart would certify the wrong one.
+                hasher.update(binding.lang.clone().unwrap_or_default().as_bytes());
                 hasher.update([0x1e]);
             }
         }
@@ -1022,30 +1095,46 @@ async fn delete_item(
     }
     let digest = format!("sha256:{:x}", hasher.finalize());
 
+    // Step 1 of 2 — the graveyard, which no read in this crate can see, so nothing a
+    // reader observes has changed yet.
+    //
+    // ⚠ The DELETE TEMPLATE is a quad pattern and may not carry a FILTER — the selector
+    // belongs in the WHERE clause only. Putting it in both is a parse error at the store,
+    // which is at least loud.
     if destroy {
-        // Everything, including anything an earlier recoverable delete quarantined.
-        // ⚠ The DELETE TEMPLATE is a quad pattern and may not carry a FILTER — the
-        // selector belongs in the WHERE clause only. Putting it in both is a parse error
-        // at the store, which is at least loud.
+        // Everything an earlier recoverable delete quarantined.
         client
-            .update(&format!(
-                "DELETE {{ {live_t} }} WHERE {{ {live_w} }};\n\
-                 DELETE {{ {dead_t} }} WHERE {{ {dead_w} }}",
-                live_t = client.in_graph("?s ?p ?o"),
-                live_w = client.in_graph(&selector),
-                dead_t = client.in_deleted_graph("?s ?p ?o"),
-                dead_w = client.in_deleted_graph(&selector),
+            .update_deleted(&format!(
+                "DELETE {{ {} }} WHERE {{ {} }}",
+                client.in_deleted_graph("?s ?p ?o"),
+                client.in_deleted_graph(&selector),
             ))
             .await?;
     } else {
-        client
-            .update(&format!(
-                "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
-                client.in_graph("?s ?p ?o"),
-                client.in_deleted_graph("?s ?p ?o"),
-                client.in_graph(&selector)
-            ))
-            .await?;
+        // The quads read above, as data: a scoped update cannot read the live graph from
+        // inside the graveyard's scope, so the WHERE clause that used to do this work is
+        // now the SELECT that already ran, and the terms go back out through the store's
+        // own serializer rather than through any spelling of our own.
+        if !rows.is_empty() {
+            let mut triples = String::new();
+            for row in &rows {
+                let (Some(s), Some(p), Some(o)) = (row.get("s"), row.get("p"), row.get("o")) else {
+                    continue;
+                };
+                triples.push_str(&format!(
+                    "{} {} {} .\n",
+                    sparql::term(&s.term("s")?),
+                    sparql::term(&p.term("p")?),
+                    sparql::term(&o.term("o")?)
+                ));
+            }
+            client
+                .update_deleted(&format!(
+                    "INSERT DATA {{ {} }}",
+                    client.in_deleted_graph(&triples)
+                ))
+                .await?;
+        }
     }
 
     let id = item.iri.rsplit(':').next().unwrap_or("unknown").to_string();
@@ -1083,8 +1172,24 @@ async fn delete_item(
             literal(author)
         ));
     }
+    // Step 2 of 2 — the live graph, which IS the commit point. Removing the item's quads
+    // and writing its tombstone are one scoped update and therefore atomic: there is no
+    // instant in which the item is gone and unaccounted for.
+    //
+    // ★ The order of the two statements is load-bearing. The selector matches `?o =
+    // <item>`, and the tombstone's `ledger:deletedItem <item>` is exactly that shape — so
+    // an INSERT before the DELETE would write the tombstone and then remove it. SPARQL
+    // runs `;`-separated operations in order, which is what makes this safe and also what
+    // makes it fragile enough to say out loud.
     client
-        .update(&format!("INSERT DATA {{ {} }}", client.in_graph(&triples)))
+        .update(&batch(&[
+            format!(
+                "DELETE {{ {} }} WHERE {{ {} }}",
+                client.in_graph("?s ?p ?o"),
+                client.in_graph(&selector)
+            ),
+            format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
+        ]))
         .await?;
     Ok(Removed {
         tombstone,
@@ -1128,7 +1233,7 @@ impl Endpoint for AppendEndpoint {
             triples.push_str(&format!(
                 "\n<{iri}> <{}> {} .",
                 v::ext::TYPE,
-                iri_term(kind, "kind")?
+                sparql::iri(kind, "kind")?
             ));
         }
         if !body.is_empty() {
@@ -1158,7 +1263,7 @@ impl Endpoint for AppendEndpoint {
             triples.push_str(&format!(
                 "\n<{iri}> <{}> {} .",
                 v::ABOUT,
-                iri_term(target, "about")?
+                sparql::iri(target, "about")?
             ));
         }
 
@@ -2039,7 +2144,8 @@ impl Endpoint for NextEndpoint {
             )
             .cacheable()
             .depends_on(ikigai_store::UPDATE_THREAD)
-            .depends_on(ikigai_store::LOAD_THREAD));
+            .depends_on(ikigai_store::LOAD_THREAD)
+            .depends_on(ikigai_store::GRAPH_UPDATE_THREAD));
         }
         face(selection.plain(), None, want)
     }
@@ -2237,6 +2343,29 @@ impl Endpoint for PolicyEndpoint {
 /// capability may read and not what the store holds. That is the honest answer to the
 /// question asked, and it is also the only one that does not leak a client list to a
 /// caller granted one ledger.
+///
+/// # ★ The only resource here that cannot be answered by one scoped read
+///
+/// Every other read in this crate names its graph and asks the store for that graph alone.
+/// This one asks *which graphs are there* — and a graph-scoped read is confined to a graph
+/// the caller already named, so it can enumerate nothing. Two paths, asking **the same
+/// query**, differing only in which door:
+///
+/// - A **scoped** capability carries the answer already: its `urn:cap:ledger:read:{name}`
+///   grants ARE the set of ledgers it may see. So the candidates come from the capability,
+///   and each one is confirmed with one narrow read of its own graph. A ledger this caller
+///   holds no grant for is never asked about, which is the same answer the old filter gave
+///   and reaches it without the store ever seeing a cross-graph query.
+/// - A **root** capability enumerates nothing — `Capability::scopes()` is `None` for root,
+///   which is what root means — so this resolves the broad `urn:iki:store:select` once.
+///   Root holds every grant there is, so that widens no authority; it is simply the only
+///   way the question can be answered under it. [`crate::sparql::select_every_graph`] is
+///   the one function in this crate that names a broad door, and it says so at length.
+///
+/// ⚠ A ledger granted at THIS module but not at the store **refuses the whole listing**,
+/// naming the token that is missing. A half-granted config is the most likely operator
+/// error now that a ledger needs two tokens per direction, and a ledger quietly left out of
+/// the answer is indistinguishable from one with nothing filed in it.
 #[derive(Clone)]
 struct LedgersEndpoint;
 
@@ -2247,41 +2376,70 @@ impl Endpoint for LedgersEndpoint {
             return Err(unsupported("ledger-ledgers", inv.request.verb));
         }
         let want = wanted_face(inv)?;
-        // Scoped to `default` only so the client has a graph to name; every query below
-        // names its own graph variable, so the scoping is inert here.
-        let client = StoreClient::new(inv, Ledger::default());
         // A ledger exists once something has been filed in it — the counter is what
         // survives closing and deleting everything, so it, and not the item count, is
         // what says a ledger is there at all.
-        let rows = client
-            .select(&format!(
-                "SELECT ?g (COUNT(?item) AS ?items) (SUM(IF(?status = <{open}>, 1, 0)) AS ?open) \
-                 WHERE {{\n  GRAPH ?g {{ ?counter <{type_}> <{counter_class}> }}\n  \
-                 OPTIONAL {{ GRAPH ?g {{ ?item <{type_}> <{item_class}> ; <{status}> ?status }} }}\n\
-                 }} GROUP BY ?g ORDER BY ?g",
-                open = v::OPEN,
-                type_ = v::ext::TYPE,
-                counter_class = v::COUNTER_CLASS,
-                item_class = v::ITEM_CLASS,
-                status = v::STATUS,
-            ))
-            .await?;
+        //
+        // ★ ONE query text for both paths. Through the narrow door the dataset is exactly
+        // `FROM <G> FROM NAMED <G>`, so `GRAPH ?g` can only bind G and the grouping
+        // yields the one row for that ledger — the same shape the broad door yields per
+        // graph. The branch below is about which door, never about what is asked.
+        let query = format!(
+            "SELECT ?g (COUNT(?item) AS ?items) (SUM(IF(?status = <{open}>, 1, 0)) AS ?open) \
+             WHERE {{\n  GRAPH ?g {{ ?counter <{type_}> <{counter_class}> }}\n  \
+             OPTIONAL {{ GRAPH ?g {{ ?item <{type_}> <{item_class}> ; <{status}> ?status }} }}\n\
+             }} GROUP BY ?g ORDER BY ?g",
+            open = v::OPEN,
+            type_ = v::ext::TYPE,
+            counter_class = v::COUNTER_CLASS,
+            item_class = v::ITEM_CLASS,
+            status = v::STATUS,
+        );
 
         let mut found: Vec<(Ledger, i64, i64)> = Vec::new();
-        for row in &rows {
-            let Some(graph) = row.get("g") else { continue };
-            // The graph IRI is the ledger's name spelled one way; a graveyard graph and
-            // anything else the host keeps in this store are not ledgers and are skipped
-            // rather than guessed at.
-            let Some(ledger) = ledger_of_graph(&graph.value) else {
-                continue;
-            };
-            if !inv.capability.allows(&ledger.cap_read()) {
-                continue;
+
+        if inv.capability.is_root() {
+            for row in &crate::sparql::select_every_graph(inv, &query).await? {
+                let Some(graph) = row.get("g") else { continue };
+                // The graph IRI is the ledger's name spelled one way; a graveyard graph
+                // and anything else the host keeps in this store are not ledgers and are
+                // skipped rather than guessed at.
+                let Some(ledger) = ledger_of_graph(&graph.value) else {
+                    continue;
+                };
+                found.push((ledger, count(row, "items"), count(row, "open")));
             }
-            let items = row.get("items").and_then(|b| b.as_i64()).unwrap_or(0);
-            let open = row.get("open").and_then(|b| b.as_i64()).unwrap_or(0);
-            found.push((ledger, items, open));
+        } else {
+            for ledger in granted_ledgers(inv) {
+                // ⚠ **A half-granted ledger stops the listing rather than thinning it.**
+                // Two tokens per ledger per direction is the shape an operator will get
+                // half right, and a ledger left out of the answer is indistinguishable
+                // from one with nothing filed in it — a wrong answer that looks right.
+                // The alternative considered was a warning line beside the results, and it
+                // was rejected because `as=text/turtle` has nowhere to put one without
+                // inventing a class for "a ledger you cannot see", so the two faces would
+                // have disagreed about the same question. This is a host misconfiguration
+                // with a mechanical fix, and the message names the exact token.
+                let scope = ikigai_store::cap_read_graph(&ledger.graph());
+                if !inv.capability.allows(&scope) {
+                    return Err(Error::Denied(format!(
+                        "this capability holds `{}` but not `{scope}`, so the ledger `{}` can \
+                         be addressed here and not read in the store, and this listing would \
+                         have to omit it — which is indistinguishable from an empty ledger. \
+                         Grant the store scope too, or drop the ledger scope: a ledger needs \
+                         both halves, and delete and purge need `{}` as well",
+                        ledger.cap_read(),
+                        ledger.name(),
+                        ikigai_store::cap_write_graph(&ledger.deleted_graph()),
+                    )));
+                }
+                let client = StoreClient::new(inv, ledger.clone());
+                // At most one row: the scoped dataset holds one graph.
+                if let Some(row) = client.select(&query).await?.first() {
+                    found.push((ledger, count(row, "items"), count(row, "open")));
+                }
+            }
+            found.sort_by(|a, b| a.0.name().cmp(b.0.name()));
         }
 
         if want == TURTLE {
@@ -2352,6 +2510,38 @@ impl Endpoint for LedgersEndpoint {
                 .output(TURTLE),
         )
     }
+}
+
+/// An aggregate column, or zero. An aggregate over no solutions is unbound rather than 0.
+fn count(row: &crate::sparql::Row, var: &str) -> i64 {
+    row.get(var).and_then(|b| b.as_i64()).unwrap_or(0)
+}
+
+/// The ledgers a non-root capability names in its own read grants, in name order.
+///
+/// ★ **The grant list IS the candidate list**, and that is not a shortcut — it is the
+/// same answer `urn:iki:ledger:ledgers` has always given (it filtered a store-wide query
+/// by exactly this predicate), reached without asking the store a question that crosses
+/// graphs. A ledger with no grant was never going to be listed.
+///
+/// ⚠ A **family** grant (`urn:cap:ledger:read:*`) enumerates nothing and is skipped: a
+/// wildcard says what may be reached, not what exists, and guessing names from it is not
+/// a thing this can do. A host granting the family and nothing else gets an empty listing
+/// — which is why the family is a *declaration* form in this ecosystem and not a grant
+/// anyone should hold.
+fn granted_ledgers(inv: &Invocation<'_>) -> Vec<Ledger> {
+    let Some(scopes) = inv.capability.scopes() else {
+        return Vec::new();
+    };
+    let prefix = format!("{}:", CAP_READ.trim_end_matches('*').trim_end_matches(':'));
+    let mut ledgers: Vec<Ledger> = scopes
+        .iter()
+        .filter_map(|scope| scope.strip_prefix(&prefix))
+        .filter_map(|name| Ledger::parse(name).ok())
+        .collect();
+    ledgers.sort_by(|a, b| a.name().cmp(b.name()));
+    ledgers.dedup_by(|a, b| a.name() == b.name());
+    ledgers
 }
 
 /// The ledger a graph IRI names, if it names one at all.
