@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-ledger"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -8,7 +8,7 @@ repository = "https://github.com/ikigai-rs/ikigai-ledger"
 homepage = "https://github.com/ikigai-rs/ikigai-ledger"
 keywords = ["ikigai", "roc", "issues", "rdf", "ledger"]
 categories = ["development-tools"]
-description = "The work ledger for ikigai: items, comments, labels, links and claims as RDF in a durable store, with view/query/append/comment/close/delete as capability-gated resources — and `urn:iki:ledger:next`, a deterministic ready set under a pluggable ordering policy that refuses a blocked cycle and explains its own ranking."
+description = "The work ledger for ikigai: NAMED ledgers — one named graph and one capability each — holding items, comments, labels, links and claims as RDF in a durable store, with view/query/append/comment/close/delete as capability-gated resources, and `urn:iki:ledger:next`, a deterministic ready set under a pluggable ordering policy that refuses a blocked cycle and explains its own ranking."
 
 # ★ WHY THIS CRATE OWNS NO BYTES. Everything here is authored as SPARQL and issued
 # through the kernel at `urn:iki:store:*` — `ikigai-store` owns the dataset, the write
@@ -17,6 +17,11 @@ description = "The work ledger for ikigai: items, comments, labels, links and cl
 # of the store), so an in-process consumer reaches the data the same way a remote one
 # does. The consequence a host must know: this module is inert unless a store space is
 # bound in the same kernel. See `README.md`, "Composition".
+#
+# ⚠ AND THE CONSEQUENCE FOR SEGMENTATION: a ledger is a named graph, but the store's
+# read and write scopes are both dataset-wide in 0.2.0, so this crate's per-ledger
+# capabilities gate its own resources and nothing else. `README.md`, "What is enforced,
+# and where", states exactly which half is which.
 
 [dependencies]
 ikigai-core = "0.1.57"
@@ -55,9 +60,11 @@ sha2 = "0.10"
 
 [dev-dependencies]
 futures = "0.3"
-# The module recipe as one test. 0.2.0 is the floor: DECLARATIONS (a declaration whose
-# target the walk never reached is reported) is what keeps this suite honest.
-ikigai-conformance = "0.2"
+# The module recipe as one test. 0.3 is the floor: AUTHORITY — a mutating action that
+# declares no capability and mutates anyway, so authority over the write cannot be
+# withheld from anyone who can reach it — is exactly the check a module that just made
+# its capabilities per-partition should be running.
+ikigai-conformance = "0.3"
 # The store this ledger is written against, with the durable backend ON — so
 # `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
