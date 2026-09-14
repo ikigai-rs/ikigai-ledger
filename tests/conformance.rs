@@ -60,13 +60,23 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
     let item = format!("urn:iki:ledger:default:item:{a}");
     let target = format!("urn:iki:ledger:default:item:{b}");
     let purge_target = format!("urn:iki:ledger:default:item:{c}");
+    // ⚠ **All twelve, and the count is the point.** The store grew from seven resources to
+    // twelve when it added the graph-scoped doors, and every one of them is in this kernel
+    // because the ledger composes over it. The walk found the five new ones immediately —
+    // which is the suite working — and the fix is to opt them out here, not to skip the
+    // walk. If this list is ever short again, the walk will say so by name.
     let store_owned = [
         "store-select",
         "store-ask",
         "store-construct",
         "store-describe",
+        "store-graph-select",
+        "store-graph-ask",
+        "store-graph-construct",
+        "store-graph-describe",
         "store-info",
         "store-update",
+        "store-graph-update",
         "store-load",
     ];
     store_owned

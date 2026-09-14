@@ -11,29 +11,45 @@
 //! exact grant is checked inside. Both directions are asserted here: a grant for `acme`
 //! opens `acme`, and a grant for `acme` is refused at `bosatsu`.
 //!
-//! # ⚠ And the one this file asserts is NOT true
+//! # ★ And since 0.2.0 the authority half closes
 //!
-//! `a_store_read_grant_still_sees_every_ledger` pins the gap rather than the property.
-//! `urn:cap:store:read` is the whole dataset — `ikigai-store` has no per-graph read scope
-//! yet — so a caller holding it reads any ledger's graph directly, without passing
-//! through any resource in this crate. The ledger capabilities segment the ledger's own
-//! doors and are not yet a tenancy boundary, and a test that pins the limitation is how
-//! that stops being a sentence somebody has to remember.
+//! [`grants_for`] is the whole grant list a caller working in one ledger needs, and every
+//! token in it names that ledger: four at this module's doors, three at the store's. There
+//! is no `urn:cap:store:read` and no `urn:cap:store:write` in it, because nothing in this
+//! crate resolves a broad store door — so
+//! `a_caller_granted_one_ledger_cannot_reach_another_by_any_route` is now the property and
+//! not the gap.
+//!
+//! ⚠ **What it does not claim.** A *host* that hands a ledger caller the broad
+//! `urn:cap:store:read` anyway has given it every graph in the store, and the store is
+//! right to answer — that grant means the whole dataset and always did.
+//! `a_host_that_hands_out_the_broad_store_grant_still_has_a_bypass` pins that too, in the
+//! same file, because the two facts are only useful together: the substrate hole is closed
+//! and a configuration can still open one. Nothing this crate declares asks for the broad
+//! grant, which is what makes handing it out a decision rather than a requirement.
 
 mod common;
 
 use common::*;
 use ikigai_core::{Capability, Error, Verb};
 
-/// Grants for one ledger, plus the store scopes a sub-request transitively needs.
+/// Every grant a caller working in ONE ledger needs — all seven, and every one of them
+/// names that ledger.
+///
+/// ★ Read it as the operator's config line, because that is what it is. Four tokens at
+/// this module's doors and three at the store's: the ledger's graph must be readable (to
+/// resolve `#12`, to check an item exists, to list) and writable, and its **graveyard**
+/// must be writable, because a delete archives into a second graph and a scoped write
+/// cannot reach across. A caller that only reads needs the first and the fifth.
 fn grants_for(ledger: &str) -> Capability {
     Capability::scoped([
         format!("urn:cap:ledger:read:{ledger}"),
         format!("urn:cap:ledger:write:{ledger}"),
         format!("urn:cap:ledger:delete:{ledger}"),
         format!("urn:cap:ledger:purge:{ledger}"),
-        "urn:cap:store:read".to_string(),
-        "urn:cap:store:write".to_string(),
+        graph_read(ledger),
+        graph_write(ledger),
+        graveyard_write(ledger),
     ])
 }
 
@@ -225,10 +241,14 @@ fn a_grant_for_one_ledger_is_refused_at_another() {
 fn write_delete_and_purge_stay_separate_within_one_ledger() {
     let kernel = kernel();
     let writer = Capability::scoped([
-        "urn:cap:ledger:read:acme",
-        "urn:cap:ledger:write:acme",
-        "urn:cap:store:read",
-        "urn:cap:store:write",
+        "urn:cap:ledger:read:acme".to_string(),
+        "urn:cap:ledger:write:acme".to_string(),
+        graph_read("acme"),
+        graph_write("acme"),
+        // ⚠ Deliberately granted: the graveyard write is what a delete would ALSO need,
+        // and giving it here proves the refusals below come from this module's own
+        // delete/purge grants and not from a missing store token further down.
+        graveyard_write("acme"),
     ]);
     assert!(try_as(
         &kernel,
@@ -255,14 +275,144 @@ fn write_delete_and_purge_stay_separate_within_one_ledger() {
     }
 }
 
-/// ⚠ **The half that is NOT enforced, pinned as a test rather than left as a sentence.**
+/// ★ **The one this arc exists for, and the one that used to assert the leak.**
 ///
-/// `urn:cap:store:read` is the whole dataset — there is no per-graph read scope in
-/// `ikigai-store` yet — so a caller granted one ledger through this module can still read
-/// every other ledger's graph by going to `urn:iki:store:select` directly. When the store
-/// grows `urn:cap:store:read:graph:<iri>`, this test is the one that should fail.
+/// Until 0.2.0 this file carried `a_store_read_grant_still_sees_every_ledger`, which
+/// resolved `urn:iki:store:select` under a one-ledger grant and asserted that another
+/// ledger's titles came back — with a message telling whoever made it fail to go fix the
+/// README. `ikigai-store` 0.2.2 is what made it fail: the grant list a ledger caller needs
+/// no longer contains `urn:cap:store:read` at all.
+///
+/// ⚠ **Be exact about what is proved here.** Not "the data is unreachable" — a store
+/// holds what a store holds. What is proved is that **the grants this crate's actions
+/// declare are sufficient to use one ledger and insufficient to reach any other**, by any
+/// route this crate offers or composes over. The caller below holds every token
+/// [`grants_for`] lists for `acme`, tries eight doors at `bosatsu` — four of this module's
+/// and four of the store's, broad and narrow — and is refused at all eight.
 #[test]
-fn a_store_read_grant_still_sees_every_ledger() {
+fn a_caller_granted_one_ledger_cannot_reach_another_by_any_route() {
+    let kernel = kernel();
+    sink(
+        &kernel,
+        "urn:iki:ledger:bosatsu:append",
+        &[("content", "Another client's work")],
+    );
+    let acme_only = grants_for("acme");
+    let title_query = "SELECT ?t WHERE { GRAPH <urn:iki:ledger:graph:bosatsu> { \
+                       ?i <http://purl.org/dc/terms/title> ?t } }";
+
+    for (what, verb, iri, args) in [
+        // Through this module: the ledger's own grants.
+        (
+            "the other ledger's listing",
+            Verb::Source,
+            "urn:iki:ledger:bosatsu:items",
+            &[][..],
+        ),
+        (
+            "the other ledger's ready set",
+            Verb::Source,
+            "urn:iki:ledger:bosatsu:next",
+            &[][..],
+        ),
+        (
+            "filing into the other ledger",
+            Verb::Sink,
+            "urn:iki:ledger:bosatsu:append",
+            &[("content", "Refused")][..],
+        ),
+        // Around it, at the store's BROAD doors: not held, because nothing here asks for
+        // them. This is the assertion that used to run the other way.
+        (
+            "the broad read door",
+            Verb::Source,
+            "urn:iki:store:select",
+            &[("query", title_query)][..],
+        ),
+        (
+            "the broad write door",
+            Verb::Sink,
+            "urn:iki:store:update",
+            &[("content", "DROP GRAPH <urn:iki:ledger:graph:bosatsu>")][..],
+        ),
+        // Around it, at the store's NARROW doors, naming the other ledger's graphs: the
+        // grant is exact, so a token for `acme` is not a token for `bosatsu`, and nothing
+        // is a prefix of anything.
+        (
+            "the narrow read door aimed elsewhere",
+            Verb::Source,
+            "urn:iki:store:graph-select",
+            &[
+                ("graph", "urn:iki:ledger:graph:bosatsu"),
+                ("query", title_query),
+            ][..],
+        ),
+        (
+            "the narrow write door aimed elsewhere",
+            Verb::Sink,
+            "urn:iki:store:graph-update",
+            &[
+                ("graph", "urn:iki:ledger:graph:bosatsu"),
+                ("content", "DROP GRAPH <urn:iki:ledger:graph:bosatsu>"),
+            ][..],
+        ),
+        (
+            "the other ledger's graveyard",
+            Verb::Sink,
+            "urn:iki:store:graph-update",
+            &[
+                ("graph", "urn:iki:ledger:graph:bosatsu:deleted"),
+                (
+                    "content",
+                    "DROP GRAPH <urn:iki:ledger:graph:bosatsu:deleted>",
+                ),
+            ][..],
+        ),
+    ] {
+        let refused = try_as(&kernel, &acme_only, verb, iri, args);
+        assert!(
+            matches!(refused, Err(Error::Denied(_))),
+            "{what} ({verb:?} {iri}) should be denied: {refused:?}"
+        );
+    }
+
+    // And the same capability still does its own job — a boundary that also broke the
+    // work it fences would prove nothing.
+    let filed = try_as(
+        &kernel,
+        &acme_only,
+        Verb::Sink,
+        "urn:iki:ledger:acme:append",
+        &[("content", "Allowed")],
+    );
+    assert!(filed.is_ok(), "{filed:?}");
+    let listing = try_as(
+        &kernel,
+        &acme_only,
+        Verb::Source,
+        "urn:iki:ledger:acme:items",
+        &[],
+    )
+    .expect("its own ledger");
+    assert!(listing.contains("Allowed"), "{listing}");
+    assert!(!listing.contains("Another client's work"), "{listing}");
+}
+
+/// ⚠ **What the boundary above does NOT cover, pinned in the same file so the pair is
+/// read together.**
+///
+/// The store's broad read door means what it has always meant: the whole dataset. A host
+/// that grants `urn:cap:store:read` to a ledger caller — out of habit, or to make some
+/// other module work — has handed it every ledger in the store, and no amount of care in
+/// this crate can take that back.
+///
+/// The difference 0.2.2 makes is that this is now a **host-configuration decision** rather
+/// than a **substrate hole**. Nothing this crate declares requires the broad grant; a host
+/// reading the manifold sees `urn:cap:store:{read,write}:graph:*` on every action and has
+/// no reason to issue the broad one. The bypass survives the decision to ignore that,
+/// which is a different and much smaller claim than the one this file used to make.
+#[test]
+fn a_host_that_hands_out_the_broad_store_grant_still_has_a_bypass() {
     let kernel = kernel();
     sink(
         &kernel,
@@ -270,12 +420,20 @@ fn a_store_read_grant_still_sees_every_ledger() {
         &[("content", "Another client's work")],
     );
 
-    let acme_only = grants_for("acme");
-    // Through the ledger: refused, as it should be.
+    let mut tokens: Vec<String> = grants_for("acme")
+        .scopes()
+        .expect("a scoped capability")
+        .iter()
+        .cloned()
+        .collect();
+    tokens.push("urn:cap:store:read".to_string());
+    let over_granted = Capability::scoped(tokens);
+
+    // This module still refuses: its own grants are exact and unaffected.
     assert!(matches!(
         try_as(
             &kernel,
-            &acme_only,
+            &over_granted,
             Verb::Source,
             "urn:iki:ledger:bosatsu:items",
             &[]
@@ -283,10 +441,10 @@ fn a_store_read_grant_still_sees_every_ledger() {
         Err(Error::Denied(_))
     ));
 
-    // Around it: visible, because the store's read scope is not per graph.
+    // The store answers, because it was asked by something holding the whole dataset.
     let leaked = try_as(
         &kernel,
-        &acme_only,
+        &over_granted,
         Verb::Source,
         "urn:iki:store:select",
         &[(
@@ -295,11 +453,11 @@ fn a_store_read_grant_still_sees_every_ledger() {
              ?i <http://purl.org/dc/terms/title> ?t } }",
         )],
     )
-    .expect("the store's read scope is not per graph — see this test's doc comment");
+    .expect("the broad read grant is the whole dataset, by definition");
     assert!(
         leaked.contains("Another client's work"),
-        "if this assertion has started failing, the store grew a per-graph read scope \
-         and this crate's README must stop saying it has not: {leaked}"
+        "if this has started failing, `urn:cap:store:read` narrowed and the README's \
+         paragraph about host configuration needs rewriting: {leaked}"
     );
 }
 
@@ -460,8 +618,114 @@ fn the_inventory_lists_only_what_this_capability_may_read() {
     assert!(acme_only.contains("1 ledger(s)"), "{acme_only}");
 
     // The graph face names each ledger's graph, so a consumer can go straight to
-    // `urn:iki:store:select` over one ledger without rebuilding the IRI from the name.
+    // `urn:iki:store:graph-select` over one ledger without rebuilding the IRI from the
+    // name — which is the IRI its read grant names, too.
     let turtle = source(&kernel, "urn:iki:ledger:ledgers", &[("as", "text/turtle")]);
     assert!(turtle.contains("urn:iki:ledger:graph:acme"), "{turtle}");
     assert!(!turtle.contains("_:"), "no blank nodes: {turtle}");
+}
+
+/// ★ **The inventory is the one resource no scoped read can answer**, so it takes two
+/// paths — the capability's own grants when it has any, the whole store under root — and
+/// they must agree. Root's answer above and a scoped answer here are the same listing for
+/// the same ledger, counts included.
+#[test]
+fn the_inventory_agrees_between_the_root_path_and_the_scoped_path() {
+    let kernel = kernel();
+    sink(
+        &kernel,
+        "urn:iki:ledger:acme:append",
+        &[("content", "Open work")],
+    );
+    sink(
+        &kernel,
+        "urn:iki:ledger:acme:append",
+        &[("content", "Finished work")],
+    );
+    sink(&kernel, "urn:iki:ledger:acme:close", &[("item", "acme#2")]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:bosatsu:append",
+        &[("content", "Elsewhere")],
+    );
+
+    let root = source(&kernel, "urn:iki:ledger:ledgers", &[]);
+    assert!(root.contains("acme") && root.contains("bosatsu"), "{root}");
+
+    let scoped = try_as(
+        &kernel,
+        &grants_for("acme"),
+        Verb::Source,
+        "urn:iki:ledger:ledgers",
+        &[],
+    )
+    .expect("the inventory under a scoped grant");
+    // The same row root produced for `acme`, arrived at without the store ever seeing a
+    // query that crosses graphs.
+    let row = root
+        .lines()
+        .find(|line| line.starts_with("acme "))
+        .expect("acme's row under root");
+    assert!(
+        scoped.contains(row),
+        "root said `{row}`, scoped said {scoped}"
+    );
+    assert!(!scoped.contains("bosatsu"), "{scoped}");
+}
+
+/// ⚠ Two grants per ledger per direction is the shape an operator will get half right, and
+/// a ledger granted at this module but not at the store **stops the listing** rather than
+/// thinning it — because a missing row is indistinguishable from an empty ledger, and a
+/// wrong answer that looks right is the worst available one. The refusal names the exact
+/// token to add.
+#[test]
+fn a_ledger_granted_here_but_not_in_the_store_refuses_the_listing() {
+    let kernel = kernel();
+    sink(
+        &kernel,
+        "urn:iki:ledger:acme:append",
+        &[("content", "Acme work")],
+    );
+    sink(
+        &kernel,
+        "urn:iki:ledger:bosatsu:append",
+        &[("content", "Bosatsu work")],
+    );
+
+    let half_granted = Capability::scoped([
+        "urn:cap:ledger:read:acme".to_string(),
+        graph_read("acme"),
+        // `bosatsu` is granted here and nowhere else: the config error this catches.
+        "urn:cap:ledger:read:bosatsu".to_string(),
+    ]);
+    let refused = try_as(
+        &kernel,
+        &half_granted,
+        Verb::Source,
+        "urn:iki:ledger:ledgers",
+        &[],
+    );
+    let message = match refused {
+        Err(Error::Denied(message)) => message,
+        other => panic!("a half-granted ledger must stop the listing: {other:?}"),
+    };
+    assert!(message.contains("bosatsu"), "{message}");
+    assert!(
+        message.contains(&graph_read("bosatsu")),
+        "…naming the exact token to add: {message}"
+    );
+    // …and the graveyard token, which is the half of the fix an operator would otherwise
+    // discover on their first delete.
+    assert!(message.contains(":deleted"), "{message}");
+
+    // Grant the missing half and the same call answers.
+    let whole = Capability::scoped([
+        "urn:cap:ledger:read:acme".to_string(),
+        graph_read("acme"),
+        "urn:cap:ledger:read:bosatsu".to_string(),
+        graph_read("bosatsu"),
+    ]);
+    let listing = try_as(&kernel, &whole, Verb::Source, "urn:iki:ledger:ledgers", &[])
+        .expect("both halves granted");
+    assert!(listing.contains("2 ledger(s)"), "{listing}");
 }

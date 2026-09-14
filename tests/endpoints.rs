@@ -352,6 +352,55 @@ fn a_delete_leaves_a_tombstone_and_the_content_is_recoverable() {
     );
 }
 
+/// ★ **A delete now re-serializes the quads it archives, so every term shape has to
+/// survive the trip.** Before 0.2.0 the move was one `DELETE … INSERT … WHERE` and the
+/// store never handed a term back to this crate; a scoped update cannot span two graphs,
+/// so the quads go out through a SELECT and back in as `INSERT DATA`, and anything this
+/// crate cannot round-trip is quietly changed at exactly the moment it is least
+/// recoverable.
+///
+/// This ledger writes no language tags — but an out-of-band write is a **supported path**
+/// here (see the README), so a hand-edited `"titre"@fr` is a real case and the archive
+/// must keep the tag rather than flattening it to a plain literal, which is a different
+/// statement.
+#[test]
+fn a_term_this_crate_never_writes_survives_being_archived() {
+    let kernel = kernel();
+    let iri = append_iri(&kernel, "Filed by hand", &[]);
+
+    // The editor, the merge, the bulk load — whatever wrote it, it did not come through a
+    // ledger Sink.
+    sink(
+        &kernel,
+        "urn:iki:store:graph-update",
+        &[
+            ("graph", "urn:iki:ledger:graph:default"),
+            (
+                "content",
+                &format!(
+                    "INSERT DATA {{ GRAPH <urn:iki:ledger:graph:default> {{ \
+                     <{iri}> <https://ikigai-rs.dev/ns/ledger#label> \"étiquette\"@fr }} }}"
+                ),
+            ),
+        ],
+    );
+
+    delete(&kernel, "urn:iki:ledger:item:1", &[("reason", "done")]);
+
+    let archived = select(
+        &kernel,
+        &format!(
+            "SELECT ?o WHERE {{ GRAPH <urn:iki:ledger:graph:default:deleted> {{ \
+             <{iri}> <https://ikigai-rs.dev/ns/ledger#label> ?o \
+             FILTER(LANG(?o) = \"fr\") }} }}"
+        ),
+    );
+    assert!(
+        archived.contains("étiquette"),
+        "the language tag did not survive the archive: {archived}"
+    );
+}
+
 #[test]
 fn a_purge_destroys_the_content_and_keeps_the_evidence() {
     let kernel = kernel();
@@ -449,13 +498,17 @@ fn the_turtle_face_is_a_graph_and_the_plain_face_is_a_list() {
 // -------------------------------------------------------------- capabilities & safety
 
 /// Declared = enforced, both ways: the ledger's own scope AND the store scope a
-/// sub-request really needs.
+/// sub-request really needs — which is now a grant naming this ledger's graph, not the
+/// whole dataset.
 #[test]
 fn a_read_capability_cannot_write_and_a_write_capability_cannot_purge() {
     let kernel = kernel();
     append(&kernel, "An item", &[]);
 
-    let reader = Capability::scoped(["urn:cap:ledger:read:default", "urn:cap:store:read"]);
+    let reader = Capability::scoped([
+        "urn:cap:ledger:read:default".to_string(),
+        graph_read("default"),
+    ]);
     assert!(try_as(&kernel, &reader, Verb::Source, "urn:iki:ledger:items", &[]).is_ok());
     assert!(matches!(
         try_as(
@@ -469,9 +522,9 @@ fn a_read_capability_cannot_write_and_a_write_capability_cannot_purge() {
     ));
 
     let writer = Capability::scoped([
-        "urn:cap:ledger:write:default",
-        "urn:cap:store:read",
-        "urn:cap:store:write",
+        "urn:cap:ledger:write:default".to_string(),
+        graph_read("default"),
+        graph_write("default"),
     ]);
     assert!(try_as(
         &kernel,
@@ -497,21 +550,101 @@ fn a_read_capability_cannot_write_and_a_write_capability_cannot_purge() {
     ));
 }
 
-/// ⚠ The friction this composition really has: a ledger write needs the store's coarse
-/// write scope, and holding `urn:cap:ledger:write:default` alone is not enough. Asserted rather
-/// than described, so the day it stops being true a test says so.
+/// ⚠ The friction this composition really has: a ledger write needs the store's write
+/// grant **for this ledger's graph**, and holding `urn:cap:ledger:write:default` alone is
+/// not enough. Asserted rather than described, so the day it stops being true a test says
+/// so.
+///
+/// ★ And the grant that is not enough is no longer the one that was too much. A holder of
+/// the broad `urn:cap:store:write` — `DROP ALL` over every graph in the host — is refused
+/// here too, because `urn:iki:store:graph-update` takes the per-graph grant and nothing
+/// else. Declared and enforced are the same scope in both directions: the narrow door does
+/// not accept the broad key, which is what keeps the *declaration* on this crate's actions
+/// honest.
 #[test]
-fn a_ledger_write_also_needs_the_stores_write_scope() {
+fn a_ledger_write_also_needs_the_stores_write_scope_for_this_graph() {
     let kernel = kernel();
-    let half = Capability::scoped(["urn:cap:ledger:write:default", "urn:cap:store:read"]);
-    let refused = try_as(
+    for half in [
+        Capability::scoped([
+            "urn:cap:ledger:write:default".to_string(),
+            graph_read("default"),
+        ]),
+        // The right shape, the wrong ledger.
+        Capability::scoped([
+            "urn:cap:ledger:write:default".to_string(),
+            graph_read("default"),
+            graph_write("acme"),
+        ]),
+        // Broader than needed, and still not this door's key.
+        Capability::scoped([
+            "urn:cap:ledger:write:default".to_string(),
+            graph_read("default"),
+            "urn:cap:store:write".to_string(),
+        ]),
+    ] {
+        let refused = try_as(
+            &kernel,
+            &half,
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &[("content", "an item")],
+        );
+        assert!(matches!(refused, Err(Error::Denied(_))), "{refused:?}");
+    }
+}
+
+/// ★ **A third writing IRI means a third golden thread**, and every write in this crate
+/// now goes through `urn:iki:store:graph-update`. A cached listing that did not depend on
+/// it would serve pre-write bytes for ever — silently, on the branch that looks like
+/// success — and nothing else in this suite would notice, because every other test builds
+/// its own kernel and reads each resource once.
+///
+/// The write below goes **straight at the store's narrow door**, not through a ledger
+/// Sink, so the only thread cut is `urn:iki:store:graph-update`: a ledger endpoint would
+/// also cut its own target's thread and the test would pass either way.
+///
+/// ⚠ **What this does not prove, stated because it would be easy to assume otherwise.**
+/// Ablating `.depends_on(GRAPH_UPDATE_THREAD)` from `endpoints::face` leaves this test
+/// green — measured, not guessed. The invalidation actually arrives by *propagation*: the
+/// listing is derived from a sub-request to `urn:iki:store:graph-select`, whose own
+/// representation declares all three threads (`ikigai_store::with_freshness`), and the
+/// kernel unions a dependency's threads into the derived one. The explicit declarations in
+/// `face` are therefore belt-and-braces — correct, and load-bearing only if a read here
+/// ever stops going through the store. What this test pins is the property an operator
+/// cares about: a write through the narrow door is visible to the next ledger read.
+#[test]
+fn a_write_through_the_narrow_door_invalidates_a_cached_read() {
+    let kernel = kernel();
+    let iri = append_iri(&kernel, "The first item", &[]);
+
+    let before = source(&kernel, "urn:iki:ledger:items", &[]);
+    assert!(before.contains("1 item(s)"), "{before}");
+
+    // The listing really is in the cache, with golden threads on it — otherwise there
+    // would be nothing to go stale and this test would pass vacuously.
+    let cache = source(&kernel, "urn:kernel:cache", &[]);
+    assert!(cache.contains("urn:iki:ledger:items"), "{cache}");
+
+    sink(
         &kernel,
-        &half,
-        Verb::Sink,
-        "urn:iki:ledger:append",
-        &[("content", "an item")],
+        "urn:iki:store:graph-update",
+        &[
+            ("graph", "urn:iki:ledger:graph:default"),
+            (
+                "content",
+                &format!(
+                    "INSERT DATA {{ GRAPH <urn:iki:ledger:graph:default> {{ \
+                     <{iri}> <https://ikigai-rs.dev/ns/ledger#label> \"out-of-band\" }} }}"
+                ),
+            ),
+        ],
     );
-    assert!(matches!(refused, Err(Error::Denied(_))), "{refused:?}");
+
+    let after = source(&kernel, "urn:iki:ledger:items", &[]);
+    assert!(
+        after.contains("out-of-band"),
+        "the cached listing did not recompute after a write through the narrow door: {after}"
+    );
 }
 
 /// ★ The one that matters most. Every write here is a SPARQL string, and ledger content

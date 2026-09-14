@@ -50,9 +50,10 @@ IRIs. `ledger:about <urn:repo:file:…>` is the whole trick, and it is why an it
 filed *against* something rather than merely mentioning it.
 
 The corollary: there is **no query endpoint in this crate**. Query is
-`urn:iki:store:select` over the same dataset — four typed SPARQL forms, already
-capability-gated, already conformance-walked. A second query surface would be a second
-thing to secure and a second thing to get wrong.
+`urn:iki:store:graph-select` over one ledger's graph — or `urn:iki:store:select` over the
+whole dataset, for a caller a host has given the whole dataset. Eight typed SPARQL forms,
+already capability-gated, already conformance-walked. A second query surface would be a
+second thing to secure and a second thing to get wrong.
 
 ```sparql
 # what is open against this file, in every ledger at once, with who filed it
@@ -73,9 +74,12 @@ than a column: partitioning by graph costs nothing when you want the whole pictu
 
 ## Composition: this crate owns no bytes
 
-Every read here is a SPARQL query issued at `urn:iki:store:select`, and every write is a
-SPARQL UPDATE at `urn:iki:store:update`. [`ikigai-store`](https://crates.io/crates/ikigai-store)
-owns the dataset, the write lock and the golden threads; this module owns the **domain**.
+Every read here is a SPARQL query issued at `urn:iki:store:graph-select`, and every write is
+a SPARQL UPDATE at `urn:iki:store:graph-update` — the **narrow** doors, each naming one
+ledger's graph and gated by a grant for that graph.
+[`ikigai-store`](https://crates.io/crates/ikigai-store) (**0.2.2 or later**, which is where
+those doors arrive) owns the dataset, the write lock and the golden threads; this module owns
+the **domain**.
 
 ```rust
 let store = DurableStore::open(&StoreConfig::load(Some("gonk"))?.path)?;  // owned
@@ -215,9 +219,9 @@ one is the worst available answer.
 A ledger whose items can only change through its own `Sink` is not what anyone wants from
 durable, inspectable state: the value of a record you can keep is that a human in an editor
 — or a merge, or an LLM harness, or a bulk load — can touch it out of band. Here that is
-literally true already: anything holding `urn:cap:store:write` can rewrite this graph
-without passing through a ledger endpoint. So an **out-of-band write is a supported path,
-not corruption**, and two things follow.
+literally true already: anything holding this graph's write grant — or the store's broad one
+— can rewrite it without passing through a ledger endpoint. So an **out-of-band write is a
+supported path, not corruption**, and three things follow.
 
 **Identity survives editing.** An item's IRI is minted once from the clock and a digest of
 what was filed, and then *stored*. It is never derived from the item's content, its number
@@ -231,6 +235,16 @@ refusals, so `urn:iki:ledger:items` runs a corpus check beside the listing: an i
 it lacks, rather than quietly dropped — the worst outcome being work that is neither
 visible nor gone. Asking for such an item directly says what is wrong with it, which "not
 found" would not. `model::REQUIRED` is the one list both directions use.
+
+**And a term this crate never writes still has to survive a delete.** Archiving re-serializes
+the quads it moves (a scoped update cannot span two graphs, so they go out through a query
+and back in as data), which means a hand-written `"étiquette"@fr` keeps its language tag
+rather than flattening to a plain literal — a different statement, changed at exactly the
+moment it is least recoverable. A **blank node** is the one thing that cannot survive: its
+label does not carry through `INSERT DATA`, and archiving it would mint a different node, so
+the delete is **refused** with a sentence naming it. Nothing here writes one — everything is
+skolemized — so this can only ever be an out-of-band edit, and telling that operator beats
+losing an edge.
 
 ## What `Delete` does — the part worth arguing about
 
@@ -253,6 +267,31 @@ would buy nothing.
 The graveyard is **per ledger**, not shared. One graveyard would be a graph that every
 ledger's deletes write into — one graph, one write scope, and therefore a path across the
 boundary the rest of this is built to keep closed.
+
+### ★ A delete is two writes, and the window between them has a name
+
+Moving quads from the live graph to the graveyard **cannot be one update**, because a
+scoped write can neither read nor write across graphs — that is what makes it a boundary
+rather than a filter. So a delete is: read the live quads, write them into the graveyard,
+then remove them from the live graph and write the tombstone (those last two are one
+update, so *that* pair is atomic). A purge clears the graveyard first, then the live graph.
+
+⚠ **The graveyard is touched first and the live graph last, deliberately: the live graph is
+the commit point.** Every read here looks at the live graph and none looks at the graveyard,
+so a process that dies between the two writes leaves the item **entirely present and
+undeleted**, with a copy already archived that no reader can see. A reader never observes a
+half-deleted item — it sees the item, whole, until the moment it does not. And the state is
+*re-runnable*, not merely recoverable: the archive step is `INSERT DATA` of quads the graph
+may already hold, and a store is a set, so issuing the same delete again converges. The
+other order would have put the window on the side where a crash destroys data.
+
+⚠ The one wrinkle: if an item is *edited* between an interrupted delete and its retry, the
+graveyard ends up holding the union of both versions. The tombstone's hash then covers the
+retry's quads, which is what was actually removed and is the honest answer; the archive is
+a superset of it.
+
+⚠ **A delete therefore needs write authority over two graphs** — the ledger's and its
+graveyard's — and the grant table below says so per verb.
 
 **Why purge is a resource and not a `purge=true` argument.** A flag could only be enforced
 at runtime, and an action that enforces a scope it does not declare makes the manifold lie —
@@ -345,27 +384,73 @@ capability pre-check runs before an endpoint can read the ledger out of its own 
 `*`. There is no infix form, so a parameter that is not last cannot be declared as a family
 at all.
 
-### ⚠ Two things this does not do
+### The store scopes: every door this crate goes through names one graph
 
-**A ledger write still needs `urn:cap:store:write`.** A sub-request carries the *caller's*
-capability unchanged (`Invocation::issue` has no attenuating or elevating form), so a
-caller who may file an item also holds the keys to the whole store, `DROP ALL` included.
-Every action declares that scope, because an action that enforces a scope it does not
-declare makes the manifold over-offer. `ikigai-store` 0.2.1 adds
-`urn:iki:store:graph-update` — an update confined to one named graph under
-`urn:cap:store:write:graph:<iri>` — which is exactly the narrow door this needs; this crate
-does not use it yet, because that version is not on crates.io.
+A sub-request carries the *caller's* capability unchanged — `Invocation::issue` has no
+attenuating or elevating form — so whatever this crate asks the store for, the caller must
+hold. That used to mean `urn:cap:store:read` (the whole dataset) and `urn:cap:store:write`
+(`DROP ALL`), which made "may file an item" and "holds the keys to the store" the same
+grant, and let anyone holding the read grant query another ledger's graph directly, going
+around every capability checked here.
 
-**Reads are not partitioned at all.** `urn:cap:store:read` is the whole dataset — there is
-no per-graph read scope in the store yet — so a caller holding it can query any ledger's
-graph at `urn:iki:store:select` without passing through any resource here.
+**`ikigai-store` 0.2.2 closed both halves and this crate takes them.** Nothing here
+resolves `urn:iki:store:select` or `urn:iki:store:update`; every read is
+`urn:iki:store:graph-select` and every write is `urn:iki:store:graph-update`, each naming
+one graph, each under a grant that names that same graph. So the grants an operator issues
+are these — **per ledger, and a grant for `acme` is worth nothing at `bosatsu`**:
 
-So: **the ledger capabilities govern everyone who comes through the ledger, and they are
-not yet a tenancy boundary.** That distinction is worth having on its own — an agent's
-grants are the set of ledgers it may work in, which is what makes the manifold say what a
-tool may touch — but it is not the same claim, and `tests/ledgers.rs` pins the gap as a
-test (`a_store_read_grant_still_sees_every_ledger`) so it stops being a sentence someone
-has to remember.
+| to do this in ledger `L` | grant at this module | …and at the store |
+| --- | --- | --- |
+| read (`items`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
+| write (`append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, editing an item) | `urn:cap:ledger:write:L` | the read grant above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L` |
+| delete (`Delete` on an item) | `urn:cap:ledger:delete:L` | both of the above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` |
+| purge | `urn:cap:ledger:purge:L` | the same three as delete |
+
+⚠ **Delete and purge need a write grant for TWO graphs**, because the graveyard is a
+second graph and a scoped write cannot reach across. That is the one line of this table an
+operator will get wrong, which is why it is a row and not a footnote.
+
+⚠ **The two halves are separate grants and neither implies the other.**
+`urn:cap:ledger:read:acme` without the store's graph-read token is a ledger you may address
+and cannot read, and `urn:iki:ledger:ledgers` **refuses** rather than leaving it out — a
+ledger missing from the inventory is indistinguishable from one with nothing filed in it, and
+the refusal names the exact token to add. That is a host misconfiguration with a mechanical
+fix, and it is the one this table exists to prevent.
+
+Each action **declares** the family (`urn:cap:store:read:graph:*` — "holds some grant under
+this prefix") and the store **enforces** the exact graph, because the kernel's capability
+pre-check runs before an endpoint can read the ledger out of its own target. The same split
+the ledger's own grants use, for the same reason.
+
+### What this closes, and the one thing it does not
+
+**A caller holding only the grants above cannot reach another ledger by any route this
+crate offers or composes over.** Eight doors are tried in
+`tests/ledgers.rs::a_caller_granted_one_ledger_cannot_reach_another_by_any_route` — this
+module's listing, ready set and append at the other ledger, the store's two broad doors,
+and the store's narrow doors aimed at the other ledger's graph and at its graveyard — and
+all eight are refused. Until 0.2.0 that file carried the opposite test, asserting the leak
+and telling whoever made it fail to come and fix this paragraph.
+
+⚠ **A host that hands a ledger caller `urn:cap:store:read` anyway has given it every graph
+in the store**, and the store is right to answer: that grant means the whole dataset and
+always did. The change is *what kind of fact that is*. It was a *substrate hole* — the
+narrow grant did not exist, so the broad one was the only way to run a ledger at all. It is
+now a *host-configuration decision*: nothing this crate declares asks for the broad grant,
+a host reading the manifold sees only the per-graph families, and issuing the broad one is
+a choice with no reason behind it.
+`a_host_that_hands_out_the_broad_store_grant_still_has_a_bypass` pins that in the same
+file, because the two facts are only useful together.
+
+Two consequences worth stating plainly:
+
+- **This is a tenancy boundary now**, where before it was a set of doors on one side of an
+  open room. An agent's grants really are the set of ledgers it can touch — through this
+  module and through the store underneath it.
+- **It is not a boundary against the host itself.** Whoever configures the kernel chooses
+  what every caller holds, and a host that binds the store's broad doors on a served
+  transport has made a different decision about a different resource. That is the store's
+  surface to reason about, not this one's.
 
 ## The vocabulary
 
@@ -411,10 +496,12 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### 0.2.0 renamed every resource and every grant
+### 0.2.0 renamed every resource and every grant, and narrowed the store's
 
-Named ledgers moved the IRIs and the capability tokens, so 0.2.0 is a breaking change to
-both:
+Named ledgers moved the IRIs and this crate's capability tokens; taking `ikigai-store`'s
+narrow doors replaced the store tokens a caller must hold. 0.2.0 is a breaking change to
+both sets, and the two landed together **on purpose** — 0.1.0 was published the day before,
+so doing them in one version changes an operator's grant list once instead of twice:
 
 | 0.1.0 | 0.2.0 |
 | --- | --- |
@@ -424,8 +511,15 @@ both:
 | `urn:iki:ledger:graph:deleted` | `urn:iki:ledger:graph:default:deleted` |
 | `urn:iki:ledger:counter` | `urn:iki:ledger:default:counter` |
 | `urn:cap:ledger:write` | `urn:cap:ledger:write:default` |
+| `urn:cap:store:read` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}` |
+| `urn:cap:store:write` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}` — plus the `…:deleted` twin for delete and purge |
 
-There is **no migration code**, deliberately: 0.1.0 was published the day before this
-landed and nothing depends on it, so a host with data rewrites the graph and the subject
-prefix by hand rather than carrying a converter nobody will ever run twice. A host whose
-grants are in a config file changes four tokens.
+⚠ The last two rows are **not** a rename: a host that leaves the old broad tokens in place
+finds that ledger writes stop working, because `urn:iki:store:graph-update` takes the
+per-graph grant and nothing else. That is deliberate on the store's side — a narrow door
+accepting a broad key would make every declaration in this crate a lie. `ikigai-store`
+**0.2.2 is the minimum**; against 0.2.0 or 0.2.1 the reads have no door to go through.
+
+There is **no migration code**, deliberately: nothing depends on 0.1.0, so a host with data
+rewrites the graph and the subject prefix by hand rather than carrying a converter nobody
+will ever run twice.

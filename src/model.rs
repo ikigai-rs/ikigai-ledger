@@ -397,13 +397,39 @@ pub fn turtle(graph: &Graph) -> Result<Vec<u8>> {
 // ------------------------------------------------------------------ reading the store
 
 /// The WHERE-clause fragment a [`Filter`] becomes.
+///
+/// # ⚠ Why these values are still built as terms and not passed as `bindings=`
+///
+/// `urn:iki:store:graph-select` takes a `bindings=` argument where a value never reaches
+/// the SPARQL parser at all — strictly stronger than building a term, and the right default
+/// for a query. This function does not use it, and the reason is one clause:
+///
+/// **`FILTER NOT EXISTS` is unreachable by binding.** Measured against `ikigai-store` 0.2.2
+/// on 2026-09-13: a variable occurring only inside `FILTER NOT EXISTS { … }` is not in the
+/// projection *even under `SELECT *`*, and the endpoint **refuses** the binding rather than
+/// ignoring it. The refusal is the right behaviour — a filter you thought was applied can
+/// never silently not be — but it means the `without` filter here (`FILTER NOT EXISTS
+/// { ?item ledger:label "x" }`) cannot take that door at all.
+///
+/// So adopting it would bind `kind`, `about`, `labels` and `holder` and interpolate
+/// `without`, leaving **two mechanisms in one query string** — and a reader could no longer
+/// tell which path a value took by looking at it. One mechanism used everywhere is worth
+/// more here than a stronger one used in most places, because the value of the strong door
+/// is that you never have to check. Every value below becomes an RDF term through
+/// `ikigai_store::sparql`, which is the crate that owns the grammar, and the hostile-content
+/// test in `crate::sparql` pins the composition.
+///
+/// What would change the answer: a way to bind into a `NOT EXISTS` subpattern (upstream, in
+/// oxigraph), or dropping `without` in favour of a shape this crate writes differently —
+/// `MINUS`, which has the same scoping problem, or a client-side exclusion, which moves work
+/// out of the store for no gain.
 fn filter_clauses(filter: &Filter) -> Result<String> {
     let mut clauses = String::new();
     if let Some(kind) = &filter.kind {
         clauses.push_str(&format!(
             "?item <{}> {} .\n",
             v::ext::TYPE,
-            sparql::iri_term(kind, "kind")?
+            sparql::iri(kind, "kind")?
         ));
     }
     match filter.status {
@@ -425,7 +451,7 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
         clauses.push_str(&format!(
             "?item <{}> {} .\n",
             v::ABOUT,
-            sparql::iri_term(about, "about")?
+            sparql::iri(about, "about")?
         ));
     }
     match &filter.holder {
@@ -460,8 +486,9 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
 /// ★ **Assume an editor got there first.** A ledger whose items can only be changed
 /// through its own Sink is not the thing anyone wants: the point of durable, inspectable
 /// state is that a human in an editor — or an LLM harness, or a merge — can touch it out
-/// of band, and this backend is no different (`urn:iki:store:load` and
-/// `urn:iki:store:update` are both open to anyone holding the store's write scope). So an
+/// of band, and this backend is no different (`urn:iki:store:graph-update` is open to
+/// anyone holding this graph's write grant, and `urn:iki:store:{update,load}` to anyone
+/// holding the store's broad one). So an
 /// out-of-band write is a FIRST-CLASS PATH, not corruption, and the consequence is that
 /// the model has to be checked on READ as well as on write: the Sink's refusal never ran.
 ///
@@ -592,7 +619,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{revision}> ?revision }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
              OPTIONAL {{ ?item <{purpose}> ?purpose }}",
-            subject = sparql::iri_term(iri, "item")?,
+            subject = sparql::iri(iri, "item")?,
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
             number = v::NUMBER,
@@ -671,7 +698,7 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
             "?comment <{on_item}> {subject} ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
              OPTIONAL {{ ?comment <{author}> ?author }}",
             on_item = v::ON_ITEM,
-            subject = sparql::iri_term(item, "item")?,
+            subject = sparql::iri(item, "item")?,
             body = v::BODY,
             created = v::ext::CREATED,
             author = v::AUTHOR,
