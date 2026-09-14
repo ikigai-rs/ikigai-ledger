@@ -483,7 +483,8 @@ async fn write_comment(
     Ok(comment)
 }
 
-/// The store scopes an action that reads the ledger transitively needs.
+/// Every scope an action that reads the ledger transitively needs: this module's own read
+/// grant, and the store's **per-graph** read family.
 ///
 /// ★ **The per-graph family, never the broad `urn:cap:store:read`.** A read here is one
 /// `urn:iki:store:graph-select` naming this ledger's graph, so the grant a caller must
@@ -491,9 +492,33 @@ async fn write_comment(
 /// nothing over any other ledger. The wildcard is the *declared* half (the kernel's
 /// pre-check runs before an endpoint can read the ledger out of its own IRI); the exact
 /// half is enforced by the store, against the graph named in the sub-request.
+///
+/// ⚠ **One list, because there are two authoring forms and they drifted.** A read is
+/// declared flatly by [`read_scopes`] on the single-authority endpoints and per-verb by
+/// [`read_action`] on `item:{id}`, whose four verbs carry three different authorities —
+/// and until 0.2.1 the second spelled the store's half `ikigai_store::CAP_READ`, the broad
+/// dataset token. A caller holding exactly the grant list `README.md` publishes could list
+/// a ledger and file into it and was **denied reading a single item out of it**, with the
+/// only workaround being the whole-dataset grant this crate exists to stop needing.
+/// Neither form gets its own literal again, and `tests/grants.rs` fails if either drops a
+/// scope the store really enforces.
+const READ_SCOPES: [&str; 2] = [CAP_READ, ikigai_store::CAP_READ_GRAPH];
+
+/// [`READ_SCOPES`] on a flatly-authored description — the endpoints whose every verb is a
+/// read (`items`, `next`, `ledgers`).
 fn read_scopes(desc: Description) -> Description {
-    desc.requires(CAP_READ)
-        .requires(ikigai_store::CAP_READ_GRAPH)
+    READ_SCOPES
+        .iter()
+        .fold(desc, |desc, scope| desc.requires(*scope))
+}
+
+/// [`READ_SCOPES`] on one explicitly-authored action — `item:{id}`, which cannot declare
+/// flatly because its `Source` and `Exists` read where its `Sink` writes and its `Delete`
+/// deletes.
+fn read_action(spec: ikigai_core::ActionSpec) -> ikigai_core::ActionSpec {
+    READ_SCOPES
+        .iter()
+        .fold(spec, |spec, scope| spec.requires(*scope))
 }
 
 /// The store scopes a mutating action transitively needs. Every write here reads first
@@ -974,11 +999,6 @@ impl Endpoint for ItemEndpoint {
                 CAP_DELETE,
             ))
     }
-}
-
-/// The ledger + store read scopes on an explicit action.
-fn read_action(spec: ikigai_core::ActionSpec) -> ikigai_core::ActionSpec {
-    spec.requires(CAP_READ).requires(ikigai_store::CAP_READ)
 }
 
 /// Replace a single-valued property.

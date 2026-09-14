@@ -428,8 +428,22 @@ the ledger's own grants use, for the same reason.
 
 ### What this closes, and the one thing it does not
 
-**A caller holding only the grants above cannot reach another ledger by any route this
-crate offers or composes over.** Eight doors are tried in
+⚠ **First, the direction that is easy to forget: the table above has to be ENOUGH.** A
+boundary is two claims — these grants reach no further, *and* these grants reach this far —
+and only the first of them is interesting to write a test for, which is why 0.2.0 shipped
+with the second one holed. `item:{id}`'s `Source` and `Exists` went on declaring the broad
+`urn:cap:store:read`, so a caller holding exactly this table could list a ledger and file
+into it and was **denied reading a single item out of it**; the only workaround was the
+whole-dataset grant this section exists to stop needing. Nothing caught it because every
+`item:{id}` read in the suite ran under root, where a broad token is held by definition —
+the boundary was tested everywhere except the action that broke it. Fixed in 0.2.1, and
+`tests/grants.rs` is now the shape that keeps it fixed: it reads **every** `(resource,
+verb)` pair off the bound space itself, refuses to pass if any of them is unexercised, and
+runs all of them against a live ledger under exactly this table and nothing more.
+
+**And the direction that is easy to remember: a caller holding only the grants above cannot
+reach another ledger by any route this crate offers or composes over.** Eight doors are
+tried in
 `tests/ledgers.rs::a_caller_granted_one_ledger_cannot_reach_another_by_any_route` — this
 module's listing, ready set and append at the other ledger, the store's two broad doors,
 and the store's narrow doors aimed at the other ledger's graph and at its graveyard — and
@@ -440,11 +454,12 @@ and telling whoever made it fail to come and fix this paragraph.
 in the store**, and the store is right to answer: that grant means the whole dataset and
 always did. The change is *what kind of fact that is*. It was a *substrate hole* — the
 narrow grant did not exist, so the broad one was the only way to run a ledger at all. It is
-now a *host-configuration decision*: nothing this crate declares asks for the broad grant,
-a host reading the manifold sees only the per-graph families, and issuing the broad one is
-a choice with no reason behind it.
-`a_host_that_hands_out_the_broad_store_grant_still_has_a_bypass` pins that in the same
-file, because the two facts are only useful together.
+now a *host-configuration decision*: nothing this crate declares asks for the broad grant
+(**since 0.2.1**, and `tests/grants.rs::no_action_declares_a_scope_outside_the_published_grant_list`
+is what makes that sentence checkable rather than merely written down), a host reading the
+manifold sees only the per-graph families, and issuing the broad one is a choice with no
+reason behind it. `a_host_that_hands_out_the_broad_store_grant_still_has_a_bypass` pins the
+other half in `tests/ledgers.rs`, because the two facts are only useful together.
 
 Two consequences worth stating plainly:
 
@@ -499,6 +514,20 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### 0.2.1 made the published grant list true for `item:{id}` as well
+
+A patch, and a narrowing: `urn:iki:ledger:{ledger}:item:{id}`'s `Source` and `Exists`
+declared the broad `urn:cap:store:read` where every other read declared the per-graph
+family. A caller who held the broad token still works — it is a *declaration* that got
+narrower, not an enforcement that got stricter — and a caller holding only what the grant
+table above publishes starts working, which it should have done in 0.2.0.
+
+The line was one token. The reason it survived is the part worth recording: the two
+authoring forms of the same idea (flat on a single-authority endpoint, per-verb on
+`item:{id}`, whose four verbs carry three authorities) each held their own literal, and one
+of them was never revisited when 0.2.0 narrowed the other. They share one list now, and
+`tests/grants.rs` checks every action against the published table instead of against root.
 
 ### 0.2.0 renamed every resource and every grant, and narrowed the store's
 
