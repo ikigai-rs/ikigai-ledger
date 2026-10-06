@@ -24,7 +24,11 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 # and where", states exactly which half is which.
 
 [dependencies]
-ikigai-core = "0.1.57"
+# 0.1.80 is the true minimum: it is where `Error::Conflict` arrives, and a claim held by
+# someone else is a conflict (the state does not permit it, and no retry changes that), not
+# the transient `Unavailable` it was reported as until 0.2.1 — which `ikigai-throttle`'s
+# circuit breaker counted toward tripping. ⚠ `"0.1.80"` is a range `>=0.1.80, <0.2.0`.
+ikigai-core = "0.1.80"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's

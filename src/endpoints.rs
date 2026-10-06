@@ -409,7 +409,14 @@ async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<I
                     ),
                 })
             }
-            Some((_, canonical)) => canonical,
+            // ★ The id tail goes through the same resolution the `item:{id}` resource
+            // gives it, so `urn:iki:ledger:item:1` — which RESOLVES as a resource, the
+            // number in the id position — means #1 here too. Until 0.2.1 it was looked up
+            // verbatim as an item minted with the id `1`, and was not found.
+            Some((_, canonical)) => match canonical.rsplit_once(":item:") {
+                Some((_, tail)) => model::resolve_id(client, tail).await?,
+                None => canonical,
+            },
             // Not a ledger item IRI. Left verbatim so the error can name what was asked
             // for rather than a guess at what was meant.
             None => reference.to_string(),
@@ -422,16 +429,20 @@ async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<I
     }
     // Present but unreadable is a different fact from absent, and only one of them is
     // fixable by the person reading the error.
-    let missing = model::defects_of(client, &iri).await?;
-    if missing.is_empty() {
+    let wrong = model::defects_of(client, &iri).await?;
+    if wrong.is_empty() {
         Err(Error::NotFound(format!("no ledger item at `{iri}`")))
     } else {
         Err(Error::Endpoint(format!(
-            "`{iri}` is in the ledger graph but is missing {} — so nothing here can read \
-             it. Some write did not pass through a ledger Sink (an editor, a merge, a bulk \
-             load); add the missing propert{} or delete the subject",
-            missing.join(", "),
-            if missing.len() == 1 { "y" } else { "ies" }
+            "`{iri}` is in the ledger graph but nothing here can read it: {}. Some write \
+             did not pass through a ledger Sink (an editor, a merge, a bulk load); fix \
+             {} or delete the subject",
+            wrong.join(", "),
+            if wrong.len() == 1 {
+                "that property"
+            } else {
+                "those properties"
+            }
         )))
     }
 }
@@ -649,16 +660,20 @@ impl Endpoint for ItemsEndpoint {
                 Some(name) => Holder::Named(name.to_string()),
             },
             deferred: match inv.inline_str("deferred").unwrap_or("include") {
+                "include" => Deferred::Include,
                 "exclude" => Deferred::Exclude,
                 "only" => Deferred::Only,
-                _ => Deferred::Include,
+                // Refused, never substituted: a typo (`exlude`) read as `include` answered
+                // a different question, with exactly the items the caller asked to leave out.
+                other => {
+                    return Err(Error::InvalidArgument {
+                        name: "deferred".to_string(),
+                        detail: format!("`{other}` is not one of include, exclude, only"),
+                    })
+                }
             },
             text: inv.inline_str("text").ok().map(str::to_string),
-            limit: inv
-                .inline_str("limit")
-                .ok()
-                .and_then(|l| l.parse().ok())
-                .unwrap_or(50),
+            limit: parse_limit(inv, 50)?,
         };
         let items = model::load_items(&client, &filter).await?;
         if want == TURTLE {
@@ -690,8 +705,8 @@ impl Endpoint for ItemsEndpoint {
                  (a write that did not pass through a ledger Sink):\n",
                 broken.len()
             ));
-            for (iri, missing) in &broken {
-                text.push_str(&format!("  {iri} — missing {}\n", missing.join(", ")));
+            for (iri, wrong) in &broken {
+                text.push_str(&format!("  {iri} — {}\n", wrong.join(", ")));
             }
         }
         face(text, None, want)
@@ -787,6 +802,18 @@ impl Endpoint for ItemsEndpoint {
     }
 }
 
+/// `limit=`, or `default` when absent — and **refused** when present but not a count,
+/// rather than quietly read as the default (`limit=ten` answered with 50 rows).
+fn parse_limit(inv: &Invocation<'_>, default: usize) -> Result<usize> {
+    match inv.inline_str("limit") {
+        Err(_) => Ok(default),
+        Ok(text) => text.trim().parse().map_err(|_| Error::InvalidArgument {
+            name: "limit".to_string(),
+            detail: format!("`{text}` is not a count of items"),
+        }),
+    }
+}
+
 fn split_labels(value: Option<&str>) -> Vec<String> {
     value
         .map(|v| {
@@ -848,9 +875,17 @@ impl Endpoint for ItemEndpoint {
                 face(text, None, want)
             }
             Verb::Exists => {
-                let item = require_item(&client, id).await;
+                // ⚠ **Only "not found" is `false`.** Until 0.2.1 every failure was — so a
+                // caller the store refused was told an existing item did not exist, and a
+                // host with no store bound was told the same. A denial is a denial, and an
+                // item present but unreadable is present: both are answered as errors.
+                let exists = match require_item(&client, id).await {
+                    Ok(_) => true,
+                    Err(Error::NotFound(_)) => false,
+                    Err(other) => return Err(other),
+                };
                 face(
-                    if item.is_ok() { "true\n" } else { "false\n" }.to_string(),
+                    if exists { "true\n" } else { "false\n" }.to_string(),
                     None,
                     PLAIN,
                 )
@@ -1412,6 +1447,20 @@ impl Endpoint for AppendEndpoint {
             when = datetime(now),
         );
         if let Ok(kind) = inv.inline_str("kind") {
+            // ⚠ A LEVEL is a subclass of `ledger:Item`, never one of this crate's own
+            // bookkeeping classes. An item typed `ledger:Counter` was a second counter
+            // to `urn:iki:ledger:ledgers`, which then reported every count doubled — an
+            // ordinary validated argument falsifying the inventory.
+            if let Some(class) = v::STRUCTURAL_CLASSES.iter().find(|c| **c == kind) {
+                return Err(Error::InvalidArgument {
+                    name: "kind".to_string(),
+                    detail: format!(
+                        "`{class}` is one of this ledger's own structural classes, not a \
+                         level of item; a `kind` names a subclass of `{}`",
+                        v::ITEM_CLASS
+                    ),
+                });
+            }
             triples.push_str(&format!(
                 "\n<{iri}> <{}> {} .",
                 v::ext::TYPE,
@@ -1818,6 +1867,18 @@ impl Endpoint for ClaimEndpoint {
         match inv.request.verb {
             Verb::Sink => {
                 let holder = inv.inline_str("content")?.trim().to_string();
+                // `none` and `any` are the `holder=` filter's keywords, so a holder by either
+                // name could claim work that no filter could then find.
+                if holder == "none" || holder == "any" {
+                    return Err(Error::InvalidArgument {
+                        name: "content".to_string(),
+                        detail: format!(
+                            "`{holder}` is reserved: `holder=none` and `holder=any` are the \
+                             items filter's keywords, so work held by `{holder}` could never be \
+                             listed by holder"
+                        ),
+                    });
+                }
                 if holder.is_empty() {
                     return Err(Error::InvalidArgument {
                         name: "content".to_string(),
@@ -1833,13 +1894,24 @@ impl Endpoint for ClaimEndpoint {
                 // and is the first thing to harden when a second one appears.
                 if let Some(held) = &item.claimed_by {
                     if held != &holder {
-                        return Err(Error::Unavailable(format!(
+                        // ★ `Conflict`, not `Unavailable`: the request is fine and the
+                        // state does not permit it, which no retry changes. Until 0.2.1
+                        // this was typed as a transient outage, so a few ordinary claim
+                        // collisions behind a circuit breaker opened it and failed every
+                        // claim fast.
+                        //
+                        // The remedy names THIS ledger's claim resource and the bare
+                        // number, so it can be followed as printed: in 0.2.1 it named
+                        // the default ledger's resource and `acme#1`, which that resource
+                        // refuses as another ledger's item.
+                        return Err(Error::Conflict(format!(
                             "{} is already claimed by {held}. Release it first \
-                             (`delete urn:iki:ledger:claim item={}`), or take it up with \
-                             them — a claim is a fence, and stealing one silently is how two \
-                             workers end up in the same tree",
+                             (`delete {} item={}`), or take it up with them — a claim is \
+                             a fence, and stealing one silently is how two workers end up \
+                             in the same tree",
                             item.short(),
-                            item.short()
+                            client.ledger().resource("claim"),
+                            item.number
                         )));
                     }
                 }
@@ -1899,7 +1971,10 @@ impl Endpoint for ClaimEndpoint {
                     .input(item_arg("The item to claim."))
                     .input(
                         ArgSpec::new("content")
-                            .summary("The holder — where a pipe's value lands.")
+                            .summary(
+                                "The holder — where a pipe's value lands. Not `none` or `any`, \
+                                 which are the `holder=` filter's keywords.",
+                            )
                             .class(v::ext::XSD_STRING),
                     )
                     .input(
@@ -2028,7 +2103,10 @@ impl Endpoint for LinkEndpoint {
                     .join(", ")
             ),
         })?;
-        if from.iri == to.iri && name == "blocks" {
+        // Refused on Sink only. A self-block can still arrive out of band, and `next` then
+        // refuses naming this resource's Delete as the remedy — which must not be refused
+        // for the same reason (0.2.1 refused it, so the ledger's own fix could not run).
+        if from.iri == to.iri && name == "blocks" && inv.request.verb == Verb::Sink {
             return Err(Error::InvalidArgument {
                 name: "content".to_string(),
                 detail: format!(
@@ -2136,6 +2214,18 @@ impl Endpoint for LabelEndpoint {
                 detail: "a label needs text".to_string(),
             });
         }
+        // ⚠ No comma in a label added here: `labels=` and `without=` split on commas, so a
+        // label carrying one could be set and never filtered on. Removing one is still
+        // allowed, so a label written before this check (or out of band) can be taken off.
+        if label.contains(',') && inv.request.verb == Verb::Sink {
+            return Err(Error::InvalidArgument {
+                name: "content".to_string(),
+                detail: format!(
+                    "`{label}` contains a comma, and the `labels`/`without` filters split on \
+                     commas, so it could never be filtered on. Add each part as its own label"
+                ),
+            });
+        }
         let triple = format!("<{}> <{}> {} .", item.iri, v::LABEL, literal(label));
         let (update, said) = match inv.request.verb {
             Verb::Sink => (
@@ -2174,7 +2264,10 @@ impl Endpoint for LabelEndpoint {
                     .input(item_arg("The item to tag."))
                     .input(
                         ArgSpec::new("content")
-                            .summary("The label — where a pipe's value lands.")
+                            .summary(
+                                "The label — where a pipe's value lands. No commas: the \
+                                 `labels`/`without` filters split on them.",
+                            )
                             .class(v::ext::XSD_STRING),
                     )
                     .output(PLAIN),
@@ -2358,11 +2451,7 @@ impl Endpoint for NextEndpoint {
             about: inv.inline_str("about").ok().map(str::to_string),
             ..Filter::default()
         };
-        let limit = inv
-            .inline_str("limit")
-            .ok()
-            .and_then(|l| l.parse().ok())
-            .unwrap_or(3);
+        let limit = parse_limit(inv, 3)?;
         let set = select::ready(&client, &filter).await?;
         let valid_until = select::valid_until(&set, policy.as_ref(), now);
         let selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
@@ -2631,10 +2720,16 @@ impl Endpoint for LedgersEndpoint {
         // `FROM <G> FROM NAMED <G>`, so `GRAPH ?g` can only bind G and the grouping
         // yields the one row for that ledger — the same shape the broad door yields per
         // graph. The branch below is about which door, never about what is asked.
+        //
+        // ⚠ The counter is found by a DISTINCT subquery, not joined: a join multiplies
+        // every item row by the number of counter subjects, and a second one (a hand edit,
+        // or an item typed `ledger:Counter` before append refused that) doubled every count.
         let query = format!(
-            "SELECT ?g (COUNT(?item) AS ?items) (SUM(IF(?status = <{open}>, 1, 0)) AS ?open) \
-             WHERE {{\n  GRAPH ?g {{ ?counter <{type_}> <{counter_class}> }}\n  \
-             OPTIONAL {{ GRAPH ?g {{ ?item <{type_}> <{item_class}> ; <{status}> ?status }} }}\n\
+            "SELECT ?g (COUNT(DISTINCT ?item) AS ?items) \
+             (COUNT(DISTINCT ?openItem) AS ?open) WHERE {{\n  \
+             {{ SELECT DISTINCT ?g WHERE {{ GRAPH ?g {{ ?counter <{type_}> <{counter_class}> }} }} }}\n  \
+             OPTIONAL {{ GRAPH ?g {{ ?item <{type_}> <{item_class}> ; <{status}> ?status }}\n    \
+             BIND(IF(?status = <{open}>, ?item, ?unbound) AS ?openItem) }}\n\
              }} GROUP BY ?g ORDER BY ?g",
             open = v::OPEN,
             type_ = v::ext::TYPE,

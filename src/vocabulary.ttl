@@ -123,10 +123,9 @@ ledger:auditNoChange a ledger:CloseReason ;
 # ═══════════════════════════════════════════════════════════════════════════
 
 ledger:number a rdf:Property ;
-    rdfs:domain ledger:Item ;
     rdfs:range xsd:integer ;
     rdfs:label "number" ;
-    rdfs:comment "The human-facing short id — `#12`. A LABEL on a stable IRI, never the identifier: it is allocated from ledger:lastNumber by the one process that owns the store, is unique per store (not per project — this ledger has no projects yet), and is never reused, because the counter is not lowered by a delete or a purge." .
+    rdfs:comment "The human-facing short id — `#12`. A LABEL on a stable IRI, never the identifier: it is allocated from ledger:lastNumber, is unique per LEDGER (numbers restart in each, which is why a display number outside the default ledger carries the name, acme#12), and is never reused, because the counter is not lowered by a delete or a purge. ⚠ No domain: an item AND the tombstone it leaves both carry it, and rdfs:domain ledger:Item would make every tombstone an inferred item to a reasoning consumer — a deleted item counted as a live one." .
 
 ledger:body a rdf:Property ;
     rdfs:range xsd:string ;
