@@ -559,13 +559,63 @@ pub async fn defects_of(client: &StoreClient<'_, '_>, iri: &str) -> Result<Vec<S
 }
 
 /// Load the items a filter selects, newest-updated first (kata's order, and the one a
-/// human reading a list expects).
+/// human reading a list expects). `limit: 0` means 500 — a LISTING's bound, for a human
+/// reading down a page.
+///
+/// ⚠ **Never the pool for a computation over the ledger.** A bound that is right for a
+/// page is wrong for "is this blocked": `urn:iki:ledger:next` read its pool through here
+/// until 0.2.1, so with more than 500 open items the oldest fell out — an older p0 was never
+/// offered, and an item whose blocker fell out was offered as ready. That reads
+/// [`load_open_items`], which has no bound.
 pub async fn load_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Vec<Item>> {
     let limit = if filter.limit == 0 { 500 } else { filter.limit };
+    load(client, filter, Some(limit)).await
+}
+
+/// **Every** open item in the ledger, unfiltered and unbounded — the pool a computation
+/// over the whole `blocks` graph needs (readiness, cycles, leverage), because each of
+/// those is a property of the ledger and not of a page of it.
+pub async fn load_open_items(client: &StoreClient<'_, '_>) -> Result<Vec<Item>> {
+    load(client, &Filter::default(), None).await
+}
+
+/// The IRIs a filter admits, unbounded — so a caller can compute over the whole ledger
+/// and narrow afterwards, rather than computing over the narrowed set.
+///
+/// ★ The same clauses `urn:iki:ledger:items` filters with (`filter_clauses`), so "the
+/// items labeled `rust`" means the same thing to `next` as to a listing.
+pub async fn matching_iris(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+) -> Result<std::collections::BTreeSet<String>> {
+    let query = format!(
+        "SELECT DISTINCT ?item WHERE {{ {} }}",
+        client.in_graph(&format!(
+            "?item <{type_}> <{item_class}> ; <{title}> ?title .\n{filters}",
+            type_ = v::ext::TYPE,
+            item_class = v::ITEM_CLASS,
+            title = v::ext::TITLE,
+            filters = filter_clauses(filter)?,
+        ))
+    );
+    Ok(client
+        .select(&query)
+        .await?
+        .iter()
+        .filter_map(|row| row.get("item").map(|b| b.value.clone()))
+        .collect())
+}
+
+async fn load(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+    limit: Option<usize>,
+) -> Result<Vec<Item>> {
+    let limit = limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?holder ?purpose ?created ?modified WHERE {{ {} }} \
-         ORDER BY DESC(?modified) DESC(?number) LIMIT {limit}",
+         ORDER BY DESC(?modified) DESC(?number){limit}",
         client.in_graph(&format!(
             "?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
              <{status}> ?status ;\n  <{created}> ?created ;\n  <{modified}> ?modified .\n\

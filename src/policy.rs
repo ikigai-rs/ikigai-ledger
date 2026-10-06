@@ -114,6 +114,27 @@ pub trait OrderingPolicy: Send + Sync {
     /// Rank the ready set, best first. Returning fewer entries than it was given is
     /// allowed and means "these are the only ones I will speak for".
     fn order(&self, inputs: &SelectionInputs) -> Vec<Ranked>;
+
+    /// Until when (ms since the epoch) this policy's answer for `inputs` stays the same as
+    /// the clock moves and nothing in the ledger changes — or `None` when it does not read
+    /// the clock at all.
+    ///
+    /// ★ **This is what lets `next` be cached without going stale.** `next` is cached under
+    /// the store's write threads, so a write recomputes it — but the passage of time cuts
+    /// no thread, and [`SelectionInputs::now`] records no dependency when it is read. Until
+    /// 0.2.1 that meant an idle ledger served a ranking computed at an earlier moment for
+    /// as long as nothing was written: sixty days on, `leverage` still gave its day-zero age
+    /// points. The answer to "until when is this true" is the policy's, because only the
+    /// policy knows what it does with `now`.
+    ///
+    /// ⚠ **The default is the safe answer for a policy that has not said: "not past this
+    /// instant"**, which makes `next` uncacheable under it. A policy that never reads `now`
+    /// returns `None`; one that reads it coarsely returns the next moment its answer can
+    /// change. Answering later than the truth serves a stale ranking; answering earlier only
+    /// costs a recomputation.
+    fn valid_until(&self, inputs: &SelectionInputs) -> Option<u64> {
+        Some(inputs.now)
+    }
 }
 
 /// kata's own rule, reimplemented so our behaviour can be **diffed against the tool we
@@ -143,6 +164,11 @@ impl OrderingPolicy for PriorityRecency {
 
     fn weighs(&self) -> Vec<&'static str> {
         vec!["priority", "recency", "number"]
+    }
+
+    /// kata's rule never reads the clock: priority, then `modified`, then the number.
+    fn valid_until(&self, _inputs: &SelectionInputs) -> Option<u64> {
+        None
     }
 
     fn order(&self, inputs: &SelectionInputs) -> Vec<Ranked> {
@@ -197,6 +223,13 @@ impl OrderingPolicy for PriorityRecency {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Leverage;
 
+/// A day, in milliseconds.
+const DAY: u64 = 86_400_000;
+
+/// Below this age a candidate's age earns no points (`days / 6` is zero) and is not
+/// mentioned, so the clock cannot change what is said about it.
+const AGE_SILENT_DAYS: u64 = 6;
+
 impl Leverage {
     fn points(&self, c: &Candidate, now: u64) -> (i64, Vec<String>) {
         let mut because = Vec::new();
@@ -217,7 +250,7 @@ impl Leverage {
             Some(p) => format!("priority {p} (+{priority_points})"),
             None => "no priority set (+0)".to_string(),
         });
-        let days = now.saturating_sub(c.created) / 86_400_000;
+        let days = now.saturating_sub(c.created) / DAY;
         let age_points = (days.min(60) / 6) as i64;
         if age_points > 0 {
             because.push(format!("filed {days} day(s) ago (+{age_points})"));
@@ -238,6 +271,26 @@ impl OrderingPolicy for Leverage {
 
     fn weighs(&self) -> Vec<&'static str> {
         vec!["leverage", "priority", "age", "number"]
+    }
+
+    /// The next moment any candidate's age, in whole days, changes what this policy says:
+    /// a candidate's age is silent below six days (it scores nothing and is not mentioned)
+    /// and is printed, in days, from then on. So the answer for a candidate filed at `c`
+    /// holds until `c + max(days + 1, 6)` days, and the whole ranking until the earliest of
+    /// those.
+    fn valid_until(&self, inputs: &SelectionInputs) -> Option<u64> {
+        inputs
+            .candidates
+            .iter()
+            .map(|c| {
+                let days = inputs.now.saturating_sub(c.created) / DAY;
+                c.created.saturating_add(
+                    days.saturating_add(1)
+                        .max(AGE_SILENT_DAYS)
+                        .saturating_mul(DAY),
+                )
+            })
+            .min()
     }
 
     fn order(&self, inputs: &SelectionInputs) -> Vec<Ranked> {
@@ -404,6 +457,45 @@ mod tests {
             first.iter().map(|r| r.iri.clone()).collect::<Vec<_>>(),
             second.iter().map(|r| r.iri.clone()).collect::<Vec<_>>()
         );
+    }
+
+    /// ★ Until when each built-in's answer holds as the clock moves: kata's rule never reads
+    /// the clock, and leverage's answer changes at the next day boundary of any candidate
+    /// whose age it scores or prints (six days and older), or when a younger one turns six.
+    #[test]
+    fn each_policy_says_until_when_its_answer_holds() {
+        let now = 1_757_700_000_000;
+        let mut young = candidate(1, Some(2), now);
+        young.created = now - 2 * DAY; // silent until day 6
+        let mut old = candidate(2, Some(2), now);
+        old.created = now - 10 * DAY - 5; // "filed 10 day(s) ago" until day 11
+        let both = inputs(vec![young, old]);
+        assert_eq!(PriorityRecency.valid_until(&both), None);
+        assert_eq!(Leverage.valid_until(&both), Some(now + DAY - 5));
+        assert_eq!(
+            Leverage.valid_until(&inputs(vec![young_only(now)])),
+            Some(now + 4 * DAY)
+        );
+        assert_eq!(Leverage.valid_until(&inputs(Vec::new())), None);
+        // The answer really does change at that instant and not before.
+        let at = |t: u64| {
+            Leverage
+                .order(&SelectionInputs {
+                    candidates: both.candidates.clone(),
+                    now: t,
+                })
+                .into_iter()
+                .map(|r| r.because)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at(now), at(now + DAY - 6));
+        assert_ne!(at(now), at(now + DAY - 5));
+    }
+
+    fn young_only(now: u64) -> Candidate {
+        let mut young = candidate(1, Some(2), now);
+        young.created = now - 2 * DAY;
+        young
     }
 
     #[test]
