@@ -556,7 +556,7 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Unreleased: the fixes from an unled audit of 0.2.1
+### 0.3.0: the fixes from an unled audit of 0.2.1
 
 Every item below was reproduced against 0.2.1 by a test that failed because of it
 (`tests/data_safety.rs`, `tests/next_whole_ledger.rs`, `tests/audit_minors.rs`). What an
