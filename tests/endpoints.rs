@@ -154,8 +154,11 @@ fn a_claim_is_a_fence_and_stealing_one_is_refused() {
         "urn:iki:ledger:claim",
         &[("item", "#1"), ("content", "session-b")],
     );
+    // ★ A conflict, not a transient outage: no retry changes who holds it, and a circuit
+    // breaker that counted it as an outage would open on ordinary contention (0.2.1 typed
+    // it `Unavailable`).
     match stolen {
-        Err(Error::Unavailable(message)) => {
+        Err(Error::Conflict(message)) => {
             assert!(message.contains("session-a"), "{message}");
         }
         other => panic!("a held claim must be refused, naming the holder: {other:?}"),

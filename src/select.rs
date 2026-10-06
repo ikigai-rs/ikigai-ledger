@@ -60,8 +60,18 @@ pub enum Excluded {
 }
 
 impl Excluded {
-    /// The sentence a human reads and the `ledger:reason` a graph carries.
+    /// The sentence a human reads and the `ledger:reason` a graph carries, with blockers
+    /// spelled as the DEFAULT ledger's numbers (`#12`).
+    ///
+    /// ⚠ Right only in the default ledger; [`Excluded::reason_in`] is the one to call.
     pub fn reason(&self) -> String {
+        self.reason_in(&Ledger::default())
+    }
+
+    /// The same sentence with blockers in `ledger`'s own spelling — `acme#12` outside the
+    /// default ledger. A bare `#12` names the default ledger's item, so printing it for
+    /// `acme`'s blocker (as 0.2.1 did) named a different piece of work.
+    pub fn reason_in(&self, ledger: &Ledger) -> String {
         match self {
             Excluded::Claimed(holder) => format!("claimed by {holder}"),
             Excluded::Deferred => "deferred".to_string(),
@@ -69,7 +79,7 @@ impl Excluded {
                 "blocked by {}",
                 numbers
                     .iter()
-                    .map(|n| format!("#{n}"))
+                    .map(|n| ledger.number(*n))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -312,7 +322,9 @@ impl Selection {
                 } else {
                     self.excluded
                         .iter()
-                        .map(|(item, why)| format!("#{} {}", item.number, why.reason()))
+                        .map(|(item, why)| {
+                            format!("{} {}", item.short(), why.reason_in(&self.ledger))
+                        })
                         .collect::<Vec<_>>()
                         .join("; ")
                 },
@@ -336,7 +348,11 @@ impl Selection {
             self.excluded.len()
         ));
         for (item, why) in &self.excluded {
-            out.push_str(&format!("  not {}: {}\n", item.short(), why.reason()));
+            out.push_str(&format!(
+                "  not {}: {}\n",
+                item.short(),
+                why.reason_in(&self.ledger)
+            ));
         }
         out
     }
@@ -442,7 +458,12 @@ impl Selection {
                 model::named(v::EXCLUSION_CLASS),
             );
             push(&mut graph, &node, v::ITEM, model::named(&item.iri));
-            push(&mut graph, &node, v::REASON, model::plain(&why.reason()));
+            push(
+                &mut graph,
+                &node,
+                v::REASON,
+                model::plain(&why.reason_in(&self.ledger)),
+            );
         }
         Ok(graph)
     }

@@ -245,8 +245,9 @@ made here, at the first commit.
 
 **The model is checked on read, not only on write.** A hand edit bypassed the Sink's
 refusals, so `urn:iki:ledger:items` runs a corpus check beside the listing: an item typed
-`ledger:Item` that is missing anything a reader needs is **reported**, with the properties
-it lacks, rather than quietly dropped — the worst outcome being work that is neither
+`ledger:Item` that is missing anything a reader needs — or carries it in a form the reader
+cannot parse, such as a `dcterms:created` written as an `xsd:date` — is **reported**, with
+what is wrong, rather than quietly dropped — the worst outcome being work that is neither
 visible nor gone. Asking for such an item directly says what is wrong with it, which "not
 found" would not. `model::REQUIRED` is the one list both directions use.
 
@@ -555,6 +556,37 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### Unreleased: the fixes from an unled audit of 0.2.1
+
+Every item below was reproduced against 0.2.1 by a test that failed because of it
+(`tests/data_safety.rs`, `tests/next_whole_ledger.rs`, `tests/audit_minors.rs`). What an
+operator or a host has to know:
+
+- **Grants.** Purge now needs the graveyard's READ grant too —
+  `urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}:deleted` — eight tokens per ledger
+  instead of seven. Without it purge refuses before touching anything, naming the token.
+- **`ikigai-core` 0.1.80 is the floor**, for `Error::Conflict`: a claim held by someone else
+  is now a conflict, not the transient `Unavailable` a circuit breaker counted.
+- **Ids.** New ids are 23 characters (time, then a per-process sequence) and unique by
+  construction; 0.2.1's identical filings or notes in one millisecond collided. Old ids stay
+  valid. A selection's IRI carries a digest of its content.
+- **Purge reaches a deleted item**, through its tombstone, which gains `ledger:purgedAt`,
+  `ledger:purgeReason` and `ledger:purgedBy`.
+- **A delete removes exactly what it archived**; a write that races it is kept, live.
+- **`next`** computes blocked, cycles and leverage over every open item and narrows by the
+  filters afterwards; it is cached until a write or until its policy's answer could change
+  (`OrderingPolicy::valid_until`, whose default — for a host policy that does not implement
+  it — is "do not cache").
+- **Refused now, where 0.2.1 substituted or accepted:** an unknown `deferred=`, a `limit=`
+  that is not a count, a label containing a comma (adding one; removing one still works), a
+  claim holder named `none` or `any`, and `append kind=` naming one of this crate's own
+  structural classes.
+- **Answered differently:** `Exists` is `false` only for a missing item — a denial or a
+  missing store is an error; a deleted item's number answers NotFound naming its
+  tombstone; `urn:iki:ledger:item:{n}` works as an `item=` argument; a named ledger's `next`
+  spells its own numbers (`acme#1`); `ledger:number` has no `rdfs:domain`, so a tombstone is
+  never inferred to be an item.
+
 ### 0.2.1 made the published grant list true for `item:{id}` as well
 
 A patch, and a narrowing: `urn:iki:ledger:{ledger}:item:{id}`'s `Source` and `Exists`
@@ -585,7 +617,7 @@ so doing them in one version changes an operator's grant list once instead of tw
 | `urn:iki:ledger:counter` | `urn:iki:ledger:default:counter` |
 | `urn:cap:ledger:write` | `urn:cap:ledger:write:default` |
 | `urn:cap:store:read` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}` |
-| `urn:cap:store:write` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}` — plus the `…:deleted` twin for delete and purge, and the `…:deleted` READ twin for purge |
+| `urn:cap:store:write` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}` — plus the `…:deleted` twin for delete and purge |
 
 ⚠ The last two rows are **not** a rename: a host that leaves the old broad tokens in place
 finds that ledger writes stop working, because `urn:iki:store:graph-update` takes the

@@ -503,11 +503,19 @@ pub const REQUIRED: [&str; 5] = [
     v::ext::MODIFIED,
 ];
 
-/// Items in the graph that the readers here cannot see, and what each is missing.
+/// Items in the graph that the readers here cannot see, and what is wrong with each —
+/// `missing ledger:number`, or `unreadable dcterms:created "2026-09-15"`.
 ///
 /// Reported rather than silently skipped: an item a hand-edit made unreadable would
 /// otherwise vanish from every listing while still being *in* the ledger, which is the
 /// worst of both — the work is neither visible nor gone.
+///
+/// ⚠ **Present is not the same as readable.** Until 0.2.1 this asked only whether each
+/// required property was there. An editor writing `dcterms:created` as an `xsd:date` — a
+/// perfectly good RDF date — left it present, so nothing was reported, and the reader,
+/// which needs an `xsd:dateTime`, dropped the item: gone from `items` and `next`, and "no
+/// ledger item" from its own IRI, while it sat in the graph. So the values the reader
+/// parses are parsed here too, by the same functions.
 pub async fn defects(client: &StoreClient<'_, '_>) -> Result<Vec<(String, Vec<String>)>> {
     let values = REQUIRED
         .iter()
@@ -531,7 +539,39 @@ pub async fn defects(client: &StoreClient<'_, '_>) -> Result<Vec<(String, Vec<St
         by_item
             .entry(item.value.clone())
             .or_default()
-            .push(short_name(&missing.value));
+            .push(format!("missing {}", short_name(&missing.value)));
+    }
+    // The values the reader parses, parsed. A property with several values (another
+    // hand edit) is checked value by value.
+    let query = format!(
+        "SELECT ?item ?p ?value WHERE {{ {} }} ORDER BY ?item ?p ?value",
+        client.in_graph(&format!(
+            "?item <{type_}> <{class}> .\nVALUES ?p {{ <{number}> <{created}> <{modified}> }}\n\
+             ?item ?p ?value .",
+            type_ = v::ext::TYPE,
+            class = v::ITEM_CLASS,
+            number = v::NUMBER,
+            created = v::ext::CREATED,
+            modified = v::ext::MODIFIED,
+        ))
+    );
+    for row in client.select(&query).await? {
+        let (Some(item), Some(p), Some(value)) = (row.get("item"), row.get("p"), row.get("value"))
+        else {
+            continue;
+        };
+        let readable = if p.value == v::NUMBER {
+            value.as_i64().is_some()
+        } else {
+            millis(&value.value).is_some()
+        };
+        if !readable {
+            by_item.entry(item.value.clone()).or_default().push(format!(
+                "unreadable {} {:?}",
+                short_name(&p.value),
+                value.value
+            ));
+        }
     }
     Ok(by_item.into_iter().collect())
 }
@@ -548,7 +588,7 @@ fn short_name(iri: &str) -> String {
     }
 }
 
-/// What one subject is missing, for the error a single-item read gives.
+/// What is wrong with one subject, for the error a single-item read gives.
 pub async fn defects_of(client: &StoreClient<'_, '_>, iri: &str) -> Result<Vec<String>> {
     Ok(defects(client)
         .await?
@@ -734,20 +774,40 @@ fn number_in(ledger: &Ledger, id: &str) -> Result<Option<i64>> {
 pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String> {
     let ledger = client.ledger();
     if let Some(number) = number_in(ledger, id)? {
+        // ⚠ **An ITEM with that number.** A tombstone carries its item's number too, so
+        // the bare pattern resolved a deleted item's number to its tombstone, and the
+        // answer was "no ledger item at `…:tombstone:…`" — a NotFound naming a subject
+        // nobody asked for.
         let query = format!(
-            "SELECT ?item WHERE {{ {} }} LIMIT 1",
+            "SELECT ?item WHERE {{ {} }} ORDER BY ?item LIMIT 1",
             client.in_graph(&format!(
-                "?item <{}> {} .",
+                "?item <{}> <{}> ; <{}> {} .",
+                v::ext::TYPE,
+                v::ITEM_CLASS,
                 v::NUMBER,
                 sparql::integer(number)
             ))
         );
-        let rows = client.select(&query).await?;
-        return rows
+        if let Some(found) = client
+            .select(&query)
+            .await?
             .first()
             .and_then(|row| row.get("item"))
-            .map(|binding| binding.value.clone())
-            .ok_or_else(|| Error::NotFound(format!("no ledger item {}", ledger.number(number))));
+        {
+            return Ok(found.value.clone());
+        }
+        return Err(Error::NotFound(
+            match find_tombstone(client, &number.to_string()).await? {
+                Some(tombstone) => format!(
+                    "{} was deleted: its tombstone is `{}` and its content, unless purged, \
+                     is in `{}`",
+                    ledger.number(number),
+                    tombstone.iri,
+                    ledger.deleted_graph()
+                ),
+                None => format!("no ledger item {}", ledger.number(number)),
+            },
+        ));
     }
     Ok(ledger.item(id))
 }
@@ -780,7 +840,16 @@ pub async fn find_tombstone(
         if &other != ledger {
             return Ok(None);
         }
-        format!("?t <{}> {} .", v::DELETED_ITEM, sparql::iri(&iri, "item")?)
+        // The id position may hold a number (`urn:iki:ledger:item:3` resolves as #3), so
+        // it is read the way `resolve_id` reads it.
+        let tail = iri
+            .rsplit_once(":item:")
+            .map(|(_, t)| t)
+            .unwrap_or_default();
+        match number_in(ledger, tail)? {
+            Some(number) => format!("?t <{}> {} .", v::NUMBER, sparql::integer(number)),
+            None => format!("?t <{}> {} .", v::DELETED_ITEM, sparql::iri(&iri, "item")?),
+        }
     } else if reference.starts_with("urn:") {
         // Not a ledger item IRI at all, so nothing here was ever deleted under it.
         return Ok(None);

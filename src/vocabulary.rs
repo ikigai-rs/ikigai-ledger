@@ -209,6 +209,21 @@ pub const PREFIXES: &str = concat!(
     "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n",
 );
 
+/// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
+/// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
+pub const STRUCTURAL_CLASSES: [&str; 10] = [
+    COMMENT_CLASS,
+    TOMBSTONE_CLASS,
+    COUNTER_CLASS,
+    LEDGER_CLASS,
+    POLICY_CLASS,
+    SELECTION_CLASS,
+    RANKING_CLASS,
+    EXCLUSION_CLASS,
+    STATUS_CLASS,
+    CLOSE_REASON_CLASS,
+];
+
 /// The close reasons, as `(short name, IRI)` — the `one_of` an ArgSpec declares and the
 /// value a caller writes.
 pub const CLOSE_REASONS: [(&str, &str); 5] = [

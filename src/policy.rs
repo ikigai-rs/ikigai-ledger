@@ -233,7 +233,12 @@ const AGE_SILENT_DAYS: u64 = 6;
 impl Leverage {
     fn points(&self, c: &Candidate, now: u64) -> (i64, Vec<String>) {
         let mut because = Vec::new();
-        let leverage_points = 10 * c.leverage as i64;
+        // ⚠ Saturating throughout: every input here is read from a graph an editor may have
+        // written, and `ledger:priority -9223372036854775808` is a valid `xsd:integer` that
+        // made `(5 - p) * 4` panic in a debug build and wrap to nonsense in a release one.
+        let leverage_points = i64::try_from(c.leverage)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(10);
         if c.leverage > 0 {
             because.push(format!(
                 "unblocks {} open item(s){} (+{leverage_points})",
@@ -245,7 +250,10 @@ impl Leverage {
                 }
             ));
         }
-        let priority_points = c.priority.map(|p| (5 - p) * 4).unwrap_or(0);
+        let priority_points = c
+            .priority
+            .map(|p| 5i64.saturating_sub(p).saturating_mul(4))
+            .unwrap_or(0);
         because.push(match c.priority {
             Some(p) => format!("priority {p} (+{priority_points})"),
             None => "no priority set (+0)".to_string(),
@@ -255,7 +263,12 @@ impl Leverage {
         if age_points > 0 {
             because.push(format!("filed {days} day(s) ago (+{age_points})"));
         }
-        (leverage_points + priority_points + age_points, because)
+        (
+            leverage_points
+                .saturating_add(priority_points)
+                .saturating_add(age_points),
+            because,
+        )
     }
 }
 
@@ -490,6 +503,19 @@ mod tests {
         };
         assert_eq!(at(now), at(now + DAY - 6));
         assert_ne!(at(now), at(now + DAY - 5));
+    }
+
+    /// A priority no Sink would accept but an editor can write is scored, not a panic.
+    #[test]
+    fn an_extreme_hand_written_priority_saturates_instead_of_overflowing() {
+        let extreme = vec![
+            candidate(1, Some(i64::MIN), 1_000),
+            candidate(2, Some(i64::MAX), 1_000),
+            candidate(3, Some(1), 1_000),
+        ];
+        let ranked = Leverage.order(&inputs(extreme));
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].iri, "urn:iki:ledger:item:1");
     }
 
     fn young_only(now: u64) -> Candidate {
