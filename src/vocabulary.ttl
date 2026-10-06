@@ -166,6 +166,11 @@ ledger:revision a rdf:Property ;
     rdfs:label "revision" ;
     rdfs:comment "The revision the item was filed against — a commit sha, a tag, a version. The commonest way a review ledger rots is a finding about line 40 of a file that has since moved, and this is the pin. One per item rather than one per ledger:about target, deliberately: it states what the tree looked like when the item was FILED, which stays unambiguous when an item is about several resources. Where the target IRI can carry its own revision, prefer that and this is the coarse stamp." .
 
+ledger:key a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "key" ;
+    rdfs:comment "The CALLER'S name for an item: unique per ledger, chosen by whoever files it (`append key=`), and the thing a keyed append checks before it files. Its first use is idempotence (a hook re-run, two hooks racing) and its second is lookup by a foreign id (`urn:iki:ledger:item:key:{key}`, `items key=`) — a roborev finding, a kata issue — which is why it is called a key and not an idempotency key. A literal, not an IRI, so any caller's identifier fits; its shape is fixed (ASCII letters, digits, `-`, `.`, `_`, `~` and `:`, at most 256 characters) so it stays a legal IRI segment and survives a URL path. Compared exactly; never rewritten after filing. ⚠ No domain, for the ledger:number reason: an item AND the tombstone it leaves both carry it, so a deleted item's key stays TAKEN — a replayed request must not resurrect what someone deliberately deleted — and rdfs:domain ledger:Item would make every tombstone an inferred item to a reasoning consumer. ⚠ A key is a NAME, kept on the tombstone through a purge like the number is: it is not content, so do not put content in it." .
+
 ledger:label a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range xsd:string ;

@@ -137,8 +137,9 @@ per-graph token for that ledger; see "What is enforced, and where" for the whole
 is code the host registered at boot and nothing about it is in the graph.
 
 Every read serves `text/plain` (the default — a line per item, greppable) and
-`text/turtle` (the graph). An `as=` this module cannot answer in is **refused**, never
-substituted.
+`text/turtle` (the graph); `items`, `item:{id}` and `next` also serve `application/json`,
+and so do the answers of `append`, `comment`, `close` and `link` — see "The JSON face"
+below. An `as=` this module cannot answer in is **refused**, never substituted.
 
 ## Ledgers: a name, not a tag and not an argument
 
@@ -227,6 +228,90 @@ one: `acme#12`, and a bare `#12` in the default ledger. Sharing a counter would 
 in its sequence. A number qualified with a *different* ledger's name is refused rather
 than looked up: `acme#12` and `#12` are different items, and silently resolving the wrong
 one is the worst available answer.
+
+## Keys: file once, under your own name
+
+`append key=<k>` files an item under **the caller's own name for it** — a hook's finding id,
+an importer's issue id — and that name is unique in the ledger. If an item already carries
+the key, **nothing is filed** and the answer names that item, marked:
+
+```text
+$ sink urn:iki:ledger:append key=urn:kata:issue:01JZ <<< "Port the importer"
+#7 urn:iki:ledger:default:item:01m4a2…
+$ sink urn:iki:ledger:append key=urn:kata:issue:01JZ <<< "Port the importer (re-run)"
+#7 urn:iki:ledger:default:item:01m4a2… existing open
+```
+
+A filing answers exactly as before, `#N <iri>`; `existing` is a third word a filing never
+has, followed by the item's status (`open`, `closed` or `deleted`). In the JSON face it is
+`"outcome": "existing"`.
+
+★ **The check and the filing are one store update.** The append's SPARQL carries
+`FILTER NOT EXISTS { ?taken ledger:key "<k>" }` beside the counter's allocation, so when the
+key is taken the update matches nothing and writes nothing — no item, no number spent — and
+the store holds its write lock across one update's evaluation and insert, so two appends
+cannot both see the key free. That is the whole point: the pattern it replaces (list the
+items `about` the key, append when the list is empty) is a check-then-act race, and two
+hooks running at once both filed. `tests/keyed_append.rs` reproduces that race and pins the
+fix — eight concurrent keyed appends, twenty rounds, one item each time — and
+`tests/durable.rs` runs the same on RocksDB.
+
+**A deleted item's key stays taken.** The tombstone a delete leaves carries the key (and
+keeps it through a purge, as it keeps the number: a key is a name, not content), so a keyed
+append replayed after a delete answers `existing deleted` rather than filing the item
+again. A keyed append is exactly the request that gets replayed — a hook re-run, an import
+run twice — and a replay must not resurrect what someone deliberately deleted. Filing it
+again is a deliberate act: another key, or none.
+
+A key is ASCII letters, digits, `-`, `.`, `_`, `~` and `:`, at most 256 characters, compared
+exactly. The shape is fixed so a key is a legal IRI segment **and survives gonk's HTTP
+door**, which maps an IRI to a URL path by turning every `:` into a `/` — so a `/` in a key
+would come back as a different key. Both foreign ids the gonk bridges carry fit as they
+stand. It is unique **per ledger**: two ledgers may use one key.
+
+Finding an item by its key:
+
+| form | where |
+| --- | --- |
+| `urn:iki:ledger:{ledger}:item:key:{key}` | the item resource itself — Source, Exists, Sink, Delete |
+| `item=key:{key}` | every write that names an item (`comment`, `close`, `link`, `claim`, …) and `purge` |
+| `items key={key}` | a filter, composing with the others — `status=all` to include a closed item |
+
+## The JSON face
+
+`as=application/json` is the machine contract; the plain face is for people and is not a
+format to parse. Every document is one compact line carrying `"schema": 1` and `"ledger"`.
+**Adding a field does not change the schema number; renaming, removing or retyping one
+does.** Absent values are `null`, times are `xsd:dateTime` strings in UTC, and the item
+object is the same wherever it appears:
+
+```json
+{"schema":1,"ledger":"default","item":{
+  "number":12,"display":"#12","iri":"urn:iki:ledger:default:item:01m4…",
+  "kind":null,"title":"Fix the thing","body":"It is broken.",
+  "status":"open","closed_reason":null,"priority":1,"deferred":false,
+  "labels":["rust"],"about":["urn:repo:file:x/src/a.rs"],"key":"urn:roborev:finding:0123…",
+  "author":"brian","revision":null,"claim":{"holder":"satellite","purpose":"brief-x"},
+  "created":"2026-09-15T00:00:00.000Z","modified":"2026-09-15T00:00:00.000Z",
+  "links":[{"type":"blocks","target":{"number":13,"display":"#13","iri":"urn:iki:ledger:default:item:01m5…"}}],
+  "comments":[{"id":"urn:iki:ledger:default:comment:01m6…","author":"chris",
+               "time":"2026-09-15T00:00:00.000Z","text":"looked at it"}]}}
+```
+
+| resource | document |
+| --- | --- |
+| `item:{id}` | `{schema, ledger, item}` |
+| `items` | `{schema, ledger, count, items: [item…], unreadable: [{iri, defects}]}` — `unreadable` is the plain face's ⚠ footer, as data |
+| `next` | `{schema, ledger, policy, weighs, generated_at, ready, ranking: [{rank, score, because, item}], excluded: [{why, reason, holder, blocked_by, item}]}` — `why` is `claimed`, `deferred` or `blocked` |
+| `append`, `comment`, `close`, `link` | `{schema, ledger, outcome, item: {number, display, iri}, …}` — `outcome` is `filed`, `existing`, `commented`, `closed`, `linked` or `unlinked`, and only that outcome's own fields follow: `status` and `key` (append), `comment` (comment, and close with a note), `reason` (close), `type` and `target` (link) |
+
+`links` are the item's **outbound** edges — `blocks`, then `parent`, then `related` — and a
+target that is not a live item in the ledger has a `null` number. The documents are Rust
+types in `ikigai_ledger::json`, `Deserialize` as well as `Serialize` and `#[non_exhaustive]`,
+so a Rust consumer reads the same type this crate writes and a later field does not break
+it. `tests/faces.rs` pins every document as a literal, and pins the plain face byte for
+byte as 0.3.0 rendered it — the one change there is a `key:` line in an item's detail, and
+only for an item that has a key.
 
 ## Assume an editor got there first
 
@@ -530,7 +615,7 @@ one graph.
 
 ## Not built, on purpose
 
-- **No HTML face.** Items serve `text/turtle` and `text/plain`. A rendered face belongs with
+- **No HTML face.** Items serve `text/plain`, `text/turtle` and `application/json`. A rendered face belongs with
   the rest of the browse stack, which dispatches XSLT on `rdf:type`; nothing here forecloses
   it.
 - **No event graph.** kata records every mutation as an event row. Here the mutation history
@@ -541,6 +626,9 @@ one graph.
   between two requests in one process is also possible — RDF has no partial unique index, and
   SHACL cannot see a race. Both are safe for a single operator and are the first things to
   harden for more than one.
+- **No key on an existing item.** A key is given at filing and never changed, so an item
+  filed before keys existed cannot gain one through a resource here — that is one SPARQL
+  UPDATE over the graph, and a migration's job rather than an endpoint's.
 - **No `about` removal, no comment editing.** Comments are append-only by design; `about`
   removal is an omission, not a principle.
 - **No `deferred-until` date.** Readiness that turns on the wall clock would go stale in the
@@ -555,6 +643,25 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### Unreleased (0.4.0): a keyed append and a JSON face (ledger #779)
+
+Additive in behavior — every request 0.3.0 accepted answers the same bytes in the plain
+face — but **a minor release, not a patch**, for one reason: `model::Item` gains a public
+`key` field and `model::Filter` a public `key` filter, and both are constructible structs,
+so a struct literal outside this crate stops compiling. No consumer in the ecosystem builds
+either (searched), but a `"0.3"` pin will not pick this up, which is the point of the rule.
+
+- **`append key=`**: at most one item per key per ledger, checked and filed in one store
+  update; a taken key answers the existing item (`#N <iri> existing <status>`). A deleted
+  item's key stays taken. See "Keys" above.
+- **Lookup by key**: `urn:iki:ledger:{ledger}:item:key:{key}`, `item=key:{key}`, and the
+  `items key=` filter. `ledger:key` is in the vocabulary, with no `rdfs:domain` (the item and
+  its tombstone both carry it, as with `ledger:number`).
+- **`as=application/json`** on `items`, `item:{id}` and `next`, and on the answers of
+  `append`, `comment`, `close` and `link`: schema 1, typed in `ikigai_ledger::json`.
+- An item's plain detail shows `key:` after `iri:` when it has one; nothing else in the
+  plain face changed.
 
 ### 0.3.0: the fixes from an unled audit of 0.2.1
 

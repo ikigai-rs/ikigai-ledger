@@ -98,6 +98,7 @@ use ikigai_core::{
 use oxrdf::Graph;
 use sha2::{Digest, Sha256};
 
+use crate::json;
 use crate::ledger::{Ledger, LedgerGrammar};
 use crate::model::{self, Deferred, Filter, Holder, Item, Status};
 use crate::policy::{OrderingPolicy, Policies};
@@ -181,7 +182,15 @@ fn ledger_for(inv: &Invocation<'_>, need: Need) -> Result<Ledger> {
 const PLAIN: &str = "text/plain";
 /// `text/turtle` — the graph face.
 const TURTLE: &str = "text/turtle";
+/// `application/json` — the machine face, [`crate::json`].
+const JSON: &str = json::MEDIA_TYPE;
+/// The faces of the two reads that are not about items (`ledgers`, `policy:{name}`).
 const FACES: [&str; 2] = [PLAIN, TURTLE];
+/// The faces of the item reads: `items`, `item:{id}`, `next`.
+const READ_FACES: [&str; 3] = [PLAIN, TURTLE, JSON];
+/// The faces of a write's ANSWER: `append`, `comment`, `close`, `link`. No Turtle — an
+/// answer is a receipt, not a graph, and the graph is one read away.
+const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 
 /// Bind the ledger with the built-in ordering policies (`priority-recency`, then
 /// `leverage`).
@@ -238,6 +247,16 @@ fn plain(text: impl Into<String>) -> Representation {
     )
 }
 
+/// An `application/json` representation — [`crate::json`]'s documents.
+fn json_repr(bytes: Vec<u8>) -> Representation {
+    Representation::new(ReprType::new(JSON), bytes)
+}
+
+/// A JSON read, cacheable under the same threads as every other read here.
+fn json_face(bytes: Vec<u8>) -> Representation {
+    cached(json_repr(bytes))
+}
+
 /// A representation in the face the caller asked for, cacheable under the store's write
 /// threads.
 fn face(item_text: String, graph: Option<Graph>, want: &str) -> Result<Representation> {
@@ -248,8 +267,12 @@ fn face(item_text: String, graph: Option<Graph>, want: &str) -> Result<Represent
         ),
         _ => plain(item_text),
     };
-    Ok(repr
-        .cacheable()
+    Ok(cached(repr))
+}
+
+/// Cacheable, hung from the store's three write threads.
+fn cached(repr: Representation) -> Representation {
+    repr.cacheable()
         .depends_on(ikigai_store::UPDATE_THREAD)
         .depends_on(ikigai_store::LOAD_THREAD)
         // ★ The third writing IRI means a third thread, and this crate's own writes all go
@@ -257,15 +280,15 @@ fn face(item_text: String, graph: Option<Graph>, want: &str) -> Result<Represent
         // here serving stale bytes after every ledger write — silently, on the branch that
         // looks like success. `a_write_through_the_narrow_door_invalidates_a_cached_read`
         // in `tests/endpoints.rs` is what keeps it true.
-        .depends_on(ikigai_store::GRAPH_UPDATE_THREAD))
+        .depends_on(ikigai_store::GRAPH_UPDATE_THREAD)
 }
 
 /// Which face was asked for. An `as` this endpoint cannot serve is **refused**, never
 /// substituted — the caller asked a question and a different answer is not a better one.
-fn wanted_face(inv: &Invocation<'_>) -> Result<&'static str> {
+fn wanted_face(inv: &Invocation<'_>, faces: &[&'static str]) -> Result<&'static str> {
     match inv.inline_str("as").ok() {
         None => Ok(PLAIN),
-        Some(asked) => FACES
+        Some(asked) => faces
             .iter()
             .find(|face| bare(asked) == **face)
             .copied()
@@ -273,7 +296,7 @@ fn wanted_face(inv: &Invocation<'_>) -> Result<&'static str> {
                 name: "as".to_string(),
                 detail: format!(
                     "`{asked}` is not a face this resource serves; one of {}",
-                    FACES.join(", ")
+                    faces.join(", ")
                 ),
             }),
     }
@@ -413,7 +436,8 @@ async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<I
             // gives it, so `urn:iki:ledger:item:1` — which RESOLVES as a resource, the
             // number in the id position — means #1 here too. Until 0.2.1 it was looked up
             // verbatim as an item minted with the id `1`, and was not found.
-            Some((_, canonical)) => match canonical.rsplit_once(":item:") {
+            // `split_once`: a ledger name cannot contain `:item:`, and a key after it can.
+            Some((_, canonical)) => match canonical.split_once(":item:") {
                 Some((_, tail)) => model::resolve_id(client, tail).await?,
                 None => canonical,
             },
@@ -525,6 +549,18 @@ async fn write_comment(
     Ok(comment)
 }
 
+/// The comment [`write_comment`] just wrote, as the JSON face carries it — built from what
+/// was written rather than read back, because the write is the authority on what it said.
+fn written(iri: &str, item: &str, text: &str, author: Option<&str>, now: u64) -> json::Comment {
+    json::comment(&model::Comment {
+        iri: iri.to_string(),
+        on_item: item.to_string(),
+        body: text.to_string(),
+        author: author.map(str::to_string),
+        created: now,
+    })
+}
+
 /// Every scope an action that reads the ledger transitively needs: this module's own read
 /// grant, and the store's **per-graph** read family.
 ///
@@ -596,16 +632,22 @@ fn ledger_arg() -> ArgSpec {
         .optional()
 }
 
-/// The `as` ArgSpec every read face declares.
-fn as_arg() -> ArgSpec {
+/// The `as` ArgSpec, over the faces this action really serves.
+fn as_arg(faces: &[&'static str]) -> ArgSpec {
+    let json = if faces.contains(&JSON) {
+        " `application/json` is the versioned machine contract (`\"schema\": 1`, see the \
+         crate's `json` module); the plain face is for people and is not a format to parse."
+    } else {
+        ""
+    };
     ArgSpec::new("as")
         .summary(format!(
             "The face to serve; one of {}. An `as` this resource cannot answer in is \
-             refused, never substituted.",
-            FACES.join(", ")
+             refused, never substituted.{json}",
+            faces.join(", ")
         ))
         .class(v::ext::XSD_STRING)
-        .one_of(FACES)
+        .one_of(faces.iter().copied())
         .default_value(PLAIN)
         .optional()
 }
@@ -614,9 +656,9 @@ fn as_arg() -> ArgSpec {
 fn item_arg(summary: &str) -> ArgSpec {
     ArgSpec::new("item")
         .summary(format!(
-            "{summary} Accepts `#12`, `12`, an opaque id, or the full \
-             `urn:iki:ledger:item:{{id}}` IRI — a human types the number and a machine \
-             carries the IRI."
+            "{summary} Accepts `#12`, `12`, an opaque id, `key:{{key}}` (the caller's own \
+             name, from `append key=`), or the full `urn:iki:ledger:item:{{id}}` IRI — a \
+             human types the number and a machine carries the IRI."
         ))
         .class(v::ext::XSD_STRING)
 }
@@ -637,7 +679,7 @@ impl Endpoint for ItemsEndpoint {
             return Err(unsupported("ledger-items", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
-        let want = wanted_face(inv)?;
+        let want = wanted_face(inv, &READ_FACES)?;
         let filter = Filter {
             status: match inv.inline_str("status").unwrap_or("open") {
                 "closed" => Status::Closed,
@@ -654,6 +696,11 @@ impl Endpoint for ItemsEndpoint {
             labels: split_labels(inv.inline_str("labels").ok()),
             without: split_labels(inv.inline_str("without").ok()),
             about: inv.inline_str("about").ok().map(str::to_string),
+            key: inv
+                .inline_str("key")
+                .ok()
+                .map(model::parse_key)
+                .transpose()?,
             holder: match inv.inline_str("holder").ok() {
                 None | Some("any") => Holder::Any,
                 Some("none") => Holder::None,
@@ -682,6 +729,22 @@ impl Endpoint for ItemsEndpoint {
                 item.triples(&mut graph);
             }
             return face(String::new(), Some(graph), want);
+        }
+        if want == JSON {
+            let rows: Vec<&Item> = items.iter().collect();
+            let rendered = json::items(&client, &rows).await?;
+            let doc = json::ItemsDocument {
+                schema: json::SCHEMA,
+                ledger: client.ledger().name().to_string(),
+                count: rendered.len(),
+                items: rendered,
+                unreadable: model::defects(&client)
+                    .await?
+                    .into_iter()
+                    .map(|(iri, defects)| json::Unreadable { iri, defects })
+                    .collect(),
+            };
+            return Ok(json_face(json::render(&doc)?));
         }
         let mut text = if items.is_empty() {
             "no items match\n".to_string()
@@ -768,6 +831,18 @@ impl Endpoint for ItemsEndpoint {
                         .optional(),
                 )
                 .input(
+                    ArgSpec::new("key")
+                        .summary(
+                            "The caller's own name for an item (`append key=`). At most one \
+                             item in a ledger carries a key, so this finds it — subject to \
+                             `status` like every filter here (`status=all` to include a \
+                             closed one). `urn:iki:ledger:item:key:{key}` is the same lookup \
+                             as a resource.",
+                        )
+                        .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(
                     ArgSpec::new("holder")
                         .summary("`any` (default), `none` for unclaimed, or a holder's name.")
                         .class(v::ext::XSD_STRING)
@@ -795,9 +870,10 @@ impl Endpoint for ItemsEndpoint {
                         .default_value("50")
                         .optional(),
                 )
-                .input(as_arg())
+                .input(as_arg(&READ_FACES))
                 .output(PLAIN)
-                .output(TURTLE),
+                .output(TURTLE)
+                .output(JSON),
         )
     }
 }
@@ -854,8 +930,19 @@ impl Endpoint for ItemEndpoint {
         })?;
         match inv.request.verb {
             Verb::Source => {
-                let want = wanted_face(inv)?;
+                let want = wanted_face(inv, &READ_FACES)?;
                 let item = require_item(&client, id).await?;
+                if want == JSON {
+                    let doc = json::ItemDocument {
+                        schema: json::SCHEMA,
+                        ledger: client.ledger().name().to_string(),
+                        item: json::items(&client, &[&item])
+                            .await?
+                            .pop()
+                            .expect("one rendered item"),
+                    };
+                    return Ok(json_face(json::render(&doc)?));
+                }
                 let comments = model::load_comments(&client, &item.iri).await?;
                 if want == TURTLE {
                     let mut graph = Graph::new();
@@ -969,8 +1056,9 @@ impl Endpoint for ItemEndpoint {
         let id_input = || {
             ArgSpec::new("id")
                 .summary(
-                    "The item's opaque id or its short number — both resolve, because a \
-                     human types `12` and a machine carries the IRI.",
+                    "The item's opaque id, its short number, or `key:{key}` — the caller's \
+                     own name for it (`append key=`). All resolve, because a human types \
+                     `12`, a machine carries the IRI, and a bridge carries its own id.",
                 )
                 .class(v::ext::XSD_STRING)
                 .binding()
@@ -987,9 +1075,10 @@ impl Endpoint for ItemEndpoint {
                     .input(ledger_arg())
                     .summary("The item, its metadata, its links and its comments.")
                     .input(id_input())
-                    .input(as_arg())
+                    .input(as_arg(&READ_FACES))
                     .output(PLAIN)
-                    .output(TURTLE),
+                    .output(TURTLE)
+                    .output(JSON),
             ))
             .action(read_action(
                 ikigai_core::ActionSpec::new(Verb::Exists)
@@ -1326,6 +1415,13 @@ async fn delete_item(
             literal(author)
         ));
     }
+    // ★ The key goes onto the tombstone, in the same update that removes it from the item,
+    // so there is no instant at which the key is free: a keyed append replayed after a
+    // delete answers the deleted item instead of filing it again. Kept through a purge as
+    // well — it is a name, like the number, not content.
+    if let Some(key) = &item.key {
+        triples.push_str(&format!("\n<{tombstone}> <{}> {} .", v::KEY, literal(key)));
+    }
     // Step 2 of 2 — the live graph, which IS the commit point. Removing the item's quads
     // and writing its tombstone are one scoped update and therefore atomic: there is no
     // instant in which the item is gone and unaccounted for.
@@ -1426,6 +1522,14 @@ impl Endpoint for AppendEndpoint {
             return Err(unsupported("ledger-append", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        // Every argument is checked before anything is written: a bad `as` or a bad key
+        // refused AFTER filing would leave an item the caller was told was not filed.
+        let want = wanted_face(inv, &WRITE_FACES)?;
+        let key = inv
+            .inline_str("key")
+            .ok()
+            .map(model::parse_key)
+            .transpose()?;
         let now = now_ms(inv)?;
         let (title, body) = split_content(inv.inline_str("content")?)?;
         let author = inv.inline_str("author").ok();
@@ -1497,6 +1601,23 @@ impl Endpoint for AppendEndpoint {
                 sparql::iri(target, "about")?
             ));
         }
+        // ★ THE KEY'S UNIQUENESS IS A CLAUSE OF THE SAME STATEMENT, not a check before it.
+        // The WHERE below yields exactly one solution when the key is free and NONE when
+        // any subject in this ledger's graph already carries it — an item, or the tombstone
+        // of a deleted one — and with no solution the DELETE/INSERT does nothing: no item,
+        // no number spent. The store holds its write lock across one update's evaluation
+        // AND its insert, so two keyed appends cannot both see the key free; the gonk
+        // bridges' read-then-append could, and filed twice (`tests/keyed_append.rs`).
+        let key_guard = match &key {
+            Some(key) => {
+                triples.push_str(&format!("\n<{iri}> <{}> {} .", v::KEY, literal(key)));
+                format!(
+                    "\n  FILTER NOT EXISTS {{ {} }}",
+                    client.in_graph(&format!("?taken <{}> {}", v::KEY, literal(key)))
+                )
+            }
+            None => String::new(),
+        };
 
         // ★ ONE statement, so the number cannot be allocated twice. The counter is read,
         // incremented, rewritten and stamped onto the new item inside a single SPARQL
@@ -1514,7 +1635,7 @@ impl Endpoint for AppendEndpoint {
             "DELETE {{ {delete} }}\nINSERT {{ {insert} }}\nWHERE {{\n  \
              {{ {{ SELECT ?last WHERE {{ {last_q} }} ORDER BY DESC(?last) LIMIT 1 }}\n    \
              UNION\n    {{ BIND({zero} AS ?last) FILTER NOT EXISTS {{ {any_q} }} }} }}\n  \
-             OPTIONAL {{ {old_q} }}\n  BIND(?last + 1 AS ?new)\n}}",
+             OPTIONAL {{ {old_q} }}\n  BIND(?last + 1 AS ?new){key_guard}\n}}",
             delete = client.in_graph(&format!("<{counter}> <{}> ?old", v::LAST_NUMBER)),
             insert = client.in_graph(&format!(
                 "<{counter}> <{type_}> <{class}> ; <{last}> ?new .\n{triples}",
@@ -1529,13 +1650,50 @@ impl Endpoint for AppendEndpoint {
         );
         client.update(&update).await?;
 
+        // Which item the key names now says what happened: the one just minted (filed), or
+        // one that was there first (existing, and nothing was written).
+        if let Some(key) = &key {
+            let found = model::find_by_key(&client, key).await?.ok_or_else(|| {
+                Error::Endpoint(format!(
+                    "a keyed append for `{key}` neither filed an item nor found one: the store \
+                     accepted an update that changed nothing, which should be impossible"
+                ))
+            })?;
+            if found.item != iri {
+                let status = match &found.tombstone {
+                    Some(_) => "deleted",
+                    None => match model::load_item(&client, &found.item).await? {
+                        Some(item) if !item.open => "closed",
+                        _ => "open",
+                    },
+                };
+                return append_answer(
+                    &client,
+                    want,
+                    "existing",
+                    status,
+                    found.number,
+                    &found.item,
+                    Some(key),
+                );
+            }
+        }
+
         let item = model::load_item(&client, &iri).await?.ok_or_else(|| {
             Error::Endpoint(format!(
                 "the item was written but does not read back at {iri}: the store accepted \
                  an update that changed nothing, which should be impossible"
             ))
         })?;
-        Ok(plain(format!("{} {}\n", item.short(), item.iri)))
+        append_answer(
+            &client,
+            want,
+            "filed",
+            "open",
+            item.number,
+            &item.iri,
+            key.as_deref(),
+        )
     }
 
     fn name(&self) -> &str {
@@ -1608,15 +1766,64 @@ impl Endpoint for AppendEndpoint {
                         .class(v::ext::XSD_STRING)
                         .optional(),
                 )
-                .output(PLAIN),
+                .input(
+                    ArgSpec::new("key")
+                        .summary(
+                            "Your own name for this item — a hook's finding id, an importer's \
+                             issue id — unique in this ledger. If an item already carries it \
+                             (or carried it and was deleted), NOTHING is filed and the answer \
+                             names that item, marked `existing`: `#12 <iri> existing open` in \
+                             text, `\"outcome\": \"existing\"` in JSON. The check and the \
+                             filing are one store update, so concurrent appends with one key \
+                             file one item. ASCII letters, digits, `-` `.` `_` `~` `:`, at \
+                             most 256; find it later at `urn:iki:ledger:item:key:{key}`.",
+                        )
+                        .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(as_arg(&WRITE_FACES))
+                .output(PLAIN)
+                .output(JSON),
             CAP_WRITE,
         );
         Description::new("ledger-append")
             .title("File a ledger item")
-            .summary("Append a new item to the ledger and answer with its number and IRI.")
+            .summary(
+                "Append a new item to the ledger and answer with its number and IRI — or, \
+                 with `key`, answer the item already filed under that key and file nothing.",
+            )
             .verb(Verb::Meta)
             .action(spec)
     }
+}
+
+/// The append's answer, in the face asked for.
+///
+/// The plain face is `#12 <iri>` for a filing — byte for byte what 0.3.0 answered, so a
+/// caller reading the first two words is unaffected — and `#12 <iri> existing <status>`
+/// when a key named an item already there: the marker is a third word that a filing never
+/// has, so it cannot be mistaken for one.
+fn append_answer(
+    client: &StoreClient<'_, '_>,
+    want: &str,
+    outcome: &str,
+    status: &str,
+    number: i64,
+    iri: &str,
+    key: Option<&str>,
+) -> Result<Representation> {
+    let ledger = client.ledger();
+    if want == JSON {
+        let mut answer = json::answer(ledger, outcome, json::item_ref(ledger, number, iri));
+        answer.status = Some(status.to_string());
+        answer.key = key.map(str::to_string);
+        return Ok(json_repr(json::render(&answer)?));
+    }
+    Ok(plain(if outcome == "filed" {
+        format!("{} {iri}\n", ledger.number(number))
+    } else {
+        format!("{} {iri} {outcome} {status}\n", ledger.number(number))
+    }))
 }
 
 // ------------------------------------------------------------------------- comment
@@ -1631,6 +1838,7 @@ impl Endpoint for CommentEndpoint {
             return Err(unsupported("ledger-comment", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let want = wanted_face(inv, &WRITE_FACES)?;
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let text = inv.inline_str("content")?;
@@ -1640,14 +1848,18 @@ impl Endpoint for CommentEndpoint {
                 detail: "an empty comment says nothing and cannot be edited afterwards".to_string(),
             });
         }
-        let comment = write_comment(
-            &client,
-            &item.iri,
-            text.trim(),
-            inv.inline_str("author").ok(),
-            now,
-        )
-        .await?;
+        let author = inv.inline_str("author").ok();
+        let comment = write_comment(&client, &item.iri, text.trim(), author, now).await?;
+        if want == JSON {
+            let ledger = client.ledger();
+            let mut answer = json::answer(
+                ledger,
+                "commented",
+                json::item_ref(ledger, item.number, &item.iri),
+            );
+            answer.comment = Some(written(&comment, &item.iri, text.trim(), author, now));
+            return Ok(json_repr(json::render(&answer)?));
+        }
         Ok(plain(format!(
             "commented on {} ({comment})\n",
             item.short()
@@ -1683,7 +1895,9 @@ impl Endpoint for CommentEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
-                    .output(PLAIN),
+                    .input(as_arg(&WRITE_FACES))
+                    .output(PLAIN)
+                    .output(JSON),
                 CAP_WRITE,
             ))
     }
@@ -1701,6 +1915,7 @@ impl Endpoint for CloseEndpoint {
             return Err(unsupported("ledger-close", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let want = wanted_face(inv, &WRITE_FACES)?;
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let name = inv.inline_str("reason").unwrap_or("done");
@@ -1722,17 +1937,24 @@ impl Endpoint for CloseEndpoint {
                 touch(&client, &item.iri, now),
             ]))
             .await?;
+        let mut note_written = None;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
-                write_comment(
-                    &client,
-                    &item.iri,
-                    note.trim(),
-                    inv.inline_str("author").ok(),
-                    now,
-                )
-                .await?;
+                let author = inv.inline_str("author").ok();
+                let comment = write_comment(&client, &item.iri, note.trim(), author, now).await?;
+                note_written = Some(written(&comment, &item.iri, note.trim(), author, now));
             }
+        }
+        if want == JSON {
+            let ledger = client.ledger();
+            let mut answer = json::answer(
+                ledger,
+                "closed",
+                json::item_ref(ledger, item.number, &item.iri),
+            );
+            answer.reason = Some(name.to_string());
+            answer.comment = note_written;
+            return Ok(json_repr(json::render(&answer)?));
         }
         Ok(plain(format!("closed {} ({name})\n", item.short())))
     }
@@ -1781,7 +2003,9 @@ impl Endpoint for CloseEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
-                    .output(PLAIN),
+                    .input(as_arg(&WRITE_FACES))
+                    .output(PLAIN)
+                    .output(JSON),
                 CAP_WRITE,
             ))
     }
@@ -2088,6 +2312,7 @@ struct LinkEndpoint;
 impl Endpoint for LinkEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let want = wanted_face(inv, &WRITE_FACES)?;
         let now = now_ms(inv)?;
         let from = require_item(&client, inv.inline_str("item")?).await?;
         let to = require_item(&client, inv.inline_str("content")?).await?;
@@ -2131,6 +2356,14 @@ impl Endpoint for LinkEndpoint {
         client
             .update(&batch(&[update, touch(&client, &from.iri, now)]))
             .await?;
+        if want == JSON {
+            let ledger = client.ledger();
+            let mut answer =
+                json::answer(ledger, said, json::item_ref(ledger, from.number, &from.iri));
+            answer.link_type = Some(name.to_string());
+            answer.target = Some(json::item_ref(ledger, to.number, &to.iri));
+            return Ok(json_repr(json::render(&answer)?));
+        }
         Ok(plain(format!(
             "{said} {} {name} {}\n",
             from.short(),
@@ -2176,7 +2409,9 @@ impl Endpoint for LinkEndpoint {
                             .class(v::ext::XSD_STRING),
                     )
                     .input(type_arg())
-                    .output(PLAIN),
+                    .input(as_arg(&WRITE_FACES))
+                    .output(PLAIN)
+                    .output(JSON),
                 CAP_WRITE,
             ))
             .action(write_scopes(
@@ -2190,7 +2425,9 @@ impl Endpoint for LinkEndpoint {
                             .class(v::ext::XSD_STRING),
                     )
                     .input(type_arg())
-                    .output(PLAIN),
+                    .input(as_arg(&WRITE_FACES))
+                    .output(PLAIN)
+                    .output(JSON),
                 CAP_WRITE,
             ))
     }
@@ -2428,7 +2665,7 @@ impl Endpoint for NextEndpoint {
             return Err(unsupported("ledger-next", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
-        let want = wanted_face(inv)?;
+        let want = wanted_face(inv, &READ_FACES)?;
         let now = now_ms(inv)?;
         let name = inv
             .inline_str("policy")
@@ -2455,13 +2692,13 @@ impl Endpoint for NextEndpoint {
         let set = select::ready(&client, &filter).await?;
         let valid_until = select::valid_until(&set, policy.as_ref(), now);
         let selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
-        let repr = if want == TURTLE {
-            Representation::new(
+        let repr = match want {
+            TURTLE => Representation::new(
                 ReprType::new(TURTLE).with_param("charset", "utf-8"),
                 selection.turtle()?,
-            )
-        } else {
-            plain(selection.plain())
+            ),
+            JSON => json_repr(json::render(&json::next(&client, &selection).await?)?),
+            _ => plain(selection.plain()),
         };
         // ★ Cached under the store's write threads AND until the policy's own horizon — the
         // half a thread cannot carry. Reading the clock records no dependency, so a ranking
@@ -2555,9 +2792,10 @@ impl Endpoint for NextEndpoint {
                         .default_value("3")
                         .optional(),
                 )
-                .input(as_arg())
+                .input(as_arg(&READ_FACES))
                 .output(PLAIN)
-                .output(TURTLE),
+                .output(TURTLE)
+                .output(JSON),
         )
     }
 }
@@ -2584,7 +2822,7 @@ impl Endpoint for PolicyEndpoint {
         match inv.request.verb {
             Verb::Exists => Ok(plain("true\n")),
             Verb::Source => {
-                let want = wanted_face(inv)?;
+                let want = wanted_face(inv, &FACES)?;
                 if want == TURTLE {
                     let iri = format!("{}{}", v::iri::POLICY, policy.name());
                     let subject = oxrdf::NamedNode::new(&iri)
@@ -2649,7 +2887,7 @@ impl Endpoint for PolicyEndpoint {
                     .summary("What this policy weighs, and in what order.")
                     .requires(CAP_READ)
                     .input(name_input())
-                    .input(as_arg())
+                    .input(as_arg(&FACES))
                     .output(PLAIN)
                     .output(TURTLE),
             )
@@ -2711,7 +2949,7 @@ impl Endpoint for LedgersEndpoint {
         if inv.request.verb != Verb::Source {
             return Err(unsupported("ledger-ledgers", inv.request.verb));
         }
-        let want = wanted_face(inv)?;
+        let want = wanted_face(inv, &FACES)?;
         // A ledger exists once something has been filed in it — the counter is what
         // survives closing and deleting everything, so it, and not the item count, is
         // what says a ledger is there at all.
@@ -2849,7 +3087,7 @@ impl Endpoint for LedgersEndpoint {
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)
-                .input(as_arg())
+                .input(as_arg(&FACES))
                 .output(PLAIN)
                 .output(TURTLE),
         )

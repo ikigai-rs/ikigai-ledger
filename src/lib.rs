@@ -105,6 +105,7 @@
 #![deny(missing_docs)]
 
 pub mod endpoints;
+pub mod json;
 pub mod ledger;
 pub mod model;
 pub mod policy;
