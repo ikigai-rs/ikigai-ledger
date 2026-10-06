@@ -247,7 +247,9 @@ impl Ledger {
         format!("{}tombstone:{id}", self.prefix())
     }
 
-    /// `urn:iki:ledger:{name}:selection:{stamp}`.
+    /// `urn:iki:ledger:{name}:selection:{stamp}` — the stem of a selection's IRI.
+    /// [`crate::Selection`] appends `-{digest}` of its own content, because two different
+    /// selections can share a millisecond and must not share a subject.
     pub fn selection(&self, stamp: u64) -> String {
         format!("{}selection:{stamp}", self.prefix())
     }

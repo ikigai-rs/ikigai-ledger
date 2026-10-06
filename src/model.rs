@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use ikigai_core::{Error, Result};
 use oxrdf::{Graph, Literal, NamedNode, Triple};
 
+use crate::ledger::Ledger;
 use crate::sparql::{self, literal, Row, StoreClient};
 use crate::vocabulary as v;
 
@@ -643,17 +644,14 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
     Ok(items.into_iter().next())
 }
 
-/// Resolve `{id}` — a short number (`12`, `#12`, `acme#12`) or an opaque id (`01k5…`) —
-/// to an item IRI **in this client's ledger**. All the forms are accepted because a human
-/// types the number and a machine carries the IRI, and refusing the human form would make
-/// the resource unusable from the REPL.
+/// The number in a short reference — `12`, `#12`, `acme#12` — or `None` when the reference
+/// is not a number at all (an opaque id).
 ///
 /// ⚠ **A number qualified with another ledger's name is refused, not looked up.**
 /// Numbers restart per ledger, so `acme#12` and `#12` are different items; silently
 /// resolving `acme#12` inside the default ledger would act on the wrong one, which is the
 /// worst available answer.
-pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String> {
-    let ledger = client.ledger();
+fn number_in(ledger: &Ledger, id: &str) -> Result<Option<i64>> {
     let bare = match id.split_once('#') {
         Some((name, rest)) if !name.is_empty() => {
             if name != ledger.name() {
@@ -671,7 +669,21 @@ pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String
         }
         _ => id.trim_start_matches('#'),
     };
-    if let Ok(number) = bare.parse::<i64>() {
+    Ok(bare.parse::<i64>().ok())
+}
+
+/// Resolve `{id}` — a short number (`12`, `#12`, `acme#12`) or an opaque id (`01k5…`) —
+/// to an item IRI **in this client's ledger**. All the forms are accepted because a human
+/// types the number and a machine carries the IRI, and refusing the human form would make
+/// the resource unusable from the REPL.
+///
+/// ⚠ **A number qualified with another ledger's name is refused, not looked up.**
+/// Numbers restart per ledger, so `acme#12` and `#12` are different items; silently
+/// resolving `acme#12` inside the default ledger would act on the wrong one, which is the
+/// worst available answer.
+pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String> {
+    let ledger = client.ledger();
+    if let Some(number) = number_in(ledger, id)? {
         let query = format!(
             "SELECT ?item WHERE {{ {} }} LIMIT 1",
             client.in_graph(&format!(
@@ -688,6 +700,66 @@ pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String
             .ok_or_else(|| Error::NotFound(format!("no ledger item {}", ledger.number(number))));
     }
     Ok(ledger.item(id))
+}
+
+/// A deleted item's tombstone, as the live graph holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tombstone {
+    /// The tombstone's own IRI.
+    pub iri: String,
+    /// The IRI of the item it stands for.
+    pub item: String,
+    /// The item's number.
+    pub number: i64,
+}
+
+/// Find the tombstone a delete left for `reference` — a number, an opaque id, or an item
+/// IRI in either spelling — in this client's ledger, or `None` when nothing by that name
+/// was ever deleted here.
+///
+/// ★ The tombstone is the only thing a deleted item leaves in the live graph, and it
+/// carries both of the item's names (its number and its IRI), so it is how a resource
+/// reaches an item that no longer resolves. `purge` is the reader: a secret pasted into an
+/// item and then deleted is still in the graveyard, and the tombstone is how purge finds it.
+pub async fn find_tombstone(
+    client: &StoreClient<'_, '_>,
+    reference: &str,
+) -> Result<Option<Tombstone>> {
+    let ledger = client.ledger();
+    let pattern = if let Some((other, iri)) = Ledger::item_iri(reference) {
+        if &other != ledger {
+            return Ok(None);
+        }
+        format!("?t <{}> {} .", v::DELETED_ITEM, sparql::iri(&iri, "item")?)
+    } else if reference.starts_with("urn:") {
+        // Not a ledger item IRI at all, so nothing here was ever deleted under it.
+        return Ok(None);
+    } else if let Some(number) = number_in(ledger, reference)? {
+        format!("?t <{}> {} .", v::NUMBER, sparql::integer(number))
+    } else {
+        format!(
+            "?t <{}> {} .",
+            v::DELETED_ITEM,
+            sparql::iri(&ledger.item(reference), "item")?
+        )
+    };
+    let query = format!(
+        "SELECT ?t ?item ?number WHERE {{ {} }} ORDER BY ?t LIMIT 1",
+        client.in_graph(&format!(
+            "?t <{type_}> <{class}> ; <{deleted}> ?item ; <{number}> ?number .\n{pattern}",
+            type_ = v::ext::TYPE,
+            class = v::TOMBSTONE_CLASS,
+            deleted = v::DELETED_ITEM,
+            number = v::NUMBER,
+        ))
+    );
+    Ok(client.select(&query).await?.first().and_then(|row| {
+        Some(Tombstone {
+            iri: row.get("t")?.value.clone(),
+            item: row.get("item")?.value.clone(),
+            number: row.get("number")?.as_i64()?,
+        })
+    }))
 }
 
 /// Load an item's comments, oldest first — a log is read forwards.

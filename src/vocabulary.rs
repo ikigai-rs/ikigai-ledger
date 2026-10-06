@@ -160,6 +160,12 @@ term! {
     RECOVERABLE => "recoverable";
     /// `ledger:quadCount`
     QUAD_COUNT => "quadCount";
+    /// `ledger:purgedAt`
+    PURGED_AT => "purgedAt";
+    /// `ledger:purgeReason`
+    PURGE_REASON => "purgeReason";
+    /// `ledger:purgedBy`
+    PURGED_BY => "purgedBy";
     /// `ledger:reason`
     REASON => "reason";
     /// `ledger:lastNumber`
