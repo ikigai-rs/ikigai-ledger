@@ -644,13 +644,16 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Unreleased (0.4.0): a keyed append and a JSON face (ledger #779)
+### 0.4.0: a keyed append and a JSON face (ledger #779)
 
 Additive in behavior — every request 0.3.0 accepted answers the same bytes in the plain
 face — but **a minor release, not a patch**, for one reason: `model::Item` gains a public
 `key` field and `model::Filter` a public `key` filter, and both are constructible structs,
 so a struct literal outside this crate stops compiling. No consumer in the ecosystem builds
 either (searched), but a `"0.3"` pin will not pick this up, which is the point of the rule.
+And since this release breaks that pin anyway, `model::Item` and `model::Filter` are now
+`#[non_exhaustive]`: outside this crate build a `Filter` from `Filter::default()` and set
+its fields, and read an `Item` rather than constructing one, so the next field is a patch.
 
 - **`append key=`**: at most one item per key per ledger, checked and filed in one store
   update; a taken key answers the existing item (`#N <iri> existing <status>`). A deleted
