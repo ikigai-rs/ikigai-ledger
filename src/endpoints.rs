@@ -1193,7 +1193,7 @@ fn rows_as_data(rows: &[sparql::Row]) -> Result<String> {
 /// comment that landed between the read and the removal matched the selector at step 3 and
 /// was removed from the live graph **without ever having been archived** — a "recoverable"
 /// delete that destroyed an acknowledged write, and a tombstone whose hash and count did not
-/// cover it. It reproduced in 300 of 300 forced rounds. (The single cross-graph update before
+/// cover it. It lost the comment in 300 of 300 raced rounds. (The single cross-graph update before
 /// 0.2.0 was atomic and had no such window; narrowing the doors opened it.)
 ///
 /// Removing exactly the rows read makes three things the same set by construction: what
