@@ -30,6 +30,11 @@ pub struct Filter {
     pub without: Vec<String>,
     /// Must be `ledger:about` this resource IRI.
     pub about: Option<String>,
+    /// Must carry this `ledger:key` — the caller's own name for the item. At most one item
+    /// in a ledger carries a given key, so this is a lookup wearing a filter's clothes; it
+    /// is a filter so that `items key=` composes with the others (`status` included: the
+    /// default `open` hides a closed item, exactly as it does for `about`).
+    pub key: Option<String>,
     /// `any` (no constraint), `none` (unclaimed only), or a holder's name.
     pub holder: Holder,
     /// Whether deferred items are included.
@@ -110,6 +115,8 @@ pub struct Item {
     pub author: Option<String>,
     /// The revision the item was filed against.
     pub revision: Option<String>,
+    /// The caller's own name for the item (`append key=`), unique per ledger.
+    pub key: Option<String>,
     /// Who holds it, if anyone.
     pub claimed_by: Option<String>,
     /// Why the holder took it.
@@ -174,6 +181,11 @@ impl Item {
         let mut out = self.line();
         out.push('\n');
         out.push_str(&format!("  iri:      {}\n", self.iri));
+        // Only when there is one, so every item filed without a key renders exactly as it
+        // did in 0.3.0 — the gonk bridges parse this face.
+        if let Some(key) = &self.key {
+            out.push_str(&format!("  key:      {key}\n"));
+        }
         if let Some(kind) = &self.kind {
             out.push_str(&format!("  kind:     {kind}\n"));
         }
@@ -261,6 +273,9 @@ impl Item {
         }
         if let Some(revision) = &self.revision {
             push(v::REVISION, plain(revision));
+        }
+        if let Some(key) = &self.key {
+            push(v::KEY, plain(key));
         }
         if let Some(holder) = &self.claimed_by {
             push(v::CLAIMED_BY, plain(holder));
@@ -454,6 +469,9 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
             v::ABOUT,
             sparql::iri(about, "about")?
         ));
+    }
+    if let Some(key) = &filter.key {
+        clauses.push_str(&format!("?item <{}> {} .\n", v::KEY, literal(key)));
     }
     match &filter.holder {
         Holder::Any => {}
@@ -654,7 +672,7 @@ async fn load(
     let limit = limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?holder ?purpose ?created ?modified WHERE {{ {} }} \
+         ?revision ?key ?holder ?purpose ?created ?modified WHERE {{ {} }} \
          ORDER BY DESC(?modified) DESC(?number){limit}",
         client.in_graph(&format!(
             "?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -666,6 +684,7 @@ async fn load(
              OPTIONAL {{ ?item <{deferred}> ?deferred }}\n\
              OPTIONAL {{ ?item <{author}> ?author }}\n\
              OPTIONAL {{ ?item <{revision}> ?revision }}\n\
+             OPTIONAL {{ ?item <{key}> ?key }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
              OPTIONAL {{ ?item <{purpose}> ?purpose }}\n{filters}",
             type_ = v::ext::TYPE,
@@ -681,6 +700,7 @@ async fn load(
             deferred = v::DEFERRED,
             author = v::AUTHOR,
             revision = v::REVISION,
+            key = v::KEY,
             holder = v::CLAIMED_BY,
             purpose = v::PURPOSE,
             filters = filter_clauses(filter)?,
@@ -696,7 +716,7 @@ async fn load(
 pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option<Item>> {
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?holder ?purpose ?created ?modified WHERE {{ {} }} LIMIT 1",
+         ?revision ?key ?holder ?purpose ?created ?modified WHERE {{ {} }} LIMIT 1",
         client.in_graph(&format!(
             "BIND({subject} AS ?item)\n\
              ?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -708,6 +728,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{deferred}> ?deferred }}\n\
              OPTIONAL {{ ?item <{author}> ?author }}\n\
              OPTIONAL {{ ?item <{revision}> ?revision }}\n\
+             OPTIONAL {{ ?item <{key}> ?key }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
              OPTIONAL {{ ?item <{purpose}> ?purpose }}",
             subject = sparql::iri(iri, "item")?,
@@ -724,6 +745,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
             deferred = v::DEFERRED,
             author = v::AUTHOR,
             revision = v::REVISION,
+            key = v::KEY,
             holder = v::CLAIMED_BY,
             purpose = v::PURPOSE,
         ))
@@ -762,6 +784,201 @@ fn number_in(ledger: &Ledger, id: &str) -> Result<Option<i64>> {
     Ok(bare.parse::<i64>().ok())
 }
 
+/// The longest a key may be. Generous for a foreign id (`urn:roborev:finding:` and 32 hex
+/// digits is 52), and bounded because a key is stored, indexed and echoed in every answer.
+pub const MAX_KEY: usize = 256;
+
+/// The spelling that makes an item reference a KEY rather than a number or an opaque id:
+/// `key:{key}` as `item=`, and `urn:iki:ledger:{ledger}:item:key:{key}` as a resource.
+///
+/// Unambiguous by construction: an opaque id is Crockford base32 and a number is digits, so
+/// neither can contain a `:`.
+pub const KEY_PREFIX: &str = "key:";
+
+/// Validate a caller's key — the name `append key=` files under and every lookup finds by.
+///
+/// ASCII letters, digits, `-`, `.`, `_`, `~` and `:`; 1 to [`MAX_KEY`] characters. Compared
+/// exactly, case included, and never rewritten: a key that came back different from the one
+/// sent would defeat the only thing it is for.
+///
+/// ⚠ **The shape is fixed so the key is a legal IRI segment AND survives a URL path.** It is
+/// addressable as `urn:iki:ledger:item:key:{key}`, and gonk's HTTP door maps an IRI to a
+/// path by turning every `:` into a `/` — so a `/` in a key would come back as a `:`, a
+/// different key. `#` is refused for the same family of reason: it starts a comment in the
+/// engine's grammar, and an IRI fragment in a URL. Both foreign ids the gonk bridges carry
+/// (`urn:kata:issue:{uid}`, `urn:roborev:finding:{hex}`) fit as they stand. Widening the set
+/// later is additive; narrowing it would strand keys already filed, which is why it starts
+/// narrow.
+///
+/// ```
+/// use ikigai_ledger::model::parse_key;
+/// assert_eq!(parse_key("urn:kata:issue:01JZ0ABC").unwrap(), "urn:kata:issue:01JZ0ABC");
+/// assert!(parse_key("").is_err());
+/// assert!(parse_key("a/b").is_err());     // would not survive gonk's path mapping
+/// assert!(parse_key("a b").is_err());
+/// assert!(parse_key("a#b").is_err());     // a comment in the engine grammar
+/// assert!(parse_key(&"k".repeat(257)).is_err());
+/// ```
+pub fn parse_key(key: &str) -> Result<String> {
+    let bad = |detail: String| Error::InvalidArgument {
+        name: "key".to_string(),
+        detail,
+    };
+    if key.is_empty() {
+        return Err(bad(
+            "an empty key names nothing; omit `key` to file without one".to_string(),
+        ));
+    }
+    if key.len() > MAX_KEY {
+        return Err(bad(format!(
+            "a key is at most {MAX_KEY} characters, and this one is {}",
+            key.len()
+        )));
+    }
+    if let Some(c) = key
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~' | ':')))
+    {
+        return Err(bad(format!(
+            "`{key}` contains {c:?}; a key is ASCII letters, digits, `-`, `.`, `_`, `~` and \
+             `:`, so that it is a legal IRI segment (`urn:iki:ledger:item:key:{{key}}`) and \
+             survives a URL path unchanged"
+        )));
+    }
+    Ok(key.to_string())
+}
+
+/// What carries a key in a ledger's live graph: the item, or — once the item is deleted —
+/// its tombstone, which keeps the key so it stays taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Keyed {
+    /// The item's IRI (for a deleted item, the IRI it had).
+    pub item: String,
+    /// The item's number.
+    pub number: i64,
+    /// The tombstone's IRI when the item was deleted; `None` while it is live.
+    pub tombstone: Option<String>,
+}
+
+/// The item (or the deleted item's tombstone) carrying `key` in this client's ledger.
+///
+/// A live item wins over a tombstone, and the lowest IRI over the rest: at most one subject
+/// can carry a key through this crate's own writes, so a tie is an out-of-band edit, and
+/// the answer is at least the same one every time.
+pub async fn find_by_key(client: &StoreClient<'_, '_>, key: &str) -> Result<Option<Keyed>> {
+    let query = format!(
+        "SELECT ?s ?class ?number ?deleted WHERE {{ {} }} ORDER BY ?class ?s LIMIT 1",
+        client.in_graph(&format!(
+            "?s <{key_p}> {key} ; <{type_}> ?class ; <{number}> ?number .\n\
+             VALUES ?class {{ <{item}> <{tombstone}> }}\n\
+             OPTIONAL {{ ?s <{deleted}> ?deleted }}",
+            key_p = v::KEY,
+            key = literal(key),
+            type_ = v::ext::TYPE,
+            number = v::NUMBER,
+            item = v::ITEM_CLASS,
+            tombstone = v::TOMBSTONE_CLASS,
+            deleted = v::DELETED_ITEM,
+        ))
+    );
+    Ok(client.select(&query).await?.first().and_then(|row| {
+        let subject = row.get("s")?.value.clone();
+        let number = row.get("number")?.as_i64()?;
+        if row.get("class")?.value == v::TOMBSTONE_CLASS {
+            Some(Keyed {
+                item: row.get("deleted")?.value.clone(),
+                number,
+                tombstone: Some(subject),
+            })
+        } else {
+            Some(Keyed {
+                item: subject,
+                number,
+                tombstone: None,
+            })
+        }
+    }))
+}
+
+/// The numbers of whichever of `iris` are items in this client's ledger — how a link's
+/// target is named in the JSON face. An IRI that is not a live item is simply absent.
+pub async fn numbers_of(
+    client: &StoreClient<'_, '_>,
+    iris: &std::collections::BTreeSet<String>,
+) -> Result<BTreeMap<String, i64>> {
+    if iris.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let values = iris
+        .iter()
+        .map(|iri| sparql::iri(iri, "item"))
+        .collect::<Result<Vec<_>>>()?
+        .join(" ");
+    let query = format!(
+        "SELECT ?i ?n WHERE {{ {} }}",
+        client.in_graph(&format!(
+            "VALUES ?i {{ {values} }}\n?i <{}> <{}> ; <{}> ?n .",
+            v::ext::TYPE,
+            v::ITEM_CLASS,
+            v::NUMBER
+        ))
+    );
+    Ok(client
+        .select(&query)
+        .await?
+        .iter()
+        .filter_map(|row| Some((row.get("i")?.value.clone(), row.get("n")?.as_i64()?)))
+        .collect())
+}
+
+/// The comments on several items at once, each item's oldest first (ties broken by the
+/// comment's IRI, whose id is time-ordered) — one query for a whole page of the JSON face.
+pub async fn load_comments_for(
+    client: &StoreClient<'_, '_>,
+    items: &[String],
+) -> Result<BTreeMap<String, Vec<Comment>>> {
+    let mut by_item: BTreeMap<String, Vec<Comment>> = BTreeMap::new();
+    if items.is_empty() {
+        return Ok(by_item);
+    }
+    let values = items
+        .iter()
+        .map(|iri| sparql::iri(iri, "item"))
+        .collect::<Result<Vec<_>>>()?
+        .join(" ");
+    let query = format!(
+        "SELECT ?item ?comment ?body ?author ?created WHERE {{ {} }} ORDER BY ?created ?comment",
+        client.in_graph(&format!(
+            "VALUES ?item {{ {values} }}\n\
+             ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
+             OPTIONAL {{ ?comment <{author}> ?author }}",
+            on_item = v::ON_ITEM,
+            body = v::BODY,
+            created = v::ext::CREATED,
+            author = v::AUTHOR,
+        ))
+    );
+    for row in client.select(&query).await? {
+        let Some(comment) = (|| {
+            Some(Comment {
+                iri: row.get("comment")?.value.clone(),
+                on_item: row.get("item")?.value.clone(),
+                body: row.get("body")?.value.clone(),
+                author: row.get("author").map(|b| b.value.clone()),
+                created: millis(row.get("created")?.value.as_str())?,
+            })
+        })() else {
+            continue;
+        };
+        by_item
+            .entry(comment.on_item.clone())
+            .or_default()
+            .push(comment);
+    }
+    Ok(by_item)
+}
+
 /// Resolve `{id}` — a short number (`12`, `#12`, `acme#12`) or an opaque id (`01k5…`) —
 /// to an item IRI **in this client's ledger**. All the forms are accepted because a human
 /// types the number and a machine carries the IRI, and refusing the human form would make
@@ -773,6 +990,30 @@ fn number_in(ledger: &Ledger, id: &str) -> Result<Option<i64>> {
 /// worst available answer.
 pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String> {
     let ledger = client.ledger();
+    if let Some(key) = id.strip_prefix(KEY_PREFIX) {
+        let key = parse_key(key)?;
+        return match find_by_key(client, &key).await? {
+            Some(Keyed {
+                item,
+                tombstone: None,
+                ..
+            }) => Ok(item),
+            Some(Keyed {
+                number,
+                tombstone: Some(tombstone),
+                ..
+            }) => Err(Error::NotFound(format!(
+                "{} (key `{key}`) was deleted: its tombstone is `{tombstone}` and its content, \
+                 unless purged, is in `{}`. The key stays taken",
+                ledger.number(number),
+                ledger.deleted_graph()
+            ))),
+            None => Err(Error::NotFound(format!(
+                "no ledger item with the key `{key}` in `{}`",
+                ledger.name()
+            ))),
+        };
+    }
     if let Some(number) = number_in(ledger, id)? {
         // ⚠ **An ITEM with that number.** A tombstone carries its item's number too, so
         // the bare pattern resolved a deleted item's number to its tombstone, and the
@@ -842,17 +1083,22 @@ pub async fn find_tombstone(
         }
         // The id position may hold a number (`urn:iki:ledger:item:3` resolves as #3), so
         // it is read the way `resolve_id` reads it.
-        let tail = iri
-            .rsplit_once(":item:")
-            .map(|(_, t)| t)
-            .unwrap_or_default();
-        match number_in(ledger, tail)? {
-            Some(number) => format!("?t <{}> {} .", v::NUMBER, sparql::integer(number)),
-            None => format!("?t <{}> {} .", v::DELETED_ITEM, sparql::iri(&iri, "item")?),
+        // `split_once`, not `rsplit_once`: the ledger name cannot contain `:item:` (`item`
+        // is reserved and a name has no `:`), but a key after it can.
+        let tail = iri.split_once(":item:").map(|(_, t)| t).unwrap_or_default();
+        if let Some(key) = tail.strip_prefix(KEY_PREFIX) {
+            format!("?t <{}> {} .", v::KEY, literal(&parse_key(key)?))
+        } else {
+            match number_in(ledger, tail)? {
+                Some(number) => format!("?t <{}> {} .", v::NUMBER, sparql::integer(number)),
+                None => format!("?t <{}> {} .", v::DELETED_ITEM, sparql::iri(&iri, "item")?),
+            }
         }
     } else if reference.starts_with("urn:") {
         // Not a ledger item IRI at all, so nothing here was ever deleted under it.
         return Ok(None);
+    } else if let Some(key) = reference.strip_prefix(KEY_PREFIX) {
+        format!("?t <{}> {} .", v::KEY, literal(&parse_key(key)?))
     } else if let Some(number) = number_in(ledger, reference)? {
         format!("?t <{}> {} .", v::NUMBER, sparql::integer(number))
     } else {
@@ -991,6 +1237,7 @@ fn item_from_row(row: &Row) -> Option<Item> {
             .unwrap_or(false),
         author: row.get("author").map(|b| b.value.clone()),
         revision: row.get("revision").map(|b| b.value.clone()),
+        key: row.get("key").map(|b| b.value.clone()),
         claimed_by: row.get("holder").map(|b| b.value.clone()),
         purpose: row.get("purpose").map(|b| b.value.clone()),
         created: millis(row.get("created")?.value.as_str())?,
@@ -1087,6 +1334,7 @@ mod tests {
             deferred: false,
             author: Some("brian".to_string()),
             revision: Some("f41a333".to_string()),
+            key: None,
             claimed_by: None,
             purpose: None,
             created: 1_757_700_000_000,

@@ -490,7 +490,8 @@ fn the_turtle_face_is_a_graph_and_the_plain_face_is_a_list() {
         &kernel,
         Verb::Source,
         "urn:iki:ledger:items",
-        &[("as", "application/json")],
+        // `application/json` was the example until 0.4, when it became a face this serves.
+        &[("as", "text/html")],
     );
     assert!(
         matches!(refused, Err(Error::InvalidArgument { ref name, .. }) if name == "as"),

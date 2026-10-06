@@ -136,6 +136,8 @@ term! {
     ABOUT => "about";
     /// `ledger:revision`
     REVISION => "revision";
+    /// `ledger:key` — the caller's own name for an item, unique per ledger.
+    KEY => "key";
     /// `ledger:label`
     LABEL => "label";
     /// `ledger:author`

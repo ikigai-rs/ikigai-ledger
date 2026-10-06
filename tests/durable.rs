@@ -134,3 +134,37 @@ fn quarantined_content_survives_a_restart() {
 
     std::fs::remove_dir_all(&path).expect("clean up the scratch store");
 }
+
+/// 4. **A keyed append's uniqueness holds on RocksDB**, not only in memory: the guarantee is
+///    the store holding its write lock across one update's evaluation and insert, and the
+///    two backends implement transactions differently. Eight concurrent appends with one
+///    key, a few rounds, one item each time.
+#[test]
+fn concurrent_keyed_appends_file_one_item_on_the_durable_store() {
+    for round in 0..5 {
+        let path = scratch(&format!("keyed-{round}"));
+        let kernel = kernel_over(DurableStore::open(&path).expect("open the store"));
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    try_verb(
+                        &kernel,
+                        Verb::Sink,
+                        "urn:iki:ledger:append",
+                        &[("content", "A finding"), ("key", "urn:kata:issue:01JZ")],
+                    )
+                    .expect("a keyed append succeeds whether or not it files")
+                });
+            }
+        });
+        let listing = source(&kernel, "urn:iki:ledger:items", &[("status", "all")]);
+        assert!(
+            listing.contains("\n1 item(s)\n"),
+            "round {round}: {listing}"
+        );
+        drop(kernel);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
