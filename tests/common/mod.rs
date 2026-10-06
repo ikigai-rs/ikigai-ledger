@@ -160,3 +160,10 @@ pub fn graph_write(ledger: &str) -> String {
 pub fn graveyard_write(ledger: &str) -> String {
     format!("urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}:deleted")
 }
+
+/// The store grant a PURGE needs on top of the graveyard's write grant: it reads the
+/// graveyard to find what an earlier delete archived, and the store refuses a
+/// `DELETE … WHERE` over a graph without the read grant for it.
+pub fn graveyard_read(ledger: &str) -> String {
+    format!("urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}:deleted")
+}

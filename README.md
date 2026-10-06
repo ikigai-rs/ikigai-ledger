@@ -197,9 +197,19 @@ takes `policy=`.
 ## Identity: the IRI is the name, `#12` is a label on it
 
 An item is `urn:iki:ledger:{ledger}:item:{id}`, where `{id}` is 10 characters of Crockford
-base32 over the millisecond clock — so ids sort in filing order — plus 6 derived from a
-SHA-256 of what was filed. The clock half makes a raw IRI listing readable; the digest half
-is what keeps two ledgers merged later from colliding on a shared millisecond.
+base32 over the millisecond clock — so ids sort in filing order — plus 13 more that make it
+unique by construction: a process-wide sequence every mint increments, offset by a
+per-process random nonce. The clock half makes a raw IRI listing readable; the sequence
+means two ids minted by one process can never collide, and the nonce keeps two processes
+(two ledgers merged later, a restart under a fixed clock) apart with 64 bits of chance.
+Comments are minted the same way.
+
+⚠ **Until 0.2.1 the second half was 6 characters of SHA-256 over the title and author**, on
+the premise that one writer meant one write per millisecond. It does not: eight concurrent
+filings of the same title minted one IRI between them (one item, eight numbers), and the
+same note left on two items was one comment node that died with whichever item was deleted
+first. Ids minted before 0.3 keep their 16-character shape and stay valid — an id is only
+ever compared whole, never parsed.
 
 `ledger:number` — `#12` — is the human handle, and every endpoint accepts either form,
 because a person types `12` and a machine carries the IRI. It is allocated from the
@@ -227,8 +237,8 @@ literally true already: anything holding this graph's write grant — or the sto
 — can rewrite it without passing through a ledger endpoint. So an **out-of-band write is a
 supported path, not corruption**, and three things follow.
 
-**Identity survives editing.** An item's IRI is minted once from the clock and a digest of
-what was filed, and then *stored*. It is never derived from the item's content, its number
+**Identity survives editing.** An item's IRI is minted once, from the clock and a sequence,
+and then *stored*. It is never derived from the item's content, its number
 or its position, so rewriting a title, renumbering, or reformatting in an editor cannot
 silently rename the thing. This is the decision that would be worst to retrofit and it is
 made here, at the first commit.
@@ -259,7 +269,7 @@ are three different resources, because they are three different authorities:
 | --- | --- | --- |
 | **close** | `…:{ledger}:close` | everything. The item is still in the graph, still queryable, and stops blocking what it blocked. This is the normal end of work. |
 | **delete** | `Delete …:{ledger}:item:{id}` (`urn:cap:ledger:delete:{ledger}`) | the item's quads, its comments and the edges pointing at it MOVE to that ledger's own `urn:iki:ledger:graph:{ledger}:deleted`. Out of every ledger read; still there; recoverable. A **tombstone** stays in the live graph. |
-| **purge** | `…:{ledger}:purge` (`urn:cap:ledger:purge:{ledger}`) | only the tombstone. The content is destroyed in both graphs. |
+| **purge** | `…:{ledger}:purge` (`urn:cap:ledger:purge:{ledger}`) | only the tombstone. The content is destroyed in both graphs — and an item that was already deleted is purged the same way, found by its tombstone, so a secret deleted first and purged second is really gone. |
 
 The tombstone carries the number, the time, the actor, the reason, the quad count and the
 `sig:contentHash` (`sha256:…`) of exactly what was removed — so a later claim about what an
@@ -277,8 +287,19 @@ boundary the rest of this is built to keep closed.
 Moving quads from the live graph to the graveyard **cannot be one update**, because a
 scoped write can neither read nor write across graphs — that is what makes it a boundary
 rather than a filter. So a delete is: read the live quads, write them into the graveyard,
-then remove them from the live graph and write the tombstone (those last two are one
-update, so *that* pair is atomic). A purge clears the graveyard first, then the live graph.
+then remove **exactly those quads** from the live graph and write the tombstone (those last
+two are one update, so *that* pair is atomic). A purge clears the graveyard first, then the
+live graph.
+
+⚠ **"Exactly those quads" is the fix for a real loss.** Until 0.2.1 the removal re-ran the
+selector, so a comment that landed between the read and the removal was removed without
+ever being archived — a recoverable delete that destroyed an acknowledged write, every time
+the two raced. Removing the rows that were read makes what was archived, what was removed,
+and what the tombstone hashes and counts one set. A write that races a delete is kept, in
+the live graph beside the tombstone: an orphan of the deleted item, which is where a write
+arriving just after a delete has always landed, and never a loss. A purge still removes by
+selector — it is asked to leave nothing of the item — so a write racing a purge goes with
+it.
 
 ⚠ **The graveyard is touched first and the live graph last, deliberately: the live graph is
 the commit point.** Every read here looks at the live graph and none looks at the graveyard,
@@ -295,7 +316,8 @@ retry's quads, which is what was actually removed and is the honest answer; the 
 a superset of it.
 
 ⚠ **A delete therefore needs write authority over two graphs** — the ledger's and its
-graveyard's — and the grant table below says so per verb.
+graveyard's — and a purge needs to READ the graveyard too, because it finds and counts what
+an earlier delete archived. The grant table below says so per verb.
 
 **Why purge is a resource and not a `purge=true` argument.** A flag could only be enforced
 at runtime, and an action that enforces a scope it does not declare makes the manifold lie —
@@ -408,11 +430,14 @@ are these — **per ledger, and a grant for `acme` is worth nothing at `bosatsu`
 | read (`items`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
 | write (`append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, editing an item) | `urn:cap:ledger:write:L` | the read grant above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L` |
 | delete (`Delete` on an item) | `urn:cap:ledger:delete:L` | both of the above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` |
-| purge | `urn:cap:ledger:purge:L` | the same three as delete |
+| purge | `urn:cap:ledger:purge:L` | the same three as delete **and** `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` |
 
 ⚠ **Delete and purge need a write grant for TWO graphs**, because the graveyard is a
 second graph and a scoped write cannot reach across. That is the one line of this table an
-operator will get wrong, which is why it is a row and not a footnote.
+operator will get wrong, which is why it is a row and not a footnote. ⚠ **And purge needs the
+graveyard's READ grant as well** (0.3): it looks there for what an earlier delete archived,
+and the store refuses a `DELETE … WHERE` over a graph without the read grant for it. Without
+it, purge refuses before touching anything and names the token.
 
 ⚠ **The two halves are separate grants and neither implies the other.**
 `urn:cap:ledger:read:acme` without the store's graph-read token is a ledger you may address
@@ -545,7 +570,7 @@ so doing them in one version changes an operator's grant list once instead of tw
 | `urn:iki:ledger:counter` | `urn:iki:ledger:default:counter` |
 | `urn:cap:ledger:write` | `urn:cap:ledger:write:default` |
 | `urn:cap:store:read` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}` |
-| `urn:cap:store:write` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}` — plus the `…:deleted` twin for delete and purge |
+| `urn:cap:store:write` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}` — plus the `…:deleted` twin for delete and purge, and the `…:deleted` READ twin for purge |
 
 ⚠ The last two rows are **not** a rename: a host that leaves the old broad tokens in place
 finds that ledger writes stop working, because `urn:iki:store:graph-update` takes the

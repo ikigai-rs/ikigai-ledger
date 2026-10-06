@@ -18,6 +18,7 @@
 //! | read this ledger | `urn:iki:store:graph-select` / `graph-ask` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}` |
 //! | write this ledger | `urn:iki:store:graph-update` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{name}` |
 //! | archive / destroy | `urn:iki:store:graph-update` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{name}:deleted` |
+//! | find what a delete archived (purge only) | `urn:iki:store:graph-select` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}:deleted` |
 //!
 //! The one exception is `urn:iki:ledger:ledgers`, which is inherently cross-graph and
 //! resolves the broad `urn:iki:store:select` **only under a root capability** — see
@@ -247,6 +248,19 @@ impl<'a, 'i> StoreClient<'a, 'i> {
     pub async fn select(&self, query: &str) -> Result<Vec<Row>> {
         let bytes = self
             .query(STORE_GRAPH_SELECT, &self.ledger.graph(), query)
+            .await?;
+        parse_results(&bytes)
+    }
+
+    /// Evaluate a SPARQL SELECT over this ledger's **graveyard**.
+    ///
+    /// Only `purge` reads here — to find and count what an earlier delete archived — so
+    /// only `purge` needs `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}:deleted`.
+    /// A separate method for the reason [`update_deleted`](StoreClient::update_deleted)
+    /// gives.
+    pub async fn select_deleted(&self, query: &str) -> Result<Vec<Row>> {
+        let bytes = self
+            .query(STORE_GRAPH_SELECT, &self.ledger.deleted_graph(), query)
             .await?;
         parse_results(&bytes)
     }

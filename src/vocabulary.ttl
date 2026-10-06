@@ -238,13 +238,31 @@ ledger:recoverable a rdf:Property ;
     rdfs:domain ledger:Tombstone ;
     rdfs:range xsd:boolean ;
     rdfs:label "recoverable" ;
-    rdfs:comment "true: the item's quads were MOVED to the quarantine graph urn:iki:ledger:graph:deleted and can be brought back. false: they were destroyed, and this tombstone plus its sig:contentHash is all the evidence there is." .
+    rdfs:comment "true: the item's quads were MOVED to the quarantine graph urn:iki:ledger:graph:{ledger}:deleted and can be brought back. false: they were destroyed — by a purge of the live item, or by a later purge of what the delete archived — and this tombstone plus its sig:contentHash is all the evidence there is." .
 
 ledger:quadCount a rdf:Property ;
     rdfs:domain ledger:Tombstone ;
     rdfs:range xsd:integer ;
     rdfs:label "quadCount" ;
     rdfs:comment "How many quads the delete removed — the size of what is gone, which the hash alone does not say." .
+
+ledger:purgedAt a rdf:Property ;
+    rdfs:domain ledger:Tombstone ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "purgedAt" ;
+    rdfs:comment "When the content was destroyed. Present exactly when ledger:recoverable is false. On a tombstone a purge wrote directly it equals prov:invalidatedAtTime; on one a delete wrote first, it is the later moment the archive was destroyed, and the delete's own ledger:reason, ledger:author, ledger:quadCount and sig:contentHash stay as the delete wrote them." .
+
+ledger:purgeReason a rdf:Property ;
+    rdfs:domain ledger:Tombstone ;
+    rdfs:range xsd:string ;
+    rdfs:label "purgeReason" ;
+    rdfs:comment "Why an already-deleted item's archive was destroyed — kept apart from ledger:reason, which says why it was deleted, because the two are different decisions, often by different people." .
+
+ledger:purgedBy a rdf:Property ;
+    rdfs:domain ledger:Tombstone ;
+    rdfs:range xsd:string ;
+    rdfs:label "purgedBy" ;
+    rdfs:comment "Who destroyed an already-deleted item's archive, as a plain name (see ledger:author for why a string)." .
 
 ledger:reason a rdf:Property ;
     rdfs:range xsd:string ;

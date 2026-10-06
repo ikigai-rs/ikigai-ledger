@@ -51,8 +51,10 @@ use common::*;
 /// silently ignored the ledger segment would still have to name this graph.
 const LEDGER: &str = "acme";
 
-/// The grant list `README.md`'s table publishes for one ledger — **seven tokens, every one
-/// of them naming that ledger, and nothing else at all.**
+/// The grant list `README.md`'s table publishes for one ledger — **eight tokens, every one
+/// of them naming that ledger, and nothing else at all.** The eighth, the graveyard's READ
+/// grant, arrived with purge reaching deleted items: a purge reads the graveyard to find what
+/// a delete archived, and the store refuses a `DELETE … WHERE` over it without that grant.
 ///
 /// ★ Read it as the operator's config line, because that is what it is, and keep it
 /// literal: this is the same list as `tests/ledgers.rs::grants_for`, deliberately written
@@ -67,6 +69,7 @@ fn published_grants(ledger: &str) -> Capability {
         graph_read(ledger),
         graph_write(ledger),
         graveyard_write(ledger),
+        graveyard_read(ledger),
     ])
 }
 
@@ -275,11 +278,20 @@ fn script() -> Vec<Step> {
             at("purge"),
             &[("content", "#3"), ("reason", "wrong ledger")],
         ),
+        // ★ And the purge of an item that is NOT live: #2 was deleted above, so this one is
+        // found through its tombstone and destroys what the delete archived — the path that
+        // reads the graveyard, and therefore the one that needs the eighth token.
+        step(
+            "ledger-purge",
+            Verb::Delete,
+            at("purge"),
+            &[("content", "#2"), ("reason", "it held a secret")],
+        ),
     ]
 }
 
 /// ★ **The test this arc exists for.** Every action this crate binds, exercised for real
-/// under the seven tokens `README.md` tells an operator to issue — and under nothing else.
+/// under the eight tokens `README.md` tells an operator to issue — and under nothing else.
 ///
 /// Before the fix this failed on `ledger-item Source`, with the store's denial naming
 /// `urn:cap:store:read`: the one action whose contract asked for the whole dataset.
@@ -323,7 +335,7 @@ fn the_published_grant_list_is_sufficient_for_every_action_this_crate_binds() {
 
 /// ⚠ **The declaration itself, checked against the list — not only the run.**
 ///
-/// The test above proves the seven tokens *work*; this one proves the contract *says* so,
+/// The test above proves the eight tokens *work*; this one proves the contract *says* so,
 /// which is the half a caller reads before it calls. An action declaring a scope outside
 /// the published list is an over-declaration: the kernel's pre-check refuses it, selection
 /// drops it from the manifold, and `urn:kernel:validate` reports it — all before `invoke`

@@ -77,7 +77,11 @@
 //! - `urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}` to read that ledger;
 //! - `urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}` to write it;
 //! - ⚠ **and `…:graph:{ledger}:deleted` as well, for delete and purge** — the graveyard is
-//!   a second graph, and a scoped write cannot reach across.
+//!   a second graph, and a scoped write cannot reach across;
+//! - ⚠ **and, for purge alone, the graveyard's READ grant**
+//!   (`urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}:deleted`) — a purge finds and
+//!   counts what an earlier delete archived, and the store refuses a `DELETE … WHERE` over a
+//!   graph without the read grant for it.
 //!
 //! Every action declares the store families it transitively needs, because an action that
 //! enforces a scope it does not declare makes the manifold over-offer. **The result is a

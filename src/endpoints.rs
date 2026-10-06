@@ -301,35 +301,66 @@ fn now_ms(inv: &Invocation<'_>) -> Result<u64> {
     })
 }
 
-/// Mint an item's opaque, time-ordered id.
+/// Crockford base32, lowercase: no `i`, `l`, `o` or `u`, so an id read aloud or retyped
+/// cannot turn into a different one.
+const CROCKFORD: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
+
+/// Mint an opaque, time-ordered id for an item or a comment.
 ///
 /// ★ **Identity is the IRI; `#12` is a label on it.** The id is 10 characters of
 /// Crockford base32 over the low 48 bits of the millisecond clock — so ids sort in
-/// filing order, which makes a listing of raw IRIs readable — followed by 6 characters
-/// derived from a SHA-256 of the minting inputs. The digest half is not decoration: one
-/// store has one writer, so the clock alone is unique *here*, and the digest is what
-/// keeps two ledgers merged later from colliding on a shared millisecond.
-fn mint_id(now: u64, title: &str, author: &str) -> String {
-    const CROCKFORD: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
-    let mut id = String::with_capacity(16);
+/// filing order, which makes a listing of raw IRIs readable — followed by 13 characters
+/// that make it **unique by construction**.
+///
+/// # ⚠ Why the second half is a sequence and not a digest of the content
+///
+/// Until 0.2.1 it was 6 characters of SHA-256 over `(millisecond, title, author)`, on the
+/// premise that "one store has one writer, so the clock alone is unique here". One writer
+/// *process* makes many writes per millisecond: eight concurrent appends with the same
+/// title minted ONE IRI between them (each `INSERT` landing on the same subject, one item
+/// with eight numbers), and the same note left on two items minted one comment node with
+/// two `ledger:onItem` edges — which then died with whichever item was deleted first. A
+/// fixed clock, the kind every replay harness uses, did it with two sequential calls.
+///
+/// So the suffix is `nonce + sequence`: a process-wide counter that every mint
+/// increments, offset by a per-process random nonce. Within one process two mints cannot
+/// collide at all — the map from sequence to suffix is a bijection on 64 bits. The nonce
+/// is what keeps two *processes* apart (two ledgers merged later, a restart under a fixed
+/// clock), and there it is a 64-bit chance rather than a guarantee, which is the honest
+/// strength of anything that does not consult the store.
+///
+/// Ids minted before 0.3 keep the 16-character shape and stay valid: nothing parses an id,
+/// it is only ever compared whole.
+fn mint_id(now: u64) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let suffix = process_nonce().wrapping_add(SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let mut id = String::with_capacity(23);
     for shift in (0..10).rev() {
         id.push(CROCKFORD[((now >> (shift * 5)) & 31) as usize] as char);
     }
-    let mut hasher = Sha256::new();
-    hasher.update(now.to_be_bytes());
-    hasher.update(title.as_bytes());
-    hasher.update([0]);
-    hasher.update(author.as_bytes());
-    let digest = hasher.finalize();
-    let mut bits = u64::from(digest[0]) << 24
-        | u64::from(digest[1]) << 16
-        | u64::from(digest[2]) << 8
-        | u64::from(digest[3]);
-    for _ in 0..6 {
-        id.push(CROCKFORD[(bits & 31) as usize] as char);
-        bits >>= 5;
+    // 13 × 5 = 65 bits, so the top character carries the high bit and every suffix is
+    // distinct — the property the doc above relies on.
+    for shift in (0..13).rev() {
+        id.push(CROCKFORD[((suffix >> (shift * 5)) & 31) as usize] as char);
     }
     id
+}
+
+/// A random number fixed for the life of the process.
+///
+/// `RandomState` is the one source of randomness in `std` that needs no dependency and no
+/// filesystem: its keys are seeded from the operating system once per thread. Hashing a
+/// constant through it once, here, yields a per-process nonce.
+fn process_nonce() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *NONCE.get_or_init(|| {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        // What is hashed does not matter; the keys are the randomness.
+        hasher.write_u8(0);
+        hasher.finish()
+    })
 }
 
 /// `title\n\nbody` — the git-commit convention, because it is the one everybody already
@@ -455,7 +486,7 @@ async fn write_comment(
     author: Option<&str>,
     now: u64,
 ) -> Result<String> {
-    let id = mint_id(now, text, author.unwrap_or_default());
+    let id = mint_id(now);
     let comment = client.ledger().comment(&id);
     let mut triples = format!(
         "<{comment}> <{type_}> <{class}> ; <{on}> <{item}> ; <{body}> {text} ; <{created}> {when} .",
@@ -525,8 +556,9 @@ fn read_action(spec: ikigai_core::ActionSpec) -> ikigai_core::ActionSpec {
 /// (to resolve `#12`, to check the item exists), so both store scopes are real.
 ///
 /// ⚠ **Delete and purge need a write grant for a SECOND graph** — the ledger's graveyard
-/// — because archiving is a write into it. One family covers both in the declaration; the
-/// operator's grant list does not, and the README's grant table says so per verb.
+/// — because archiving is a write into it, and purge needs its READ grant too, because it
+/// finds what a delete archived. One family covers each in the declaration; the operator's
+/// grant list does not, and the README's grant table says so per verb.
 fn write_scopes(spec: ikigai_core::ActionSpec, own: &str) -> ikigai_core::ActionSpec {
     spec.requires(own)
         .requires(ikigai_store::CAP_READ_GRAPH)
@@ -1025,77 +1057,30 @@ fn parse_priority(value: &str) -> Result<i64> {
 struct Removed {
     /// The tombstone's IRI, in the ledger the item was in.
     tombstone: String,
+    /// How many quads left the live graph.
     quads: usize,
+    /// How many quads an earlier recoverable delete had archived and a purge destroyed.
+    archived: usize,
 }
 
-/// Move (or destroy) an item's quads and write its tombstone.
-///
-/// ★ The three sets that go together, because leaving any behind is a lie about what was
-/// deleted: the item's own triples, the triples of its comments, and every edge POINTING
-/// AT it (a `blocks` from another item would otherwise name something that no longer
-/// resolves).
-///
-/// # ★ Why this is TWO updates, and what a reader sees between them
-///
-/// A delete moves quads between the ledger's graph and its graveyard, and **a scoped
-/// update can neither read nor write across graphs** — that is the whole point of the
-/// narrow door (`ikigai_store::confine`). So the single
-/// `DELETE { GRAPH live } INSERT { GRAPH deleted } WHERE { GRAPH live }` this used to be
-/// cannot exist, and the move becomes:
-///
-/// 1. a scoped **read** of the live graph — the quads, which this already did for the
-///    tombstone's hash;
-/// 2. a scoped **write to the graveyard**, inserting them as data;
-/// 3. a scoped **write to the live graph**, removing them and writing the tombstone —
-///    which is still one update, so *that* pair is atomic.
-///
-/// ⚠ **The graveyard is touched first and the live graph last, deliberately: the live
-/// graph is the commit point.** Every read in this crate looks at the live graph and none
-/// looks at the graveyard, so a crash between the two writes leaves the item *entirely
-/// present and undeleted* — with a copy already archived, which no reader can see. A
-/// reader therefore never observes a half-deleted item: it sees the item, whole, until the
-/// moment it does not. The state is re-runnable rather than merely recoverable, because
-/// step 2 is `INSERT DATA` of quads the graph may already hold, and a store is a set.
-/// The other order — remove first, archive second — would put the window on the side where
-/// a crash destroys data, which is not a trade worth making for one fewer sentence here.
-///
-/// The same argument runs backwards for `purge`, which must clear both graphs: it empties
-/// the **graveyard** first and the live graph second, so an interrupted purge leaves the
-/// item fully live and re-purgeable, rather than leaving an orphan in a graveyard that no
-/// resource can name once the live item it belonged to is gone.
-///
-/// ⚠ The one wrinkle the re-runnability does not cover: if the item is *edited* between an
-/// interrupted delete and its retry, the graveyard ends up holding the union of both
-/// versions. The tombstone's hash then describes the retry's quads, which is what was
-/// removed and is the honest answer; the archive is a superset. There is no in-band signal
-/// for it, and inventing one would mean a marker quad written before the move that a
-/// reader of the live graph would have to learn to ignore.
-async fn delete_item(
-    client: &StoreClient<'_, '_>,
-    item: &Item,
-    reason: &str,
-    author: Option<&str>,
-    now: u64,
-    destroy: bool,
-) -> Result<Removed> {
-    let subject = sparql::iri(&item.iri, "item")?;
-    let selector = format!(
+/// Everything that goes with an item when it goes: its own triples, the triples of its
+/// comments, and every edge POINTING AT it.
+fn removal_selector(subject: &str) -> String {
+    format!(
         "?s ?p ?o . FILTER(?s = {subject} || ?o = {subject} || EXISTS {{ ?s <{on}> {subject} }})",
         on = v::ON_ITEM,
-    );
-    let rows = client
-        .select(&format!(
-            "SELECT ?s ?p ?o WHERE {{ {} }} ORDER BY ?s ?p ?o",
-            client.in_graph(&selector)
-        ))
-        .await?;
+    )
+}
 
-    // ★ The hash is over a canonical form of exactly what is going: sorted triples, each
-    // term with its kind and datatype. There are no blank nodes in this graph — every node
-    // this module writes is skolemized — so sorted triples ARE a canonical form here, and
-    // the heavyweight RDF Dataset Canonicalization would buy nothing.
+/// The tombstone's hash: a canonical form of exactly the rows given — sorted triples,
+/// each term with its kind, datatype and language tag.
+///
+/// There are no blank nodes in this graph — every node this module writes is skolemized —
+/// so sorted triples ARE a canonical form here, and the heavyweight RDF Dataset
+/// Canonicalization would buy nothing.
+fn content_hash(rows: &[sparql::Row]) -> String {
     let mut hasher = Sha256::new();
-    for row in &rows {
+    for row in rows {
         for var in ["s", "p", "o"] {
             if let Some(binding) = row.get(var) {
                 hasher.update(binding.kind.as_bytes());
@@ -1113,7 +1098,109 @@ async fn delete_item(
         }
         hasher.update([0x1d]);
     }
-    let digest = format!("sha256:{:x}", hasher.finalize());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Rows read out of the store, written back as SPARQL data — through the store's own term
+/// serializer, never a spelling of ours, and refusing a blank node (see
+/// [`sparql::Binding::term`]).
+fn rows_as_data(rows: &[sparql::Row]) -> Result<String> {
+    let mut triples = String::new();
+    for row in rows {
+        let (Some(s), Some(p), Some(o)) = (row.get("s"), row.get("p"), row.get("o")) else {
+            continue;
+        };
+        triples.push_str(&format!(
+            "{} {} {} .\n",
+            sparql::term(&s.term("s")?),
+            sparql::term(&p.term("p")?),
+            sparql::term(&o.term("o")?)
+        ));
+    }
+    Ok(triples)
+}
+
+/// Move (or destroy) an item's quads and write its tombstone.
+///
+/// ★ The three sets that go together, because leaving any behind is a lie about what was
+/// deleted: the item's own triples, the triples of its comments, and every edge POINTING
+/// AT it (a `blocks` from another item would otherwise name something that no longer
+/// resolves). [`removal_selector`] is that set.
+///
+/// # ★ Why this is TWO updates, and what a reader sees between them
+///
+/// A delete moves quads between the ledger's graph and its graveyard, and **a scoped
+/// update can neither read nor write across graphs** — that is the whole point of the
+/// narrow door (`ikigai_store::confine`). So the single
+/// `DELETE { GRAPH live } INSERT { GRAPH deleted } WHERE { GRAPH live }` this used to be
+/// cannot exist, and the move becomes:
+///
+/// 1. a scoped **read** of the live graph — the quads, which this already did for the
+///    tombstone's hash;
+/// 2. a scoped **write to the graveyard**, inserting them as data;
+/// 3. a scoped **write to the live graph**, removing **exactly those quads** and writing
+///    the tombstone — which is still one update, so *that* pair is atomic.
+///
+/// ⚠ **The graveyard is touched first and the live graph last, deliberately: the live
+/// graph is the commit point.** Every read in this crate looks at the live graph and none
+/// looks at the graveyard, so a crash between the two writes leaves the item *entirely
+/// present and undeleted* — with a copy already archived, which no reader can see. A
+/// reader therefore never observes a half-deleted item: it sees the item, whole, until the
+/// moment it does not. The state is re-runnable rather than merely recoverable, because
+/// step 2 is `INSERT DATA` of quads the graph may already hold, and a store is a set.
+/// The other order — remove first, archive second — would put the window on the side where
+/// a crash destroys data, which is not a trade worth making for one fewer sentence here.
+///
+/// # ★ Why step 3 is `DELETE DATA` of the rows read, and not the selector again
+///
+/// Because the selector is re-evaluated at step 3, and the store does not hold still
+/// between step 1 and step 3. In 0.2.1 the removal was `DELETE … WHERE { selector }`, so a
+/// comment that landed between the read and the removal matched the selector at step 3 and
+/// was removed from the live graph **without ever having been archived** — a "recoverable"
+/// delete that destroyed an acknowledged write, and a tombstone whose hash and count did not
+/// cover it. It reproduced in 300 of 300 forced rounds. (The single cross-graph update before
+/// 0.2.0 was atomic and had no such window; narrowing the doors opened it.)
+///
+/// Removing exactly the rows read makes three things the same set by construction: what
+/// was archived, what was removed, and what the tombstone hashes and counts. A write that
+/// races the delete is **kept**, in the live graph, beside the tombstone — an orphan of
+/// the deleted item rather than a loss, and the same place a write that arrives just after
+/// the delete has always landed. The alternative considered was a guarded removal that
+/// re-reads and retries until nothing raced it; it closes the window only to reopen it one
+/// round trip later, because a write's own existence check and its insert are also two
+/// steps, so it would buy a retry loop and no guarantee.
+///
+/// The same argument runs backwards for `purge`, which must clear both graphs: it empties
+/// the **graveyard** first and the live graph second, so an interrupted purge leaves the
+/// item fully live and re-purgeable, rather than leaving an orphan in a graveyard that no
+/// resource can name once the live item it belonged to is gone. ⚠ A purge's live removal
+/// stays `DELETE … WHERE`, on purpose: a purge is asked to leave nothing of the item, a
+/// hand-written blank node included (which `DELETE DATA` cannot name), so a write racing a
+/// purge is destroyed with it and is not in the tombstone's count.
+///
+/// ⚠ The one wrinkle the re-runnability does not cover: if the item is *edited* between an
+/// interrupted delete and its retry, the graveyard ends up holding the union of both
+/// versions. The tombstone's hash then describes the retry's quads, which is what was
+/// removed and is the honest answer; the archive is a superset. There is no in-band signal
+/// for it, and inventing one would mean a marker quad written before the move that a
+/// reader of the live graph would have to learn to ignore.
+async fn delete_item(
+    client: &StoreClient<'_, '_>,
+    item: &Item,
+    reason: &str,
+    author: Option<&str>,
+    now: u64,
+    destroy: bool,
+) -> Result<Removed> {
+    let subject = sparql::iri(&item.iri, "item")?;
+    let selector = removal_selector(&subject);
+    let rows = client
+        .select(&format!(
+            "SELECT ?s ?p ?o WHERE {{ {} }} ORDER BY ?s ?p ?o",
+            client.in_graph(&selector)
+        ))
+        .await?;
+    let digest = content_hash(&rows);
 
     // Step 1 of 2 — the graveyard, which no read in this crate can see, so nothing a
     // reader observes has changed yet.
@@ -1121,8 +1208,19 @@ async fn delete_item(
     // ⚠ The DELETE TEMPLATE is a quad pattern and may not carry a FILTER — the selector
     // belongs in the WHERE clause only. Putting it in both is a parse error at the store,
     // which is at least loud.
-    if destroy {
-        // Everything an earlier recoverable delete quarantined.
+    let mut archived = 0;
+    let removal = if destroy {
+        // Everything an earlier recoverable delete quarantined. Read first, so the answer
+        // can say how much it destroyed — and so the graveyard's READ grant, which the
+        // store requires of a `DELETE … WHERE` over it, is a requirement here too rather
+        // than a surprise at the next store upgrade.
+        archived = client
+            .select_deleted(&format!(
+                "SELECT ?s ?p ?o WHERE {{ {} }}",
+                client.in_deleted_graph(&selector)
+            ))
+            .await?
+            .len();
         client
             .update_deleted(&format!(
                 "DELETE {{ {} }} WHERE {{ {} }}",
@@ -1130,32 +1228,26 @@ async fn delete_item(
                 client.in_deleted_graph(&selector),
             ))
             .await?;
+        format!(
+            "DELETE {{ {} }} WHERE {{ {} }}",
+            client.in_graph("?s ?p ?o"),
+            client.in_graph(&selector)
+        )
+    } else if rows.is_empty() {
+        String::new()
     } else {
         // The quads read above, as data: a scoped update cannot read the live graph from
         // inside the graveyard's scope, so the WHERE clause that used to do this work is
-        // now the SELECT that already ran, and the terms go back out through the store's
-        // own serializer rather than through any spelling of our own.
-        if !rows.is_empty() {
-            let mut triples = String::new();
-            for row in &rows {
-                let (Some(s), Some(p), Some(o)) = (row.get("s"), row.get("p"), row.get("o")) else {
-                    continue;
-                };
-                triples.push_str(&format!(
-                    "{} {} {} .\n",
-                    sparql::term(&s.term("s")?),
-                    sparql::term(&p.term("p")?),
-                    sparql::term(&o.term("o")?)
-                ));
-            }
-            client
-                .update_deleted(&format!(
-                    "INSERT DATA {{ {} }}",
-                    client.in_deleted_graph(&triples)
-                ))
-                .await?;
-        }
-    }
+        // now the SELECT that already ran.
+        let data = rows_as_data(&rows)?;
+        client
+            .update_deleted(&format!(
+                "INSERT DATA {{ {} }}",
+                client.in_deleted_graph(&data)
+            ))
+            .await?;
+        format!("DELETE DATA {{ {} }}", client.in_graph(&data))
+    };
 
     let id = item.iri.rsplit(':').next().unwrap_or("unknown").to_string();
     let tombstone = client.ledger().tombstone(&id);
@@ -1178,6 +1270,13 @@ async fn delete_item(
         hash = v::ext::CONTENT_HASH,
         digest = literal(&digest),
     );
+    if destroy {
+        triples.push_str(&format!(
+            "\n<{tombstone}> <{}> {} .",
+            v::PURGED_AT,
+            datetime(now)
+        ));
+    }
     if !reason.is_empty() {
         triples.push_str(&format!(
             "\n<{tombstone}> <{}> {} .",
@@ -1196,25 +1295,88 @@ async fn delete_item(
     // and writing its tombstone are one scoped update and therefore atomic: there is no
     // instant in which the item is gone and unaccounted for.
     //
-    // ★ The order of the two statements is load-bearing. The selector matches `?o =
-    // <item>`, and the tombstone's `ledger:deletedItem <item>` is exactly that shape — so
-    // an INSERT before the DELETE would write the tombstone and then remove it. SPARQL
+    // ★ The order of the two statements is load-bearing for a purge. Its selector matches
+    // `?o = <item>`, and the tombstone's `ledger:deletedItem <item>` is exactly that shape —
+    // so an INSERT before the DELETE would write the tombstone and then remove it. SPARQL
     // runs `;`-separated operations in order, which is what makes this safe and also what
     // makes it fragile enough to say out loud.
     client
         .update(&batch(&[
-            format!(
-                "DELETE {{ {} }} WHERE {{ {} }}",
-                client.in_graph("?s ?p ?o"),
-                client.in_graph(&selector)
-            ),
+            removal,
             format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
         ]))
         .await?;
     Ok(Removed {
         tombstone,
         quads: rows.len(),
+        archived,
     })
+}
+
+/// Destroy what a recoverable delete archived, for an item that is no longer live.
+///
+/// ★ **This is the path that makes a pasted secret destroyable after it was deleted.**
+/// Until 0.2.1 `purge` began with the same live-graph lookup every other action uses, so
+/// once an item had been deleted — the first thing anyone does on noticing a token in a
+/// title — purge answered "no ledger item", and the content sat in the graveyard for good,
+/// reachable by anyone holding the graveyard's read grant and by no resource here at all.
+///
+/// The item is found through its **tombstone**, which stays in the live graph and names
+/// both the number and the IRI. Same order as every other destructive path here: the
+/// graveyard first, the tombstone second — an interruption leaves a tombstone still saying
+/// `recoverable true` over an empty archive, which a second purge corrects, rather than a
+/// tombstone saying "destroyed" over content that is still there.
+///
+/// The tombstone keeps what the delete wrote (its reason, its author, its hash of what
+/// left the live graph) and gains `ledger:purgedAt`, plus `ledger:purgeReason` and
+/// `ledger:purgedBy` when given — the purge's own words, kept apart from the delete's.
+async fn purge_archived(
+    client: &StoreClient<'_, '_>,
+    found: &model::Tombstone,
+    reason: &str,
+    author: Option<&str>,
+    now: u64,
+) -> Result<usize> {
+    let subject = sparql::iri(&found.item, "item")?;
+    let selector = removal_selector(&subject);
+    let archived = client
+        .select_deleted(&format!(
+            "SELECT ?s ?p ?o WHERE {{ {} }}",
+            client.in_deleted_graph(&selector)
+        ))
+        .await?
+        .len();
+    if archived > 0 {
+        client
+            .update_deleted(&format!(
+                "DELETE {{ {} }} WHERE {{ {} }}",
+                client.in_deleted_graph("?s ?p ?o"),
+                client.in_deleted_graph(&selector),
+            ))
+            .await?;
+    }
+    let mut operations = vec![
+        replace_one(client, &found.iri, v::RECOVERABLE, &boolean(false)),
+        replace_one(client, &found.iri, v::PURGED_AT, &datetime(now)),
+    ];
+    if !reason.is_empty() {
+        operations.push(replace_one(
+            client,
+            &found.iri,
+            v::PURGE_REASON,
+            &literal(reason),
+        ));
+    }
+    if let Some(author) = author {
+        operations.push(replace_one(
+            client,
+            &found.iri,
+            v::PURGED_BY,
+            &literal(author),
+        ));
+    }
+    client.update(&batch(&operations)).await?;
+    Ok(archived)
 }
 
 // -------------------------------------------------------------------------- append
@@ -1232,7 +1394,7 @@ impl Endpoint for AppendEndpoint {
         let now = now_ms(inv)?;
         let (title, body) = split_content(inv.inline_str("content")?)?;
         let author = inv.inline_str("author").ok();
-        let id = mint_id(now, &title, author.unwrap_or_default());
+        let id = mint_id(now);
         let iri = client.ledger().item(&id);
 
         let mut triples = format!(
@@ -2047,23 +2209,65 @@ impl Endpoint for PurgeEndpoint {
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Purge)?);
         let now = now_ms(inv)?;
+        // ★ Both graveyard grants, checked before anything is touched. A purge reads the
+        // graveyard (to find and count what an earlier delete archived) and destroys in it,
+        // so it needs the graveyard's READ grant as well as its write grant — and the store
+        // refuses a `DELETE … WHERE` over a graph without the read grant for it, because the
+        // WHERE clause is a read. Refusing here names both tokens in one sentence, before
+        // any graph has changed, rather than surfacing the store's denial halfway through.
+        let deleted = client.ledger().deleted_graph();
+        let missing: Vec<String> = [
+            ikigai_store::cap_read_graph(&deleted),
+            ikigai_store::cap_write_graph(&deleted),
+        ]
+        .into_iter()
+        .filter(|scope| !inv.capability.allows(scope))
+        .collect();
+        if !missing.is_empty() {
+            return Err(Error::Denied(format!(
+                "this capability does not hold {}. A purge reads and destroys in the \
+                 ledger's graveyard `{deleted}` as well as its live graph, so it needs the \
+                 graveyard's read AND write grants beside the live graph's",
+                missing
+                    .iter()
+                    .map(|s| format!("`{s}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )));
+        }
         let reference = inv.inline_str("content")?;
-        let item = require_item(&client, reference).await?;
         let reason = inv.inline_str("reason").unwrap_or("");
-        let removed = delete_item(
-            &client,
-            &item,
-            reason,
-            inv.inline_str("author").ok(),
-            now,
-            true,
-        )
-        .await?;
+        let author = inv.inline_str("author").ok();
+        let item = match require_item(&client, reference).await {
+            Ok(item) => item,
+            // Not live: it may have been deleted, and then the content is in the graveyard,
+            // findable through the tombstone the delete left in the live graph.
+            Err(Error::NotFound(absent)) => {
+                let Some(found) = model::find_tombstone(&client, reference).await? else {
+                    return Err(Error::NotFound(absent));
+                };
+                let archived = purge_archived(&client, &found, reason, author, now).await?;
+                return Ok(plain(format!(
+                    "purged {} {} (deleted earlier)\n  {archived} archived quad(s) destroyed, \
+                     NOT recoverable\n  tombstone: {}\n",
+                    client.ledger().number(found.number),
+                    found.item,
+                    found.iri
+                )));
+            }
+            Err(other) => return Err(other),
+        };
+        let removed = delete_item(&client, &item, reason, author, now, true).await?;
         Ok(plain(format!(
-            "purged {} {}\n  {} quad(s) destroyed, NOT recoverable\n  tombstone: {}\n",
+            "purged {} {}\n  {} quad(s) destroyed, NOT recoverable{}\n  tombstone: {}\n",
             item.short(),
             item.iri,
             removed.quads,
+            if removed.archived > 0 {
+                format!(" (and {} archived by an earlier delete)", removed.archived)
+            } else {
+                String::new()
+            },
             removed.tombstone
         )))
     }
@@ -2086,12 +2290,16 @@ impl Endpoint for PurgeEndpoint {
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
                     .input(ledger_arg())
-                    .summary("Destroy the item's content, leaving only its tombstone.")
+                    .summary(
+                        "Destroy the item's content, leaving only its tombstone — whether \
+                         the item is live or was deleted earlier (then it is found by its \
+                         tombstone, and what the delete archived is destroyed).",
+                    )
                     .input(
                         ArgSpec::new("content")
                             .summary(
                                 "The item — where a pipe's value lands. `#12`, an opaque id, \
-                                 or the full IRI.",
+                                 or the full IRI; a deleted item is named the same way.",
                             )
                             .class(v::ext::XSD_STRING),
                     )
@@ -2447,10 +2655,12 @@ impl Endpoint for LedgersEndpoint {
                          be addressed here and not read in the store, and this listing would \
                          have to omit it — which is indistinguishable from an empty ledger. \
                          Grant the store scope too, or drop the ledger scope: a ledger needs \
-                         both halves, and delete and purge need `{}` as well",
+                         both halves, delete needs `{}` as well, and purge needs that and \
+                         `{}`",
                         ledger.cap_read(),
                         ledger.name(),
                         ikigai_store::cap_write_graph(&ledger.deleted_graph()),
+                        ikigai_store::cap_read_graph(&ledger.deleted_graph()),
                     )));
                 }
                 let client = StoreClient::new(inv, ledger.clone());
@@ -2580,16 +2790,18 @@ mod tests {
 
     #[test]
     fn an_id_is_time_ordered_and_unique_per_millisecond() {
-        let earlier = mint_id(1_757_700_000_000, "a", "brian");
-        let later = mint_id(1_757_700_000_001, "a", "brian");
+        let earlier = mint_id(1_757_700_000_000);
+        let later = mint_id(1_757_700_000_001);
         assert!(earlier < later, "{earlier} should sort before {later}");
-        assert_eq!(earlier.len(), 16);
-        // Same millisecond, different content: the digest half separates them, which is
-        // what keeps two merged ledgers from colliding.
-        assert_ne!(
-            mint_id(1_757_700_000_000, "a", "brian"),
-            mint_id(1_757_700_000_000, "b", "brian")
-        );
+        assert_eq!(earlier.len(), 23);
+        // ★ The same millisecond, minted twice: distinct by construction, with no content
+        // to tell them apart. Until 0.2.1 the second half was a digest of the content, so
+        // two identical filings in one millisecond were one item.
+        let ids: std::collections::BTreeSet<String> =
+            (0..10_000).map(|_| mint_id(1_757_700_000_000)).collect();
+        assert_eq!(ids.len(), 10_000);
+        // Every character is Crockford, so an id is safe in an IRI segment as it stands.
+        assert!(earlier.bytes().all(|b| CROCKFORD.contains(&b)), "{earlier}");
     }
 
     #[test]

@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ikigai_core::{Error, Result};
 use oxrdf::{Graph, NamedNode, Triple};
+use sha2::{Digest, Sha256};
 
 use crate::ledger::Ledger;
 use crate::model::{self, Filter, Item};
@@ -299,9 +300,31 @@ impl Selection {
 
     /// The graph face: the reasoning, skolemized, so "why this one" is queryable and not
     /// just printable.
+    ///
+    /// ★ **The selection's IRI is its moment AND a digest of what it says.** It used to be
+    /// the ledger and the millisecond alone, so two different selections in one
+    /// millisecond — two policies, two filters — were one subject, and the union idiom
+    /// (`urn:rdf:union`) merged two rankings into a selection claiming two policies. The
+    /// digest is over the graph this method would write under a placeholder subject, so
+    /// two selections share an IRI exactly when they say the same thing — content-addressed,
+    /// which also keeps the face deterministic for the cache.
     pub fn turtle(&self) -> Result<Vec<u8>> {
-        let selection = self.ledger.selection(self.generated_at);
-        let subject = NamedNode::new(&selection)
+        let placeholder = format!("{}_", self.ledger.selection(self.generated_at));
+        let digest = Sha256::digest(model::turtle(&self.graph(&placeholder)?)?);
+        let selection = format!(
+            "{}-{}",
+            self.ledger.selection(self.generated_at),
+            digest[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        model::turtle(&self.graph(&selection)?)
+    }
+
+    /// The selection as a graph under one subject IRI.
+    fn graph(&self, selection: &str) -> Result<Graph> {
+        let subject = NamedNode::new(selection)
             .map_err(|e| Error::Endpoint(format!("selection IRI: {e}")))?;
         let mut graph = Graph::new();
         let push = |graph: &mut Graph, s: &NamedNode, p: &str, o: oxrdf::Term| {
@@ -378,7 +401,7 @@ impl Selection {
             push(&mut graph, &node, v::ITEM, model::named(&item.iri));
             push(&mut graph, &node, v::REASON, model::plain(&why.reason()));
         }
-        model::turtle(&graph)
+        Ok(graph)
     }
 }
 
