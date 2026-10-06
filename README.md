@@ -331,7 +331,11 @@ Two stages, kept apart:
 
 1. **The ready set is deterministic and is a query**: open, unclaimed, not deferred, not
    blocked by an open item, plus the caller's label / `about` / level filters. No policy is
-   involved, and most of the value is here.
+   involved, and most of the value is here. ⚠ **"Blocked", the cycle check and leverage
+   are computed over EVERY open item, and the filters narrow afterwards** — a blocker
+   without the filter's label still blocks, and a ledger of any size is read whole. Until
+   0.2.1 both were computed over the filtered pool, loaded through a listing's 500-row
+   bound, so a filter or a long backlog could make blocked work look ready.
 2. **The order within it is policy**, and that is the part people disagree about.
 
 Each policy is a **resource** — `urn:iki:ledger:policy:{name}` — so the manifold advertises
@@ -348,6 +352,17 @@ which orderings exist and `Meta` says what each one weighs. Two ship:
 A host supplies its own with `space_with_policies(…)` — the `CachePolicy` shape, configured
 at execution time rather than compiled in. The first registered policy is the default; an
 empty list refuses at boot, where the manifest is.
+
+★ **`next` is cached until the ledger changes OR its policy's answer could, whichever is
+first.** A write cuts the store's threads, but the passage of time cuts nothing, and reading
+the clock records no dependency — so until 0.2.1 an idle ledger served `leverage`'s day-zero
+age points indefinitely. `OrderingPolicy::valid_until` says until when a policy's answer
+holds: `priority-recency` never reads the clock (cached until a write, as before), `leverage`
+holds until the next day boundary of an age it prints, and a host policy that does not
+implement it is **never** served from cache — the safe default, since only the policy knows
+what it does with `now`. Measured over 500 open items in a debug build: a cached `next` reads
+in ~15 µs before and after; a recomputation costs ~12 ms, paid once per day under `leverage`
+and on every read under a policy that does not say.
 
 Two things that were designed in rather than discovered later:
 

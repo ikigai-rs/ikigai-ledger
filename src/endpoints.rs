@@ -2364,18 +2364,37 @@ impl Endpoint for NextEndpoint {
             .and_then(|l| l.parse().ok())
             .unwrap_or(3);
         let set = select::ready(&client, &filter).await?;
+        let valid_until = select::valid_until(&set, policy.as_ref(), now);
         let selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
-        if want == TURTLE {
-            return Ok(Representation::new(
+        let repr = if want == TURTLE {
+            Representation::new(
                 ReprType::new(TURTLE).with_param("charset", "utf-8"),
                 selection.turtle()?,
             )
-            .cacheable()
+        } else {
+            plain(selection.plain())
+        };
+        // ★ Cached under the store's write threads AND until the policy's own horizon — the
+        // half a thread cannot carry. Reading the clock records no dependency, so a ranking
+        // that turns on `now` (leverage's age points) used to be served unchanged for as long
+        // as nothing was written: an idle ledger answered with the day it was first asked.
+        // The policy says until when its answer holds; `None` is "it does not read the
+        // clock", and an instant already past is "do not cache this at all".
+        //
+        // ⚠ The Turtle face's `prov:generatedAtTime` is the moment the cached answer was
+        // COMPUTED, which stays true of it: within the horizon the ranking is the one a fresh
+        // computation would give, and the selection's IRI is a digest of what it says.
+        let repr = match valid_until {
+            None => repr.cacheable(),
+            Some(deadline) if deadline > now => {
+                repr.cacheable_until(ikigai_core::Time::from_millis(deadline))
+            }
+            Some(_) => repr,
+        };
+        Ok(repr
             .depends_on(ikigai_store::UPDATE_THREAD)
             .depends_on(ikigai_store::LOAD_THREAD)
-            .depends_on(ikigai_store::GRAPH_UPDATE_THREAD));
-        }
-        face(selection.plain(), None, want)
+            .depends_on(ikigai_store::GRAPH_UPDATE_THREAD))
     }
 
     fn name(&self) -> &str {

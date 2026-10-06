@@ -3,15 +3,25 @@
 //!
 //! # The shape
 //!
-//! 1. Load the open items (the caller's label / `about` filters applied **in the
-//!    query**).
+//! 1. Load **every** open item — unfiltered and unbounded.
 //! 2. Build the `blocks` graph over them and **refuse if it has a cycle**, naming the
 //!    cycle — because a cycle makes the ready set silently empty, which is
 //!    indistinguishable from a finished backlog.
-//! 3. Partition: ready (unclaimed, not deferred, no open blocker) versus excluded, and
-//!    keep the exclusion reasons.
-//! 4. Compute leverage — how many open items each candidate transitively unblocks.
-//! 5. Hand the ready set to the [`OrderingPolicy`].
+//! 3. Compute leverage — how many open items each one transitively unblocks.
+//! 4. Narrow to the caller's filters (level, labels, `about`), evaluated **in the query**
+//!    by the same clauses `urn:iki:ledger:items` uses.
+//! 5. Partition what is left: ready (unclaimed, not deferred, no open blocker) versus
+//!    excluded, and keep the exclusion reasons.
+//! 6. Hand the ready set to the [`OrderingPolicy`].
+//!
+//! ⚠ **Steps 2 and 3 run over the whole ledger and step 4 comes after them, and that
+//! order is the fix for two defects.** Until 0.2.1 the pool was loaded with the caller's
+//! filters applied and through the listing's 500-row bound, and "blocked" was computed over
+//! that pool. So a blocker that did not carry the filter's label was invisible and the item
+//! it blocked was offered as ready; and with more than 500 open items the oldest fell out,
+//! so an older p0 was never offered and an item whose blocker fell out was offered as
+//! ready. Blocked, cyclic and leverage are facts about the ledger; a filter only chooses
+//! which of the ledger's items you are asking about.
 //!
 //! ⚠ **Steps 3 and 4 are in Rust, not in SPARQL, and that is a choice.** The three
 //! readiness predicates are perfectly expressible as query clauses — [`Filter`] has them,
@@ -78,7 +88,8 @@ pub struct ReadySet {
     pub leverage: BTreeMap<String, (usize, usize)>,
 }
 
-/// Compute the ready set over the open items a filter admits.
+/// Compute the ready set among the open items a filter admits — with "blocked", the cycle
+/// check and leverage computed over **every** open item, never only the admitted ones.
 ///
 /// # Errors
 ///
@@ -86,12 +97,24 @@ pub struct ReadySet {
 /// a DAG. A cycle is not exotic — it is what happens when someone links carelessly — and
 /// the alternative answer, "nothing is ready", is indistinguishable from having finished.
 pub async fn ready(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<ReadySet> {
-    let mut pool_filter = filter.clone();
-    pool_filter.status = model::Status::Open;
+    let open = model::load_open_items(client).await?;
+    // Which of them the caller asked about — the filter's own clauses, evaluated by the
+    // store, so `labels=rust` means here what it means to `items`. `None` is "all of them".
+    let mut narrowing = filter.clone();
+    narrowing.status = model::Status::Open;
     // Readiness itself is evaluated below, in Rust, so the exclusions can be explained.
-    pool_filter.holder = model::Holder::Any;
-    pool_filter.deferred = model::Deferred::Include;
-    let open = model::load_items(client, &pool_filter).await?;
+    narrowing.holder = model::Holder::Any;
+    narrowing.deferred = model::Deferred::Include;
+    let narrows = narrowing.kind.is_some()
+        || !narrowing.labels.is_empty()
+        || !narrowing.without.is_empty()
+        || narrowing.about.is_some()
+        || narrowing.text.is_some();
+    let admitted = if narrows {
+        Some(model::matching_iris(client, &narrowing).await?)
+    } else {
+        None
+    };
 
     let open_iris: BTreeSet<&str> = open.iter().map(|i| i.iri.as_str()).collect();
     let numbers: BTreeMap<&str, i64> = open.iter().map(|i| (i.iri.as_str(), i.number)).collect();
@@ -163,6 +186,12 @@ pub async fn ready(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Read
     let mut ready = Vec::new();
     let mut excluded = Vec::new();
     for item in open {
+        if admitted
+            .as_ref()
+            .is_some_and(|admitted| !admitted.contains(&item.iri))
+        {
+            continue;
+        }
         let why = if let Some(holder) = item.claimed_by.clone() {
             Some(Excluded::Claimed(holder))
         } else if item.deferred {
@@ -214,26 +243,7 @@ pub fn rank(
     now: u64,
     limit: usize,
 ) -> Selection {
-    let candidates: Vec<Candidate> = set
-        .ready
-        .iter()
-        .map(|item| {
-            let (leverage, blocks_direct) = set.leverage.get(&item.iri).copied().unwrap_or((0, 0));
-            Candidate {
-                iri: item.iri.clone(),
-                number: item.number,
-                title: item.title.clone(),
-                kind: item.kind.clone(),
-                priority: item.priority,
-                created: item.created,
-                modified: item.modified,
-                labels: item.labels.clone(),
-                about: item.about.clone(),
-                leverage,
-                blocks_direct,
-            }
-        })
-        .collect();
+    let candidates = candidates(&set);
     let ready_count = candidates.len();
     let by_iri: BTreeMap<String, Item> = set
         .ready
@@ -255,6 +265,39 @@ pub fn rank(
         ready_count,
         excluded: set.excluded,
     }
+}
+
+/// What a policy is handed for a ready set.
+fn candidates(set: &ReadySet) -> Vec<Candidate> {
+    set.ready
+        .iter()
+        .map(|item| {
+            let (leverage, blocks_direct) = set.leverage.get(&item.iri).copied().unwrap_or((0, 0));
+            Candidate {
+                iri: item.iri.clone(),
+                number: item.number,
+                title: item.title.clone(),
+                kind: item.kind.clone(),
+                priority: item.priority,
+                created: item.created,
+                modified: item.modified,
+                labels: item.labels.clone(),
+                about: item.about.clone(),
+                leverage,
+                blocks_direct,
+            }
+        })
+        .collect()
+}
+
+/// Until when a ranking of `set` by `policy` at `now` stays true while the ledger does
+/// not change — [`OrderingPolicy::valid_until`] over the same inputs [`rank`] hands the
+/// policy. `None`: the ranking does not depend on the clock.
+pub fn valid_until(set: &ReadySet, policy: &dyn OrderingPolicy, now: u64) -> Option<u64> {
+    policy.valid_until(&SelectionInputs {
+        candidates: candidates(set),
+        now,
+    })
 }
 
 impl Selection {
