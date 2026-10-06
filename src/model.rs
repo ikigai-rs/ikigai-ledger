@@ -17,6 +17,7 @@ use crate::vocabulary as v;
 /// Which items a read is asking for. Every field narrows; an empty filter is
 /// "everything, open first".
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Filter {
     /// `open`, `closed`, or `all`.
     pub status: Status,
@@ -86,6 +87,7 @@ pub enum Deferred {
 
 /// One item, as the store holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Item {
     /// The stable IRI. The identity.
     pub iri: String,
