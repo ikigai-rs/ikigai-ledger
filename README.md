@@ -263,6 +263,18 @@ again. A keyed append is exactly the request that gets replayed — a hook re-ru
 run twice — and a replay must not resurrect what someone deliberately deleted. Filing it
 again is a deliberate act: another key, or none.
 
+**A replay does not write, so it does not invalidate.** Because a taken key stays taken, the
+append looks the key up first and answers `existing` without sending the store an update at
+all. That matters more than the round trip it saves: the kernel cuts
+`urn:iki:store:graph-update` after every successful write *whether or not it changed
+anything*, so a no-op update still invalidated every cached `next`, `items` and item read,
+and a re-sync that sends one keyed append per task it knows about was a cache flush. A key
+read as free proves nothing, so a free key still goes through the guarded update above. The
+one remaining no-op write is the race the guard exists for: two appends that both read the
+key as free, where the second one's update finds it taken and still cuts.
+`tests/noop_keyed_append.rs` pins both halves — a replay leaves cached reads cached, a
+filing still invalidates them.
+
 A key is ASCII letters, digits, `-`, `.`, `_`, `~` and `:`, at most 256 characters, compared
 exactly. The shape is fixed so a key is a legal IRI segment **and survives gonk's HTTP
 door**, which maps an IRI to a URL path by turning every `:` into a `/` — so a `/` in a key
