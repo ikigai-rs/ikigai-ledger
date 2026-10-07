@@ -675,7 +675,7 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Unreleased (0.4.2): one bad timestamp no longer drops an item (ledger #866)
+### 0.4.2 (2026-10-07): one bad timestamp no longer drops an item (ledger #866)
 
 A patch, by this crate's reading of the JSON face's rule (a field ADDED, nothing renamed,
 removed or retyped). On 0.4.1 an item whose `dcterms:modified` or `dcterms:created` was not a
