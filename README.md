@@ -656,6 +656,18 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.4.1: a keyed append whose key is taken answers without a write (ledger #822)
+
+A patch. On 0.4.0 a keyed append whose key was already taken still sent its guarded update; the
+update wrote nothing, but the kernel cuts the target of every SUCCESSFUL mutating request, so
+every replay (a hook re-run, an import or a spec sync run again) invalidated every cached read
+of the ledger (`next`, `items`, item faces). `append key=` now looks the key up first and, when
+it is taken, answers `#N <iri> existing <state>` (JSON `outcome: existing`) with no store write
+at all. Safe because a key never becomes free again (a delete moves it onto the tombstone, a
+purge keeps it). A key read as free still goes through the guarded update, so concurrent appends
+still file exactly once; only the race's loser still cuts (rare, and correct). A real filing
+does one extra cacheable read. No API change.
+
 ### 0.4.0: a keyed append and a JSON face (ledger #779)
 
 Additive in behavior — every request 0.3.0 accepted answers the same bytes in the plain
