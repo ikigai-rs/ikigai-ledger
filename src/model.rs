@@ -124,8 +124,14 @@ pub struct Item {
     /// Why the holder took it.
     pub purpose: Option<String>,
     /// Milliseconds since the epoch.
+    ///
+    /// ⚠ **A stand-in when [`defects`](Item::defects) names `dcterms:created`**: the item's
+    /// `dcterms:modified` in its place, which is the latest it can have been filed.
     pub created: u64,
     /// Milliseconds since the epoch.
+    ///
+    /// ⚠ **A stand-in when [`defects`](Item::defects) names `dcterms:modified`**: the
+    /// item's `dcterms:created` in its place, which is the earliest it can have changed.
     pub modified: u64,
     /// Free tags.
     pub labels: Vec<String>,
@@ -137,6 +143,23 @@ pub struct Item {
     pub parents: Vec<String>,
     /// See-also.
     pub related: Vec<String>,
+    /// What the reader read AROUND to list this item — `unreadable dcterms:modified
+    /// "yesterday"`, `missing dcterms:created` — in the words [`defects`] uses. Empty for
+    /// every item written only through a ledger Sink.
+    ///
+    /// ★ **One malformed timestamp never drops an item** (ledger #866). Through 0.4.1 an
+    /// out-of-band write of `dcterms:modified "yesterday"` took the item out of `items`
+    /// (reported in a footer), out of `next` (silently — and with it every `blocks` edge it
+    /// carried, so what it blocked was offered as ready), and out of the Turtle face. Now
+    /// an unreadable or missing timestamp is treated as ABSENT and the other one stands in
+    /// for it, and this list says so on every face. Only an item with NO readable
+    /// timestamp is still unlistable, because no time it could be shown at is true.
+    pub defects: Vec<String>,
+    /// The unreadable timestamp values themselves, so the Turtle face can carry them
+    /// as stored instead of asserting the stand-in as `dcterms:created`/`modified`.
+    pub(crate) unread: Vec<(&'static str, sparql::Binding)>,
+    /// Whether `created` / `modified` were read, rather than stood in for.
+    pub(crate) read: (bool, bool),
 }
 
 impl Item {
@@ -200,6 +223,16 @@ impl Item {
                 .unwrap_or_default()
         ));
         out.push_str(&format!("  updated:  {}\n", sparql::iso8601(self.modified)));
+        // Only when there is one, so an item written through the Sink renders exactly as
+        // before. The sentence says which line above is a stand-in, not merely that one is.
+        for defect in &self.defects {
+            out.push_str(&format!("  ⚠ defect: {defect}\n"));
+        }
+        match self.read {
+            (false, _) => out.push_str("  ⚠ `filed` above is dcterms:modified standing in\n"),
+            (_, false) => out.push_str("  ⚠ `updated` above is dcterms:created standing in\n"),
+            _ => {}
+        }
         if let Some(revision) = &self.revision {
             out.push_str(&format!("  revision: {revision}\n"));
         }
@@ -285,14 +318,25 @@ impl Item {
         if let Some(purpose) = &self.purpose {
             push(v::PURPOSE, plain(purpose));
         }
-        push(
-            v::ext::CREATED,
-            typed(&sparql::iso8601(self.created), v::ext::XSD_DATETIME),
-        );
-        push(
-            v::ext::MODIFIED,
-            typed(&sparql::iso8601(self.modified), v::ext::XSD_DATETIME),
-        );
+        // ⚠ A stand-in is never asserted: the graph face says what the store holds, so an
+        // unreadable value goes out AS STORED and a missing one goes out as nothing.
+        if self.read.0 {
+            push(
+                v::ext::CREATED,
+                typed(&sparql::iso8601(self.created), v::ext::XSD_DATETIME),
+            );
+        }
+        if self.read.1 {
+            push(
+                v::ext::MODIFIED,
+                typed(&sparql::iso8601(self.modified), v::ext::XSD_DATETIME),
+            );
+        }
+        for (predicate, value) in &self.unread {
+            if let Some(term) = stored(value) {
+                push(predicate, term);
+            }
+        }
         for label in &self.labels {
             push(v::LABEL, plain(label));
         }
@@ -373,6 +417,25 @@ pub(crate) fn named(iri: &str) -> oxrdf::Term {
 /// A plain string literal term.
 pub(crate) fn plain(text: &str) -> oxrdf::Term {
     Literal::new_simple_literal(text).into()
+}
+
+/// A value read out of the store, as the store holds it — for a value this crate cannot
+/// parse and so must not restate. A blank node is `None`: its label is scoped to the result
+/// set it came in, so restating it would name a different node.
+fn stored(value: &sparql::Binding) -> Option<oxrdf::Term> {
+    match value.kind.as_str() {
+        "uri" => NamedNode::new(&value.value).ok().map(Into::into),
+        "bnode" => None,
+        _ => match (&value.lang, &value.datatype) {
+            (Some(tag), _) => Literal::new_language_tagged_literal(&value.value, tag)
+                .ok()
+                .map(Into::into),
+            (None, Some(datatype)) => NamedNode::new(datatype)
+                .ok()
+                .map(|d| Literal::new_typed_literal(&value.value, d).into()),
+            (None, None) => Some(plain(&value.value)),
+        },
+    }
 }
 
 /// A typed literal term.
@@ -524,7 +587,7 @@ pub const REQUIRED: [&str; 5] = [
 ];
 
 /// Items in the graph that the readers here cannot see, and what is wrong with each —
-/// `missing ledger:number`, or `unreadable dcterms:created "2026-09-15"`.
+/// `missing ledger:number`, or `unreadable ledger:number "twelve"`.
 ///
 /// Reported rather than silently skipped: an item a hand-edit made unreadable would
 /// otherwise vanish from every listing while still being *in* the ledger, which is the
@@ -536,7 +599,23 @@ pub const REQUIRED: [&str; 5] = [
 /// which needs an `xsd:dateTime`, dropped the item: gone from `items` and `next`, and "no
 /// ledger item" from its own IRI, while it sat in the graph. So the values the reader
 /// parses are parsed here too, by the same functions.
+///
+/// ★ **And readable is not the same as listable** (ledger #866). Since 0.4.2 a timestamp
+/// the reader cannot use is treated as absent and the other one stands in for it, so an
+/// item with ONE readable timestamp is listed — carrying its defects in
+/// [`Item::defects`] — and is not reported here. What is reported here is exactly what
+/// the readers drop: no title or status, no readable `ledger:number` (the item's name in
+/// every face, which nothing can stand in for), or no readable timestamp at all. Each such
+/// item is reported with EVERY defect it has, so one edit can fix it.
 pub async fn defects(client: &StoreClient<'_, '_>) -> Result<Vec<(String, Vec<String>)>> {
+    /// What one subject has, as the two queries below see it.
+    #[derive(Default)]
+    struct Seen {
+        defects: Vec<String>,
+        unnamed: bool,
+        number: bool,
+        time: bool,
+    }
     let values = REQUIRED
         .iter()
         .map(|p| format!("<{p}>"))
@@ -551,15 +630,17 @@ pub async fn defects(client: &StoreClient<'_, '_>) -> Result<Vec<(String, Vec<St
             class = v::ITEM_CLASS,
         ))
     );
-    let mut by_item: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut by_item: BTreeMap<String, Seen> = BTreeMap::new();
     for row in client.select(&query).await? {
         let (Some(item), Some(missing)) = (row.get("item"), row.get("missing")) else {
             continue;
         };
-        by_item
-            .entry(item.value.clone())
-            .or_default()
+        let seen = by_item.entry(item.value.clone()).or_default();
+        seen.defects
             .push(format!("missing {}", short_name(&missing.value)));
+        if missing.value == v::ext::TITLE || missing.value == v::STATUS {
+            seen.unnamed = true;
+        }
     }
     // The values the reader parses, parsed. A property with several values (another
     // hand edit) is checked value by value.
@@ -580,20 +661,30 @@ pub async fn defects(client: &StoreClient<'_, '_>) -> Result<Vec<(String, Vec<St
         else {
             continue;
         };
+        let seen = by_item.entry(item.value.clone()).or_default();
         let readable = if p.value == v::NUMBER {
-            value.as_i64().is_some()
+            let readable = value.as_i64().is_some();
+            seen.number |= readable;
+            readable
         } else {
-            millis(&value.value).is_some()
+            let readable = millis(&value.value).is_some();
+            seen.time |= readable;
+            readable
         };
         if !readable {
-            by_item.entry(item.value.clone()).or_default().push(format!(
-                "unreadable {} {:?}",
-                short_name(&p.value),
-                value.value
-            ));
+            seen.defects.push(unreadable(&p.value, &value.value));
         }
     }
-    Ok(by_item.into_iter().collect())
+    Ok(by_item
+        .into_iter()
+        .filter(|(_, seen)| seen.unnamed || !seen.number || !seen.time)
+        .map(|(item, seen)| (item, seen.defects))
+        .collect())
+}
+
+/// One unreadable value, in the words every face reports it in.
+fn unreadable(predicate: &str, value: &str) -> String {
+    format!("unreadable {} {value:?}", short_name(predicate))
 }
 
 /// A predicate IRI as a reader recognizes it.
@@ -675,10 +766,12 @@ async fn load(
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?key ?holder ?purpose ?created ?modified WHERE {{ {} }} \
-         ORDER BY DESC(?modified) DESC(?number){limit}",
+         ORDER BY DESC({RECENCY}) DESC(?number){limit}",
         client.in_graph(&format!(
             "?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
-             <{status}> ?status ;\n  <{created}> ?created ;\n  <{modified}> ?modified .\n\
+             <{status}> ?status .\n\
+             OPTIONAL {{ ?item <{created}> ?created }}\n\
+             OPTIONAL {{ ?item <{modified}> ?modified }}\n\
              OPTIONAL {{ ?item <{type_}> ?kind . FILTER(?kind != <{item_class}>) }}\n\
              OPTIONAL {{ ?item <{body}> ?body }}\n\
              OPTIONAL {{ ?item <{reason}> ?reason }}\n\
@@ -709,7 +802,7 @@ async fn load(
         ))
     );
     let rows = client.select(&query).await?;
-    let mut items: Vec<Item> = rows.iter().filter_map(item_from_row).collect();
+    let mut items = items_from_rows(&rows);
     fill_multivalued(client, &mut items).await?;
     Ok(items)
 }
@@ -718,11 +811,14 @@ async fn load(
 pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option<Item>> {
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified WHERE {{ {} }} LIMIT 1",
+         ?revision ?key ?holder ?purpose ?created ?modified WHERE {{ {} }} \
+         ORDER BY DESC({RECENCY})",
         client.in_graph(&format!(
             "BIND({subject} AS ?item)\n\
              ?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
-             <{status}> ?status ;\n  <{created}> ?created ;\n  <{modified}> ?modified .\n\
+             <{status}> ?status .\n\
+             OPTIONAL {{ ?item <{created}> ?created }}\n\
+             OPTIONAL {{ ?item <{modified}> ?modified }}\n\
              OPTIONAL {{ ?item <{type_}> ?kind . FILTER(?kind != <{item_class}>) }}\n\
              OPTIONAL {{ ?item <{body}> ?body }}\n\
              OPTIONAL {{ ?item <{reason}> ?reason }}\n\
@@ -753,7 +849,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
         ))
     );
     let rows = client.select(&query).await?;
-    let mut items: Vec<Item> = rows.iter().filter_map(item_from_row).collect();
+    let mut items = items_from_rows(&rows);
     fill_multivalued(client, &mut items).await?;
     Ok(items.into_iter().next())
 }
@@ -1217,10 +1313,93 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
     Ok(())
 }
 
-/// One row of the item query → an [`Item`], or `None` for a row missing something the
-/// model requires (which a ledger written only through these endpoints cannot produce,
-/// but a hand-edited store can).
-fn item_from_row(row: &Row) -> Option<Item> {
+/// The recency the item queries order by: `dcterms:modified`, or `dcterms:created` standing
+/// in for it — the rule [`items_from_rows`] applies, in SPARQL, so a `LIMIT` keeps the
+/// same items the reader would. A subject with neither readable sorts last (unbound sorts
+/// first ascending, so last under `DESC`).
+///
+/// ⚠ The two parsers are the store's `xsd:dateTime` cast here and [`millis`] in Rust, and
+/// they can disagree at the edges (`24:00:00`, a year past 9999). The only consequence is
+/// where such an item sits relative to a `LIMIT`; the rows are re-sorted by the Rust
+/// reading afterwards.
+const RECENCY: &str = "COALESCE(<http://www.w3.org/2001/XMLSchema#dateTime>(?modified), \
+                       <http://www.w3.org/2001/XMLSchema#dateTime>(?created))";
+
+/// The rows of an item query → [`Item`]s, one per subject, most recently modified first.
+///
+/// ★ **Grouped by subject, because the timestamps are OPTIONAL.** A hand edit can leave a
+/// property with two values (an `INSERT` with no `DELETE`), and every value is a row.
+/// Until 0.4.2 each row became an item, so two readable `dcterms:modified` listed the item
+/// twice, and an unreadable one beside a readable one listed it once by luck. Now the
+/// rows of one subject are ONE item: the latest readable `modified`, the earliest readable
+/// `created`, and every value the reader could not use named in [`Item::defects`].
+fn items_from_rows(rows: &[Row]) -> Vec<Item> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut groups: BTreeMap<&str, Vec<&Row>> = BTreeMap::new();
+    for row in rows {
+        let Some(iri) = row.get("item") else { continue };
+        groups
+            .entry(iri.value.as_str())
+            .or_insert_with(|| {
+                order.push(iri.value.as_str());
+                Vec::new()
+            })
+            .push(row);
+    }
+    let mut items: Vec<Item> = order
+        .iter()
+        .filter_map(|iri| item_from_rows(&groups[iri]))
+        .collect();
+    // Stable, so equal keys keep the store's order.
+    items.sort_by(|a, b| b.modified.cmp(&a.modified).then(b.number.cmp(&a.number)));
+    items
+}
+
+/// One subject's rows → an [`Item`], or `None` when the reader cannot list it: no readable
+/// number, or no readable timestamp at all — exactly what [`defects`] reports.
+fn item_from_rows(rows: &[&Row]) -> Option<Item> {
+    let row = rows
+        .iter()
+        .find(|row| row.get("number").and_then(|n| n.as_i64()).is_some())?;
+    // Every distinct value of one timestamp across the rows, read or not.
+    let read =
+        |var: &str, predicate: &'static str, unread: &mut Vec<(&'static str, sparql::Binding)>| {
+            let mut parsed = Vec::new();
+            for value in rows.iter().filter_map(|row| row.get(var)) {
+                match millis(&value.value) {
+                    Some(ms) => parsed.push(ms),
+                    None if unread.iter().any(|(p, b)| *p == predicate && b == value) => {}
+                    None => unread.push((predicate, value.clone())),
+                }
+            }
+            parsed
+        };
+    let mut unread = Vec::new();
+    let created = read("created", v::ext::CREATED, &mut unread)
+        .into_iter()
+        .min();
+    let modified = read("modified", v::ext::MODIFIED, &mut unread)
+        .into_iter()
+        .max();
+    let mut defects: Vec<String> = unread
+        .iter()
+        .map(|(predicate, value)| unreadable(predicate, &value.value))
+        .collect();
+    for (predicate, present) in [
+        (
+            v::ext::CREATED,
+            rows.iter().any(|r| r.get("created").is_some()),
+        ),
+        (
+            v::ext::MODIFIED,
+            rows.iter().any(|r| r.get("modified").is_some()),
+        ),
+    ] {
+        if !present {
+            defects.push(format!("missing {}", short_name(predicate)));
+        }
+    }
+    defects.sort();
     Some(Item {
         iri: row.get("item")?.value.clone(),
         kind: row.get("kind").map(|b| b.value.clone()),
@@ -1242,13 +1421,19 @@ fn item_from_row(row: &Row) -> Option<Item> {
         key: row.get("key").map(|b| b.value.clone()),
         claimed_by: row.get("holder").map(|b| b.value.clone()),
         purpose: row.get("purpose").map(|b| b.value.clone()),
-        created: millis(row.get("created")?.value.as_str())?,
-        modified: millis(row.get("modified")?.value.as_str())?,
+        // Each stands in for the other: created ≤ modified, so a missing `created` is at
+        // most the `modified`, and a missing `modified` is at least the `created`. Neither
+        // is invented, and with neither readable there is no true time to show.
+        created: created.or(modified)?,
+        modified: modified.or(created)?,
         labels: Vec::new(),
         about: Vec::new(),
         blocks: Vec::new(),
         parents: Vec::new(),
         related: Vec::new(),
+        defects,
+        unread,
+        read: (created.is_some(), modified.is_some()),
     })
 }
 
@@ -1346,6 +1531,9 @@ mod tests {
             blocks: Vec::new(),
             parents: Vec::new(),
             related: Vec::new(),
+            defects: Vec::new(),
+            unread: Vec::new(),
+            read: (true, true),
         }
     }
 

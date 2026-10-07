@@ -168,14 +168,22 @@ pub struct Item {
     pub revision: Option<String>,
     /// Who holds it, if anyone.
     pub claim: Option<Claim>,
-    /// When it was filed.
+    /// When it was filed — `modified` standing in when `defects` names `dcterms:created`.
     pub created: String,
-    /// When it last changed.
+    /// When it last changed — `created` standing in when `defects` names
+    /// `dcterms:modified`.
     pub modified: String,
     /// Outbound edges: `blocks` first, then `parent`, then `related`, each sorted by IRI.
     pub links: Vec<Link>,
     /// Its comments, oldest first.
     pub comments: Vec<Comment>,
+    /// What the reader read around to list it — `unreadable dcterms:modified "yesterday"`,
+    /// `missing dcterms:created` — in the words `ItemsDocument::unreadable` uses. Empty for
+    /// every item written only through a ledger Sink. Added in 0.4.2 (ledger #866), which
+    /// stopped one unreadable timestamp from dropping an item; `#[serde(default)]` so a
+    /// document from 0.4.1 still reads.
+    #[serde(default)]
+    pub defects: Vec<String>,
 }
 
 /// `item:{id}`.
@@ -213,7 +221,9 @@ pub struct ItemsDocument {
     /// The items, most recently updated first — the plain face's order.
     pub items: Vec<Item>,
     /// Items in the graph that could not be read and are therefore not in `items` — the
-    /// plain face's ⚠ footer, as data.
+    /// plain face's ⚠ footer, as data. An item whose defect the reader can read around (one
+    /// unreadable or missing timestamp) is in `items` instead, carrying it in its own
+    /// `defects`, and is not repeated here.
     pub unreadable: Vec<Unreadable>,
 }
 
@@ -399,6 +409,7 @@ pub(crate) fn item(
         modified: sparql::iso8601(item.modified),
         links,
         comments: comments.iter().map(self::comment).collect(),
+        defects: item.defects.clone(),
     }
 }
 

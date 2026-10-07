@@ -22,7 +22,9 @@ fn hand_edit(kernel: &ikigai_core::Kernel, update: &str) {
 /// ★ A required value that is PRESENT but does not parse is reported, not dropped. Here an
 /// editor writes `dcterms:created` as an `xsd:date` — a valid RDF date the reader cannot
 /// use. On 0.2.1 the item vanished from `items` and `next`, and its own IRI answered "no
-/// ledger item", while it sat in the graph.
+/// ledger item", while it sat in the graph. 0.3.0 reported it in a footer but still left it
+/// out of the listing; since 0.4.2 (ledger #866) it is LISTED, with `dcterms:modified`
+/// standing in, and the defect is said on every face — see `tests/malformed_timestamps.rs`.
 #[test]
 fn a_present_but_unreadable_timestamp_is_reported_not_dropped() {
     let kernel = kernel();
@@ -37,17 +39,15 @@ fn a_present_but_unreadable_timestamp_is_reported_not_dropped() {
         ),
     );
     let list = source(&kernel, "urn:iki:ledger:items", &[("status", "all")]);
-    assert!(list.contains("could not be read"), "{list}");
+    assert!(list.contains("Edited by hand"), "{list}");
+    assert!(!list.contains("could not be read"), "{list}");
     assert!(list.contains(&iri), "{list}");
     assert!(
         list.contains("unreadable dcterms:created \"2026-09-15\""),
         "{list}"
     );
-    let one = try_verb(&kernel, Verb::Source, &iri, &[]);
-    let Err(Error::Endpoint(message)) = &one else {
-        panic!("reading it directly must say what is wrong, not `not found`: {one:?}");
-    };
-    assert!(message.contains("unreadable dcterms:created"), "{message}");
+    let one = ok(&kernel, Verb::Source, &iri, &[]);
+    assert!(one.contains("unreadable dcterms:created"), "{one}");
 }
 
 // --------------------------------------------------------------------------- Exists
