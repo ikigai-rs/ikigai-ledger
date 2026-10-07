@@ -1619,6 +1619,28 @@ impl Endpoint for AppendEndpoint {
             None => String::new(),
         };
 
+        // ★ A TAKEN KEY IS ANSWERED WITHOUT A WRITE (ledger #822). The guarded update below
+        // would change nothing, but it is still a successful Sink at
+        // `urn:iki:store:graph-update`, and the kernel cuts that thread after every
+        // successful mutating request whether or not anything changed — so each replay
+        // invalidated every cached read of every ledger, and a re-sync that sends one keyed
+        // append per task it knows about was a cache flush. Reading first is sound only
+        // because a key, once taken, is taken for good: a delete moves it onto the tombstone
+        // in the same update and a purge keeps it, so "taken" here cannot be "free" by the
+        // time the caller reads the answer. A key read as free proves nothing, which is why
+        // the update keeps its own `FILTER NOT EXISTS` — that clause, not this read, is what
+        // stops two concurrent appends from both filing (`tests/keyed_append.rs`).
+        //
+        // ⚠ Only a race reaches the update with a taken key now, and that no-op still cuts:
+        // skipping it would take the kernel answering "unchanged" for a Sink, which is a
+        // core question (see the report on ledger #822), not this module's.
+        // `tests/noop_keyed_append.rs` keeps both halves.
+        if let Some(key) = &key {
+            if let Some(found) = model::find_by_key(&client, key).await? {
+                return existing_answer(&client, want, &found, key).await;
+            }
+        }
+
         // ★ ONE statement, so the number cannot be allocated twice. The counter is read,
         // incremented, rewritten and stamped onto the new item inside a single SPARQL
         // UPDATE — a read-modify-write across two round trips would race two concurrent
@@ -1660,22 +1682,7 @@ impl Endpoint for AppendEndpoint {
                 ))
             })?;
             if found.item != iri {
-                let status = match &found.tombstone {
-                    Some(_) => "deleted",
-                    None => match model::load_item(&client, &found.item).await? {
-                        Some(item) if !item.open => "closed",
-                        _ => "open",
-                    },
-                };
-                return append_answer(
-                    &client,
-                    want,
-                    "existing",
-                    status,
-                    found.number,
-                    &found.item,
-                    Some(key),
-                );
+                return existing_answer(&client, want, &found, key).await;
             }
         }
 
@@ -1795,6 +1802,32 @@ impl Endpoint for AppendEndpoint {
             .verb(Verb::Meta)
             .action(spec)
     }
+}
+
+/// The keyed append's "nothing was filed": the item the key already names, with its
+/// status — `deleted` when the key is on a tombstone, else whether the item is open.
+async fn existing_answer(
+    client: &StoreClient<'_, '_>,
+    want: &str,
+    found: &model::Keyed,
+    key: &str,
+) -> Result<Representation> {
+    let status = match &found.tombstone {
+        Some(_) => "deleted",
+        None => match model::load_item(client, &found.item).await? {
+            Some(item) if !item.open => "closed",
+            _ => "open",
+        },
+    };
+    append_answer(
+        client,
+        want,
+        "existing",
+        status,
+        found.number,
+        &found.item,
+        Some(key),
+    )
 }
 
 /// The append's answer, in the face asked for.
