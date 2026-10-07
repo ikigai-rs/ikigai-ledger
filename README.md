@@ -307,13 +307,20 @@ object is the same wherever it appears:
   "created":"2026-09-15T00:00:00.000Z","modified":"2026-09-15T00:00:00.000Z",
   "links":[{"type":"blocks","target":{"number":13,"display":"#13","iri":"urn:iki:ledger:default:item:01m5…"}}],
   "comments":[{"id":"urn:iki:ledger:default:comment:01m6…","author":"chris",
-               "time":"2026-09-15T00:00:00.000Z","text":"looked at it"}]}}
+               "time":"2026-09-15T00:00:00.000Z","text":"looked at it"}],
+  "defects":[]}}
 ```
+
+`defects` is empty for every item written through a ledger Sink. When an out-of-band write
+left one of its timestamps unreadable or missing, it names that value
+(`unreadable dcterms:modified "yesterday"`) and the other timestamp stands in for it in
+`created`/`modified` — so both stay `xsd:dateTime` strings. See "Assume an editor got there
+first".
 
 | resource | document |
 | --- | --- |
 | `item:{id}` | `{schema, ledger, item}` |
-| `items` | `{schema, ledger, count, items: [item…], unreadable: [{iri, defects}]}` — `unreadable` is the plain face's ⚠ footer, as data |
+| `items` | `{schema, ledger, count, items: [item…], unreadable: [{iri, defects}]}` — `unreadable` is the plain face's ⚠ footer, as data: the items NOT in `items`. An item listed with a stand-in timestamp carries its own `defects` instead |
 | `next` | `{schema, ledger, policy, weighs, generated_at, ready, ranking: [{rank, score, because, item}], excluded: [{why, reason, holder, blocked_by, item}]}` — `why` is `claimed`, `deferred` or `blocked` |
 | `append`, `comment`, `close`, `link` | `{schema, ledger, outcome, item: {number, display, iri}, …}` — `outcome` is `filed`, `existing`, `commented`, `closed`, `linked` or `unlinked`, and only that outcome's own fields follow: `status` and `key` (append), `comment` (comment, and close with a note), `reason` (close), `type` and `target` (link) |
 
@@ -347,6 +354,18 @@ cannot parse, such as a `dcterms:created` written as an `xsd:date` — is **repo
 what is wrong, rather than quietly dropped — the worst outcome being work that is neither
 visible nor gone. Asking for such an item directly says what is wrong with it, which "not
 found" would not. `model::REQUIRED` is the one list both directions use.
+
+**And one bad timestamp does not take an item out of the list.** An unreadable or missing
+`dcterms:created` or `dcterms:modified` is read as ABSENT, and the other one stands in for it:
+created ≤ modified, so a missing `modified` is at least the `created` and a missing `created`
+is at most the `modified`, and neither is invented. The item is listed, offered by `next`
+(and its `blocks` edges still hold), and readable at its own IRI, and every face says which
+value was read around: the item's `defects` in JSON, a `⚠ defect:` line in its detail, a ⚠
+footer under `items`, and the value as stored, never the stand-in, in Turtle. Only an item
+with no readable timestamp at all, or no readable `ledger:number` (its name on every face,
+which nothing can stand in for), is still left out and reported. Any write through a ledger
+Sink re-stamps `dcterms:modified`, so the ledger's own path repairs that one; nothing here
+ever writes a bad timestamp, so this is only ever an out-of-band edit.
 
 **And a term this crate never writes still has to survive a delete.** Archiving re-serializes
 the quads it moves (a scoped update cannot span two graphs, so they go out through a query
@@ -655,6 +674,23 @@ All fourteen resources are bound, tested, and walked clean by `ikigai-conformanc
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### Unreleased (0.4.2): one bad timestamp no longer drops an item (ledger #866)
+
+A patch, by this crate's reading of the JSON face's rule (a field ADDED, nothing renamed,
+removed or retyped). On 0.4.1 an item whose `dcterms:modified` or `dcterms:created` was not a
+readable `xsd:dateTime` (a hand edit through `urn:iki:store:graph-update`, say
+`dcterms:modified "yesterday"`) was left out of `items` with a footer, left out of the Turtle
+face and out of `next` with no word at all, and refused at its own IRI. Out of `next` was the
+expensive one: the item's `blocks` edges went with it, so what it blocked was offered as
+ready. Now the timestamp is read as absent and the other one stands in (see "Assume an editor
+got there first"), the item is listed everywhere, and every face names the defect: JSON items
+gain a `defects` array (`#[serde(default)]`, so a 0.4.1 document still deserializes), and
+`model::Item` gains `defects` (it is `#[non_exhaustive]`, so adding a field breaks no one).
+`model::defects` now reports only what the readers drop: no readable timestamp, no readable
+number, no title or status. Two side effects, both fixes: an item with two `dcterms:modified`
+values was listed twice and is now listed once, with the latest; and a ledger `Sink` on such
+an item now succeeds and repairs the stamp, where 0.4.1 refused it.
 
 ### 0.4.1: a keyed append whose key is taken answers without a write (ledger #822)
 

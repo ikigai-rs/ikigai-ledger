@@ -761,6 +761,25 @@ impl Endpoint for ItemsEndpoint {
         // bulk load — and that is a supported path, not corruption. What is NOT supported
         // is an item quietly disappearing from every listing because a hand edit left it
         // unreadable, so a malformed item is REPORTED here rather than skipped.
+        // Listed, but read around: a stand-in timestamp is shown above, so say which items
+        // carry one. The line format above is untouched (it is grepped); this is a footer.
+        let flawed: Vec<&Item> = items.iter().filter(|i| !i.defects.is_empty()).collect();
+        if !flawed.is_empty() {
+            text.push_str(&format!(
+                "\n⚠ {} item(s) listed above carry a timestamp nothing here can read; each is \
+                 listed with its other timestamp standing in (a write that did not pass \
+                 through a ledger Sink):\n",
+                flawed.len()
+            ));
+            for item in flawed {
+                text.push_str(&format!(
+                    "  {} {} — {}\n",
+                    item.short(),
+                    item.iri,
+                    item.defects.join(", ")
+                ));
+            }
+        }
         let broken = model::defects(&client).await?;
         if !broken.is_empty() {
             text.push_str(&format!(
