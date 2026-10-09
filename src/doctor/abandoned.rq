@@ -1,0 +1,9 @@
+# ABANDONED: an item in an in-flight state that nobody holds.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT ?item ?number ?state WHERE {
+  GRAPH $GRAPH {
+    ?item a ledger:Item ; ledger:number ?number ; ledger:state ?state .
+    FILTER(?state IN ($IN_FLIGHT))
+    FILTER NOT EXISTS { ?item ledger:claimedBy ?anyone }
+  }
+} ORDER BY ?number ?state

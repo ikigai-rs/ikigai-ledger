@@ -49,10 +49,24 @@ use crate::sparql::{self, StoreClient};
 use crate::vocabulary as v;
 
 /// Why the ready set would not offer an open item.
+///
+/// `#[non_exhaustive]` since 0.5.0, which added [`Excluded::LeaseExpired`]: a reason is the
+/// kind of thing that keeps arriving.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Excluded {
     /// Someone holds it.
     Claimed(String),
+    /// Someone held it on a lease that has run out. ★ Still excluded: an expired lease is
+    /// never silently free, and `claim takeover=true from=<holder>` is the only way to take
+    /// it — so this reason names the holder and when the lease ended, which is what the
+    /// taker needs.
+    LeaseExpired {
+        /// Who held it.
+        holder: String,
+        /// When the lease ran out (ms since the epoch).
+        expires: u64,
+    },
     /// Deliberately not now.
     Deferred,
     /// One or more open items block it.
@@ -74,6 +88,10 @@ impl Excluded {
     pub fn reason_in(&self, ledger: &Ledger) -> String {
         match self {
             Excluded::Claimed(holder) => format!("claimed by {holder}"),
+            Excluded::LeaseExpired { holder, expires } => format!(
+                "lease expired: claimed by {holder} until {}",
+                sparql::iso8601(*expires)
+            ),
             Excluded::Deferred => "deferred".to_string(),
             Excluded::Blocked(numbers) => format!(
                 "blocked by {}",
@@ -107,6 +125,33 @@ pub struct ReadySet {
 /// a DAG. A cycle is not exotic — it is what happens when someone links carelessly — and
 /// the alternative answer, "nothing is ready", is indistinguishable from having finished.
 pub async fn ready(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<ReadySet> {
+    ready_inner(client, filter, None).await
+}
+
+/// [`ready`], judging leases at `now` (ms since the epoch, from the kernel's clock): a claim
+/// whose lease has run out is excluded as [`Excluded::LeaseExpired`] rather than
+/// [`Excluded::Claimed`]. It is excluded either way — an expired lease is never free.
+pub async fn ready_at(client: &StoreClient<'_, '_>, filter: &Filter, now: u64) -> Result<ReadySet> {
+    ready_inner(client, filter, Some(now)).await
+}
+
+/// The earliest lease, among the items `set` excluded as claimed, that is still running at
+/// `now` — the moment a ranking of `set` stops being true even if nothing is written,
+/// because that exclusion's reason turns into `lease-expired`.
+pub fn next_lease_expiry(set: &ReadySet, now: u64) -> Option<u64> {
+    set.excluded
+        .iter()
+        .filter(|(_, why)| matches!(why, Excluded::Claimed(_)))
+        .filter_map(|(item, _)| item.lease_expires)
+        .filter(|expires| *expires > now)
+        .min()
+}
+
+async fn ready_inner(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+    now: Option<u64>,
+) -> Result<ReadySet> {
     let open = model::load_open_items(client).await?;
     // Which of them the caller asked about — the filter's own clauses, evaluated by the
     // store, so `labels=rust` means here what it means to `items`. `None` is "all of them".
@@ -203,7 +248,12 @@ pub async fn ready(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Read
             continue;
         }
         let why = if let Some(holder) = item.claimed_by.clone() {
-            Some(Excluded::Claimed(holder))
+            match (now, item.lease_expires) {
+                (Some(now), Some(expires)) if expires <= now => {
+                    Some(Excluded::LeaseExpired { holder, expires })
+                }
+                _ => Some(Excluded::Claimed(holder)),
+            }
         } else if item.deferred {
             Some(Excluded::Deferred)
         } else {

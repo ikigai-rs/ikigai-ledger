@@ -14,12 +14,13 @@
 //! urn:iki:ledger:{ledger}:comment    Sink                append a comment           write
 //! urn:iki:ledger:{ledger}:close      Sink                close with a reason        write
 //! urn:iki:ledger:{ledger}:reopen     Sink                undo a close               write
-//! urn:iki:ledger:{ledger}:claim      Sink Delete         take it / hand it back     write
+//! urn:iki:ledger:{ledger}:claim      Sink Delete         take / lease / take over   write
 //! urn:iki:ledger:{ledger}:defer      Sink Delete         not now / now again        write
 //! urn:iki:ledger:{ledger}:link       Sink Delete         blocks / parent / related  write
 //! urn:iki:ledger:{ledger}:label      Sink Delete         tag / untag                write
 //! urn:iki:ledger:{ledger}:purge      Delete              destroy, leaving evidence  purge
 //! urn:iki:ledger:{ledger}:next       Source              the ready set, ranked      read
+//! urn:iki:ledger:{ledger}:doctor     Source              what is wrong; no repair   read
 //! urn:iki:ledger:ledgers             Source              which ledgers exist        read
 //! urn:iki:ledger:policy:{name}       Source              what a policy weighs       read
 //! urn:iki:ledger:lifecycle:{name}    Source              the legal states, in order read
@@ -115,6 +116,7 @@
 
 #![deny(missing_docs)]
 
+pub mod claim;
 pub mod endpoints;
 pub mod json;
 pub mod ledger;

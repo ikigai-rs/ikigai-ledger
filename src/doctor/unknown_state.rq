@@ -1,0 +1,10 @@
+# UNKNOWN STATE: a ledger:state the ledger's lifecycle does not declare. Only a write
+# around the state Sink puts one there: a hand edit, an import, or a ledger whose
+# lifecycle changed under it.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT ?item ?number ?state WHERE {
+  GRAPH $GRAPH {
+    ?item a ledger:Item ; ledger:number ?number ; ledger:state ?state .
+    FILTER(?state NOT IN ($STATES))
+  }
+} ORDER BY ?number ?state

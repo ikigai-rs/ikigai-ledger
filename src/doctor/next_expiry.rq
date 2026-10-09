@@ -1,0 +1,9 @@
+# Not a check: the earliest lease still running at $NOW, which is when the doctor's
+# answer stops being true even if nothing is written.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT (MIN(?expires) AS ?next) WHERE {
+  GRAPH $GRAPH {
+    ?item ledger:claimedBy ?holder ; ledger:leaseExpires ?expires .
+    FILTER(?expires > $NOW)
+  }
+}

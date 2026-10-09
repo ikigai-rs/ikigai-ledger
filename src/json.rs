@@ -104,6 +104,18 @@ pub struct Claim {
     pub holder: String,
     /// Why they took it, when they said.
     pub purpose: Option<String>,
+    /// `machine` or `person`, as the host stamped it — never the caller's choice. `null` for a
+    /// claim taken before 0.5.0, which the doctor reads as a machine's. Added in 0.5.0.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// When the lease runs out (`xsd:dateTime`, UTC); `null` for a claim with no lease. An
+    /// expired lease is still a claim. Added in 0.5.0.
+    #[serde(default)]
+    pub expires: Option<String>,
+    /// How long it was taken for, as an `xsd:duration` (`PT30M`); `null` with no lease.
+    /// Added in 0.5.0.
+    #[serde(default)]
+    pub lease: Option<String>,
 }
 
 /// One outbound edge from an item.
@@ -251,12 +263,15 @@ pub struct Ranking {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Exclusion {
-    /// `claimed`, `deferred` or `blocked`.
+    /// `claimed`, `lease-expired`, `deferred` or `blocked`.
     pub why: String,
     /// The plain face's sentence (`blocked by #3`).
     pub reason: String,
-    /// The holder, when `why` is `claimed`.
+    /// The holder, when `why` is `claimed` or `lease-expired`.
     pub holder: Option<String>,
+    /// When the lease ran out, when `why` is `lease-expired`. Added in 0.5.0.
+    #[serde(default)]
+    pub expires: Option<String>,
     /// The open blockers' numbers, when `why` is `blocked`.
     pub blocked_by: Vec<i64>,
     /// The item.
@@ -364,6 +379,45 @@ pub struct StateDocument {
     pub from: Option<String>,
 }
 
+/// `…:{ledger}:doctor` — every problem the doctor found, at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DoctorDocument {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// The lifecycle the checks judged states against.
+    pub lifecycle: String,
+    /// The moment the lease check judged expiry at (the kernel's clock).
+    pub checked_at: String,
+    /// The checks that ran, in order: `orphaned`, `abandoned`, `lease-expired`,
+    /// `unknown-state`, `two-states`.
+    pub checks: Vec<String>,
+    /// What they found, check by check; empty is a clean bill.
+    pub problems: Vec<Problem>,
+}
+
+/// One problem the doctor found. It never repairs one; `remedy` says what would.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Problem {
+    /// Which check found it.
+    pub check: String,
+    /// The item.
+    pub item: ItemRef,
+    /// The plain face's sentence.
+    pub detail: String,
+    /// What would fix it, as a command where the ledger has one.
+    pub remedy: String,
+    /// The claim's holder, for `orphaned` and `lease-expired`.
+    pub holder: Option<String>,
+    /// The state names involved, as stored (`filed` for none).
+    pub states: Vec<String>,
+    /// When the lease ran out, for `lease-expired`.
+    pub expires: Option<String>,
+}
+
 // ------------------------------------------------------------------ building them
 
 /// One compact line of JSON and a newline — what every document here is served as.
@@ -442,6 +496,9 @@ pub(crate) fn item(
         claim: item.claimed_by.as_ref().map(|holder| Claim {
             holder: holder.clone(),
             purpose: item.purpose.clone(),
+            kind: item.claim_kind.clone(),
+            expires: item.lease_expires.map(sparql::iso8601),
+            lease: item.lease.clone(),
         }),
         created: sparql::iso8601(item.created),
         modified: sparql::iso8601(item.modified),
@@ -505,15 +562,22 @@ pub(crate) async fn next(
         .excluded
         .iter()
         .map(|(_, why)| {
-            let (word, holder, blocked_by) = match why {
-                Excluded::Claimed(holder) => ("claimed", Some(holder.clone()), Vec::new()),
-                Excluded::Deferred => ("deferred", None, Vec::new()),
-                Excluded::Blocked(numbers) => ("blocked", None, numbers.clone()),
+            let (word, holder, blocked_by, expires) = match why {
+                Excluded::Claimed(holder) => ("claimed", Some(holder.clone()), Vec::new(), None),
+                Excluded::LeaseExpired { holder, expires } => (
+                    "lease-expired",
+                    Some(holder.clone()),
+                    Vec::new(),
+                    Some(sparql::iso8601(*expires)),
+                ),
+                Excluded::Deferred => ("deferred", None, Vec::new(), None),
+                Excluded::Blocked(numbers) => ("blocked", None, numbers.clone(), None),
             };
             Exclusion {
                 why: word.to_string(),
                 reason: why.reason_in(&selection.ledger),
                 holder,
+                expires,
                 blocked_by,
                 item: rendered
                     .next()

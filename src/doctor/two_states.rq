@@ -1,0 +1,9 @@
+# TWO STATES: an item holding more than one ledger:state. Impossible through the state
+# Sink, which is one compare-and-set; possible through a raw store write.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT ?item ?number ?state WHERE {
+  GRAPH $GRAPH {
+    ?item a ledger:Item ; ledger:number ?number ; ledger:state ?state .
+    FILTER EXISTS { ?item ledger:state ?other . FILTER(?other != ?state) }
+  }
+} ORDER BY ?number ?state
