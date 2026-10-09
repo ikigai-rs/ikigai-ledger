@@ -15,6 +15,7 @@
 //! urn:iki:ledger:{ledger}:label          Sink Delete         tag / untag
 //! urn:iki:ledger:{ledger}:purge          Delete              destroy, leaving a tombstone
 //! urn:iki:ledger:{ledger}:next           Source              the ready set, ranked
+//! urn:iki:ledger:{ledger}:doctor         Source              what is wrong; no repair
 //! urn:iki:ledger:ledgers                 Source              which ledgers exist
 //! urn:iki:ledger:policy:{name}           Source              what a policy weighs
 //! urn:iki:ledger:lifecycle:{name}        Source Exists       the legal states, in order
@@ -221,6 +222,7 @@ pub fn space() -> EndpointSpace {
 pub struct SpaceConfig {
     policies: Vec<Arc<dyn OrderingPolicy>>,
     lifecycles: Lifecycles,
+    claim_kind: crate::claim::ClaimKindStamper,
 }
 
 impl Default for SpaceConfig {
@@ -228,6 +230,7 @@ impl Default for SpaceConfig {
         SpaceConfig {
             policies: Policies::default().all().to_vec(),
             lifecycles: Lifecycles::default(),
+            claim_kind: crate::claim::machine_by_default(),
         }
     }
 }
@@ -242,6 +245,15 @@ impl SpaceConfig {
     /// The lifecycles, and which ledger uses which — see [`Lifecycles`].
     pub fn lifecycles(mut self, lifecycles: Lifecycles) -> Self {
         self.lifecycles = lifecycles;
+        self
+    }
+
+    /// How a claim's kind — `machine` or `person` — is decided: by the HOST, from the
+    /// invocation (what its own door stamped on the request, the capability), and never from
+    /// an argument the caller sends. The default stamps `machine` on every claim. See
+    /// [`crate::claim`].
+    pub fn claim_kind(mut self, stamper: crate::claim::ClaimKindStamper) -> Self {
+        self.claim_kind = stamper;
         self
     }
 }
@@ -322,11 +334,22 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
         .bind(LedgerGrammar::action("comment"), CommentEndpoint)
         .bind(LedgerGrammar::action("close"), CloseEndpoint)
         .bind(LedgerGrammar::action("reopen"), ReopenEndpoint)
-        .bind(LedgerGrammar::action("claim"), ClaimEndpoint)
+        .bind(
+            LedgerGrammar::action("claim"),
+            ClaimEndpoint {
+                stamper: config.claim_kind,
+            },
+        )
         .bind(LedgerGrammar::action("defer"), DeferEndpoint)
         .bind(LedgerGrammar::action("link"), LinkEndpoint)
         .bind(LedgerGrammar::action("label"), LabelEndpoint)
         .bind(LedgerGrammar::action("purge"), PurgeEndpoint)
+        .bind(
+            LedgerGrammar::action("doctor"),
+            flight::DoctorEndpoint {
+                lifecycles: Arc::clone(&lifecycles),
+            },
+        )
         .bind(LedgerGrammar::action("next"), NextEndpoint { policies })
 }
 
@@ -2224,15 +2247,136 @@ impl Endpoint for ReopenEndpoint {
 
 // --------------------------------------------------------------------------- claim
 
+/// `urn:iki:ledger:{ledger}:claim` — take an item, hand it back, or take over an expired
+/// lease.
+///
+/// ★ **Every take is ONE guarded store update** (0.5.0). Until then a claim was
+/// read-then-write — "safe for one operator", the README said, "and the first thing to
+/// harden for more than one" — so two claimants could both read the item free and both write.
+/// Now the update's `WHERE` carries the condition (free, held by this same holder, or — for a
+/// takeover — held by `from=` on a lease that has run out), and the holder is read back: ours,
+/// or another claimant won and the answer is a typed `Conflict` naming them.
 #[derive(Clone)]
-struct ClaimEndpoint;
+struct ClaimEndpoint {
+    stamper: crate::claim::ClaimKindStamper,
+}
+
+/// What a claim may replace, for [`claim_update`].
+enum Guard<'a> {
+    /// Free, or already held by this holder (a renewal).
+    FreeOrMine(&'a str),
+    /// Held by this holder on a lease that ran out at or before `now`.
+    ExpiredFrom(&'a str, u64),
+}
+
+/// The claim as ONE update: the old claim's every field out, the new one in, `modified`
+/// stamped — all under the guard, so a lost race changes nothing at all.
+#[allow(clippy::too_many_arguments)] // reason: one SPARQL statement's inputs, each distinct
+fn claim_update(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    guard: Guard<'_>,
+    holder: &str,
+    purpose: Option<&str>,
+    kind: crate::claim::ClaimKind,
+    lease: Option<&crate::claim::Lease>,
+    now: u64,
+) -> String {
+    let takeover = matches!(guard, Guard::ExpiredFrom(..));
+    let guard = match guard {
+        Guard::FreeOrMine(holder) => format!(
+            "FILTER NOT EXISTS {{ <{item}> <{by}> ?other . FILTER(?other != {mine}) }}",
+            by = v::CLAIMED_BY,
+            mine = literal(holder),
+        ),
+        Guard::ExpiredFrom(from, now) => format!(
+            "<{item}> <{by}> {from} ; <{expires}> ?ends .\n\
+             FILTER NOT EXISTS {{ <{item}> <{by}> ?other . FILTER(?other != {from}) }}\n\
+             FILTER(?ends <= {now})",
+            by = v::CLAIMED_BY,
+            from = literal(from),
+            expires = v::LEASE_EXPIRES,
+            now = datetime(now),
+        ),
+    };
+    // Every field a claim owns. `purpose` is replaced only when one is given and a renewal
+    // keeps the holder's own; a takeover always clears it, because it was someone else's.
+    let mut owned = vec![
+        v::CLAIMED_BY,
+        v::CLAIMED_AT,
+        v::CLAIM_KIND,
+        v::LEASE,
+        v::LEASE_EXPIRES,
+        v::ext::MODIFIED,
+    ];
+    if purpose.is_some() || takeover {
+        owned.push(v::PURPOSE);
+    }
+    let delete: String = owned
+        .iter()
+        .enumerate()
+        .map(|(n, p)| format!("<{item}> <{p}> ?o{n} . "))
+        .collect();
+    let optional: String = owned
+        .iter()
+        .enumerate()
+        .map(|(n, p)| format!("OPTIONAL {{ <{item}> <{p}> ?o{n} }}\n"))
+        .collect();
+    let mut insert = format!(
+        "<{item}> <{by}> {holder} ; <{at}> {when} ; <{kind_p}> <{kind}> ; <{modified}> {when} .",
+        by = v::CLAIMED_BY,
+        holder = literal(holder),
+        at = v::CLAIMED_AT,
+        when = datetime(now),
+        kind_p = v::CLAIM_KIND,
+        kind = kind.iri(),
+        modified = v::ext::MODIFIED,
+    );
+    if let Some(purpose) = purpose {
+        insert.push_str(&format!(
+            "\n<{item}> <{}> {} .",
+            v::PURPOSE,
+            literal(purpose)
+        ));
+    }
+    if let Some(lease) = lease {
+        insert.push_str(&format!(
+            "\n<{item}> <{}> {} ; <{}> {} .",
+            v::LEASE,
+            ikigai_store::sparql::typed_literal(&lease.duration, v::ext::XSD_DURATION, "lease")
+                .expect("a constant datatype IRI"),
+            v::LEASE_EXPIRES,
+            datetime(now + lease.millis),
+        ));
+    }
+    format!(
+        "DELETE {{ {} }}\nINSERT {{ {} }}\nWHERE {{ {} }}",
+        client.in_graph(&delete),
+        client.in_graph(&insert),
+        client.in_graph(&format!(
+            "<{item}> <{}> <{}> .\n{guard}\n{optional}",
+            v::ext::TYPE,
+            v::ITEM_CLASS
+        )),
+    )
+}
+
+/// `true`, `false`, or a refusal naming the argument.
+fn parse_flag(inv: &Invocation<'_>, name: &str) -> Result<bool> {
+    match inv.inline_str(name).ok() {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(other) => Err(Error::InvalidArgument {
+            name: name.to_string(),
+            detail: format!("`{other}` is not `true` or `false`"),
+        }),
+    }
+}
 
 #[async_trait]
 impl Endpoint for ClaimEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
-        let now = now_ms(inv)?;
-        let item = require_item(&client, inv.inline_str("item")?).await?;
         match inv.request.verb {
             Verb::Sink => {
                 let holder = inv.inline_str("content")?.trim().to_string();
@@ -2256,56 +2400,163 @@ impl Endpoint for ClaimEndpoint {
                             .to_string(),
                     });
                 }
-                // ⚠ Read-then-write, so two claimants in one process can interleave. The
-                // fence this ledger will eventually replace is enforced by a partial unique
-                // index in kata's database; RDF has no such constraint and SHACL cannot see
-                // a race. Stated rather than pretended away — it is safe for one operator
-                // and is the first thing to harden when a second one appears.
-                if let Some(held) = &item.claimed_by {
-                    if held != &holder {
-                        // ★ `Conflict`, not `Unavailable`: the request is fine and the
-                        // state does not permit it, which no retry changes. Until 0.2.1
-                        // this was typed as a transient outage, so a few ordinary claim
-                        // collisions behind a circuit breaker opened it and failed every
-                        // claim fast.
-                        //
-                        // The remedy names THIS ledger's claim resource and the bare
-                        // number, so it can be followed as printed: in 0.2.1 it named
-                        // the default ledger's resource and `acme#1`, which that resource
-                        // refuses as another ledger's item.
-                        return Err(Error::Conflict(format!(
-                            "{} is already claimed by {held}. Release it first \
-                             (`delete {} item={}`), or take it up with them — a claim is \
-                             a fence, and stealing one silently is how two workers end up \
-                             in the same tree",
-                            item.short(),
-                            client.ledger().resource("claim"),
-                            item.number
-                        )));
+                // Every argument is checked before anything is read or written.
+                let lease = inv
+                    .inline_str("lease")
+                    .ok()
+                    .map(crate::claim::parse_lease)
+                    .transpose()?;
+                let takeover = parse_flag(inv, "takeover")?;
+                let from = inv.inline_str("from").ok().map(str::trim);
+                match (takeover, from) {
+                    (true, None) | (true, Some("")) => {
+                        return Err(Error::InvalidArgument {
+                            name: "from".to_string(),
+                            detail: "a takeover names the holder it takes from (`from=`): it is \
+                                     a compare-and-set against that holder, so a claim that \
+                                     changed hands in the meantime is not taken"
+                                .to_string(),
+                        })
                     }
+                    (false, Some(_)) => {
+                        return Err(Error::InvalidArgument {
+                            name: "from".to_string(),
+                            detail: "`from` names the holder of an expired lease to take over, \
+                                     and means nothing without `takeover=true`"
+                                .to_string(),
+                        })
+                    }
+                    _ => {}
                 }
-                let mut operations = vec![
-                    replace_one(&client, &item.iri, v::CLAIMED_BY, &literal(&holder)),
-                    replace_one(&client, &item.iri, v::CLAIMED_AT, &datetime(now)),
-                ];
-                if let Ok(purpose) = inv.inline_str("purpose") {
-                    operations.push(replace_one(
+                let purpose = inv.inline_str("purpose").ok();
+                // ★ The host's decision, never the caller's: no `kind` input is declared, and
+                // one sent anyway is not read. See `crate::claim`.
+                let kind = (self.stamper)(inv);
+                let now = now_ms(inv)?;
+                let item = require_item(&client, inv.inline_str("item")?).await?;
+                let resource = client.ledger().resource("claim");
+                let expired = item.lease_expires.is_some_and(|ends| ends <= now);
+
+                // The cheap half first, so a refusal writes nothing (a no-op update still cuts
+                // every cached read). It proves nothing about the update, whose own guard is
+                // what holds against a racer.
+                let guard = if takeover {
+                    let from = from.expect("checked above");
+                    match &item.claimed_by {
+                        None => {
+                            return Err(Error::Conflict(format!(
+                                "{} is not claimed, so there is nothing to take over; claim it \
+                                 (`sink {resource} item={}`)",
+                                item.short(),
+                                item.number
+                            )))
+                        }
+                        Some(held) if held != from => {
+                            return Err(Error::Conflict(format!(
+                                "{} is held by {held}, not {from}: a takeover is a \
+                                 compare-and-set against the holder it names, and the claim \
+                                 has changed hands",
+                                item.short()
+                            )))
+                        }
+                        Some(_) if !expired => {
+                            return Err(Error::Conflict(match item.lease_expires {
+                                Some(ends) => format!(
+                                    "{}'s lease for {from} runs until {}; only an expired lease \
+                                     can be taken over",
+                                    item.short(),
+                                    sparql::iso8601(ends)
+                                ),
+                                None => format!(
+                                    "{} is held by {from} with no lease, which never expires; \
+                                     it is released (`delete {resource} item={}`), not taken \
+                                     over",
+                                    item.short(),
+                                    item.number
+                                ),
+                            }))
+                        }
+                        Some(_) => Guard::ExpiredFrom(from, now),
+                    }
+                } else {
+                    match &item.claimed_by {
+                        Some(held) if held != &holder => {
+                            // ★ `Conflict`, not `Unavailable`: the request is fine and the
+                            // state does not permit it, which no retry changes.
+                            return Err(Error::Conflict(if expired {
+                                format!(
+                                    "{}'s lease for {held} expired at {}, and an expired lease \
+                                     is never silently free: take it with `sink {resource} \
+                                     item={} takeover=true from={held}`",
+                                    item.short(),
+                                    sparql::iso8601(item.lease_expires.unwrap_or(now)),
+                                    item.number
+                                )
+                            } else {
+                                format!(
+                                    "{} is already claimed by {held}. Release it first \
+                                     (`delete {resource} item={}`), or take it up with them — \
+                                     a claim is a fence, and stealing one silently is how two \
+                                     workers end up in the same tree",
+                                    item.short(),
+                                    item.number
+                                )
+                            }));
+                        }
+                        _ => Guard::FreeOrMine(&holder),
+                    }
+                };
+                let previous = item.claimed_by.clone();
+                client
+                    .update(&claim_update(
                         &client,
                         &item.iri,
-                        v::PURPOSE,
-                        &literal(purpose),
-                    ));
+                        guard,
+                        &holder,
+                        purpose,
+                        kind,
+                        lease.as_ref(),
+                        now,
+                    ))
+                    .await?;
+                let after = model::load_item(&client, &item.iri)
+                    .await?
+                    .ok_or_else(|| Error::NotFound(format!("no ledger item at `{}`", item.iri)))?;
+                if after.claimed_by.as_deref() != Some(holder.as_str()) {
+                    return Err(Error::Conflict(format!(
+                        "{} was claimed by {} first",
+                        item.short(),
+                        after
+                            .claimed_by
+                            .as_deref()
+                            .unwrap_or("someone who has since released it")
+                    )));
                 }
-                operations.push(touch(&client, &item.iri, now));
-                client.update(&batch(&operations)).await?;
-                Ok(plain(format!("{} claimed by {holder}\n", item.short())))
+                let until = lease
+                    .as_ref()
+                    .map(|l| format!(" until {}", sparql::iso8601(now + l.millis)))
+                    .unwrap_or_default();
+                Ok(plain(if takeover {
+                    format!(
+                        "{} taken over from {} by {holder}{until}\n",
+                        item.short(),
+                        previous.unwrap_or_default()
+                    )
+                } else {
+                    format!("{} claimed by {holder}{until}\n", item.short())
+                }))
             }
             Verb::Delete => {
+                let now = now_ms(inv)?;
+                let item = require_item(&client, inv.inline_str("item")?).await?;
                 client
                     .update(&batch(&[
                         retract(&client, &item.iri, v::CLAIMED_BY),
                         retract(&client, &item.iri, v::CLAIMED_AT),
                         retract(&client, &item.iri, v::PURPOSE),
+                        retract(&client, &item.iri, v::CLAIM_KIND),
+                        retract(&client, &item.iri, v::LEASE),
+                        retract(&client, &item.iri, v::LEASE_EXPIRES),
                         touch(&client, &item.iri, now),
                     ]))
                     .await?;
@@ -2330,13 +2581,20 @@ impl Endpoint for ClaimEndpoint {
             .summary(
                 "Take an item, or hand it back. The ready set never offers a claimed item, \
                  which is most of what \"what should I do next\" means once more than one \
-                 worker shares a ledger.",
+                 worker shares a ledger. A claim may carry a lease; an expired lease is never \
+                 silently free, and `takeover=true from=<holder>` is the only way to take it. \
+                 The holder's kind (machine or person) is stamped by the host, never taken \
+                 from the caller.",
             )
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
                     .input(ledger_arg())
-                    .summary("Claim the item for a holder; refuses if someone else holds it.")
+                    .summary(
+                        "Claim the item for a holder, in one guarded store update; refuses \
+                         (Conflict) if someone else holds it. The same holder claiming again \
+                         renews the claim and its lease.",
+                    )
                     .input(item_arg("The item to claim."))
                     .input(
                         ArgSpec::new("content")
@@ -2352,13 +2610,41 @@ impl Endpoint for ClaimEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(
+                        ArgSpec::new("lease")
+                            .summary(
+                                "How long the claim holds: `90s`, `30m`, `2h`, `1d`, or an \
+                                 xsd:duration (`PT30M`). The expiry is taken from the kernel's \
+                                 clock. Omit it for a claim held until released.",
+                            )
+                            .class(v::ext::XSD_STRING)
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("takeover")
+                            .summary(
+                                "`true` to take an item whose lease has EXPIRED from the holder \
+                                 named in `from` — a compare-and-set against that holder. A \
+                                 live lease, or a claim with no lease, is never taken over.",
+                            )
+                            .class(v::ext::XSD_BOOLEAN)
+                            .one_of(["true", "false"])
+                            .default_value("false")
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("from")
+                            .summary("The holder a takeover takes from; required with it.")
+                            .class(v::ext::XSD_STRING)
+                            .optional(),
+                    )
                     .output(PLAIN),
                 CAP_WRITE,
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
                     .input(ledger_arg())
-                    .summary("Release the claim, whoever holds it.")
+                    .summary("Release the claim, whoever holds it, lease and all.")
                     .input(item_arg("The item to release."))
                     .input(
                         ArgSpec::new("content")
@@ -2834,8 +3120,17 @@ impl Endpoint for NextEndpoint {
             ..Filter::default()
         };
         let limit = parse_limit(inv, 3)?;
-        let set = select::ready(&client, &filter).await?;
-        let valid_until = select::valid_until(&set, policy.as_ref(), now);
+        let set = select::ready_at(&client, &filter, now).await?;
+        // ★ A lease running out changes this answer with nothing written — an exclusion's
+        // `claimed` becomes `lease-expired` — so the answer holds only until the earliest
+        // running lease ends, whatever the policy says. Same trap as leverage's age points.
+        let valid_until = match (
+            select::valid_until(&set, policy.as_ref(), now),
+            select::next_lease_expiry(&set, now),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
         let repr = match want {
             TURTLE => Representation::new(

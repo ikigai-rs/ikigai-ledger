@@ -123,6 +123,16 @@ pub struct Item {
     pub claimed_by: Option<String>,
     /// Why the holder took it.
     pub purpose: Option<String>,
+    /// The holder's kind, `machine` or `person`, as the HOST stamped it (see
+    /// [`crate::claim`]). `None` for a claim taken before kinds existed, which the doctor
+    /// reads as a machine's.
+    pub claim_kind: Option<String>,
+    /// How long the claim was taken for, as an `xsd:duration` (`PT30M`); `None` for a claim
+    /// held until released.
+    pub lease: Option<String>,
+    /// When the lease runs out (ms since the epoch). Expired is `lease_expires <= now` on the
+    /// kernel's clock, and an expired lease is still a claim: never silently free.
+    pub lease_expires: Option<u64>,
     /// Milliseconds since the epoch.
     ///
     /// ⚠ **A stand-in when [`defects`](Item::defects) names `dcterms:created`**: the item's
@@ -275,6 +285,13 @@ impl Item {
         if let Some(purpose) = &self.purpose {
             out.push_str(&format!("  purpose:  {purpose}\n"));
         }
+        // Only for a leased claim, so every claim taken without one renders as before.
+        if let (Some(lease), Some(expires)) = (&self.lease, self.lease_expires) {
+            out.push_str(&format!(
+                "  lease:    {lease}, expires {}\n",
+                sparql::iso8601(expires)
+            ));
+        }
         // Only when there is one, like `key:`, so an item that never entered a lifecycle
         // renders exactly as it did in 0.4.2.
         for state in &self.states {
@@ -346,6 +363,22 @@ impl Item {
         }
         if let Some(purpose) = &self.purpose {
             push(v::PURPOSE, plain(purpose));
+        }
+        if let Some(kind) = self.claim_kind.as_deref().and_then(|k| match k {
+            "machine" => Some(v::MACHINE),
+            "person" => Some(v::PERSON),
+            _ => None,
+        }) {
+            push(v::CLAIM_KIND, named(kind));
+        }
+        if let Some(lease) = &self.lease {
+            push(v::LEASE, typed(lease, v::ext::XSD_DURATION));
+        }
+        if let Some(expires) = self.lease_expires {
+            push(
+                v::LEASE_EXPIRES,
+                typed(&sparql::iso8601(expires), v::ext::XSD_DATETIME),
+            );
         }
         // ⚠ A stand-in is never asserted: the graph face says what the store holds, so an
         // unreadable value goes out AS STORED and a missing one goes out as nothing.
@@ -801,7 +834,7 @@ async fn load(
     let limit = limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified ?state WHERE {{ {} }} \
+         ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires WHERE {{ {} }} \
          ORDER BY DESC({RECENCY}) DESC(?number){limit}",
         client.in_graph(&format!(
             "?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -818,7 +851,10 @@ async fn load(
              OPTIONAL {{ ?item <{key}> ?key }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
              OPTIONAL {{ ?item <{purpose}> ?purpose }}\n\
-             OPTIONAL {{ ?item <{state}> ?state }}\n{filters}",
+             OPTIONAL {{ ?item <{state}> ?state }}\n\
+             OPTIONAL {{ ?item <{claim_kind}> ?claimKind }}\n\
+             OPTIONAL {{ ?item <{lease}> ?lease }}\n\
+             OPTIONAL {{ ?item <{expires}> ?expires }}\n{filters}",
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
             number = v::NUMBER,
@@ -836,6 +872,9 @@ async fn load(
             holder = v::CLAIMED_BY,
             purpose = v::PURPOSE,
             state = v::STATE,
+            claim_kind = v::CLAIM_KIND,
+            lease = v::LEASE,
+            expires = v::LEASE_EXPIRES,
             filters = filter_clauses(filter)?,
         ))
     );
@@ -849,7 +888,7 @@ async fn load(
 pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option<Item>> {
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified ?state WHERE {{ {} }} \
+         ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires WHERE {{ {} }} \
          ORDER BY DESC({RECENCY})",
         client.in_graph(&format!(
             "BIND({subject} AS ?item)\n\
@@ -867,7 +906,10 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{key}> ?key }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
              OPTIONAL {{ ?item <{purpose}> ?purpose }}\n\
-             OPTIONAL {{ ?item <{state}> ?state }}",
+             OPTIONAL {{ ?item <{state}> ?state }}\n\
+             OPTIONAL {{ ?item <{claim_kind}> ?claimKind }}\n\
+             OPTIONAL {{ ?item <{lease}> ?lease }}\n\
+             OPTIONAL {{ ?item <{expires}> ?expires }}",
             subject = sparql::iri(iri, "item")?,
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
@@ -886,6 +928,9 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
             holder = v::CLAIMED_BY,
             purpose = v::PURPOSE,
             state = v::STATE,
+            claim_kind = v::CLAIM_KIND,
+            lease = v::LEASE,
+            expires = v::LEASE_EXPIRES,
         ))
     );
     let rows = client.select(&query).await?;
@@ -1475,6 +1520,16 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         key: row.get("key").map(|b| b.value.clone()),
         claimed_by: row.get("holder").map(|b| b.value.clone()),
         purpose: row.get("purpose").map(|b| b.value.clone()),
+        claim_kind: row
+            .get("claimKind")
+            .and_then(|b| crate::claim::ClaimKind::from_iri(&b.value))
+            .map(|k| k.as_str().to_string()),
+        lease: row.get("lease").map(|b| b.value.clone()),
+        lease_expires: rows
+            .iter()
+            .filter_map(|row| row.get("expires"))
+            .filter_map(|b| millis(&b.value))
+            .max(),
         // Each stands in for the other: created ≤ modified, so a missing `created` is at
         // most the `modified`, and a missing `modified` is at least the `created`. Neither
         // is invented, and with neither readable there is no true time to show.
@@ -1580,6 +1635,9 @@ mod tests {
             key: None,
             claimed_by: None,
             purpose: None,
+            claim_kind: None,
+            lease: None,
+            lease_expires: None,
             created: 1_757_700_000_000,
             modified: 1_757_700_000_000,
             labels: vec!["module".to_string()],

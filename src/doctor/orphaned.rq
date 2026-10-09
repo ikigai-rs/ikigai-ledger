@@ -1,0 +1,12 @@
+# ORPHANED: a machine claim on an item that is not in flight.
+# A claim with no ledger:claimKind was taken before kinds existed and is read as a
+# machine's. A person's claim is a deliberate hold and is never reported here.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT ?item ?number ?holder ?state WHERE {
+  GRAPH $GRAPH {
+    ?item a ledger:Item ; ledger:number ?number ; ledger:claimedBy ?holder .
+    FILTER NOT EXISTS { ?item ledger:claimKind ledger:person }
+    FILTER NOT EXISTS { ?item ledger:state ?flying . FILTER(?flying IN ($IN_FLIGHT)) }
+    OPTIONAL { ?item ledger:state ?state }
+  }
+} ORDER BY ?number ?state

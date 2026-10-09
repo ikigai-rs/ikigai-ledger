@@ -8,6 +8,7 @@
 //! urn:iki:ledger:{ledger}:item:{id}:state:{value}      Exists         is it in that state?
 //! urn:iki:ledger:{ledger}:item:{id}:holder:{holder}    Exists         is it held by that holder?
 //! urn:iki:ledger:{ledger}:item:{id}:closed             Exists         is it closed?
+//! urn:iki:ledger:{ledger}:doctor                       Source         what is wrong; no repair
 //! ```
 //!
 //! # ★ A transition is ONE store update
@@ -298,7 +299,9 @@ impl Endpoint for StateEndpoint {
                 let state = current(lifecycle, &item, &stored.values).map_err(|why| {
                     Error::Endpoint(format!(
                         "{why}. The item's state cannot be answered until it is repaired, which \
-                         is one SPARQL UPDATE over this ledger's graph"
+                         is one SPARQL UPDATE over this ledger's graph; `{}` lists every such \
+                         item",
+                        client.ledger().resource("doctor")
                     ))
                 })?;
                 if want == JSON {
@@ -678,5 +681,277 @@ impl Endpoint for LifecycleEndpoint {
                     .input(name_input())
                     .output(PLAIN),
             )
+    }
+}
+
+// -------------------------------------------------------------------------- doctor
+
+/// The doctor's stored queries, in the order they run and report. Each is a SELECT over one
+/// ledger's graph with `$GRAPH`, `$IN_FLIGHT`, `$STATES` and `$NOW` filled in as RDF terms.
+const CHECKS: [(&str, &str); 5] = [
+    ("orphaned", include_str!("../doctor/orphaned.rq")),
+    ("abandoned", include_str!("../doctor/abandoned.rq")),
+    ("lease-expired", include_str!("../doctor/lease_expired.rq")),
+    ("unknown-state", include_str!("../doctor/unknown_state.rq")),
+    ("two-states", include_str!("../doctor/two_states.rq")),
+];
+
+/// When the doctor's answer next changes with nothing written.
+const NEXT_EXPIRY: &str = include_str!("../doctor/next_expiry.rq");
+
+/// A stored query with its placeholders filled.
+///
+/// ⚠ `$NAME` is also how SPARQL spells a variable, so a placeholder left unfilled would not
+/// fail to parse — `GRAPH $GRAPH` would quietly mean "any graph". Every query is therefore
+/// checked for a placeholder left over, and refuses rather than running.
+fn fill(
+    query: &str,
+    client: &StoreClient<'_, '_>,
+    lifecycle: &Lifecycle,
+    now: u64,
+) -> Result<String> {
+    let list = |states: Vec<&LifecycleState>| {
+        states
+            .iter()
+            .map(|s| format!("<{}>", s.iri))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let filled = query
+        .replace("$GRAPH", &format!("<{}>", client.ledger().graph()))
+        .replace(
+            "$IN_FLIGHT",
+            &list(lifecycle.states().iter().filter(|s| s.in_flight).collect()),
+        )
+        .replace("$STATES", &list(lifecycle.states().iter().collect()))
+        .replace("$NOW", &datetime(now));
+    for placeholder in ["$GRAPH", "$IN_FLIGHT", "$STATES", "$NOW"] {
+        if filled.contains(placeholder) {
+            return Err(Error::Endpoint(format!(
+                "a doctor query still carries `{placeholder}` after filling"
+            )));
+        }
+    }
+    Ok(filled)
+}
+
+/// `urn:iki:ledger:{ledger}:doctor` — read-only, every problem at once, a remedy for each,
+/// and nothing repaired.
+#[derive(Clone)]
+pub(super) struct DoctorEndpoint {
+    pub(super) lifecycles: Arc<Lifecycles>,
+}
+
+#[async_trait]
+impl Endpoint for DoctorEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(unsupported("ledger-doctor", inv.request.verb));
+        }
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
+        let want = wanted_face(inv, &STATE_FACES)?;
+        let lifecycle = self.lifecycles.for_ledger(client.ledger());
+        let now = now_ms(inv)?;
+        let ledger = client.ledger().clone();
+        let claim = ledger.resource("claim");
+        let name_of = |value: &str| match lifecycle.state_by_iri(value) {
+            Some(state) => state.name.clone(),
+            None => lifecycle::state_name(value),
+        };
+
+        let mut problems: Vec<json::Problem> = Vec::new();
+        for (check, query) in CHECKS {
+            let rows = client
+                .select(&fill(query, &client, lifecycle, now)?)
+                .await?;
+            // One problem per item: a query row per state, folded.
+            let mut by_item: Vec<(String, i64, Vec<sparql::Row>)> = Vec::new();
+            for row in rows {
+                let (Some(item), Some(number)) = (
+                    row.get("item").map(|b| b.value.clone()),
+                    row.get("number").and_then(|b| b.as_i64()),
+                ) else {
+                    continue;
+                };
+                match by_item.iter_mut().find(|(iri, _, _)| *iri == item) {
+                    Some((_, _, rows)) => rows.push(row),
+                    None => by_item.push((item, number, vec![row])),
+                }
+            }
+            for (iri, number, rows) in by_item {
+                let short = ledger.number(number);
+                let holder = rows[0].get("holder").map(|b| b.value.clone());
+                let mut states: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| r.get("state"))
+                    .map(|b| name_of(&b.value))
+                    .collect();
+                states.dedup();
+                let expires = rows[0]
+                    .get("expires")
+                    .and_then(|b| model::millis(&b.value))
+                    .map(iso8601);
+                let state_word = states.first().cloned().unwrap_or_else(|| FILED.to_string());
+                let state_part = format!("{}:item:{number}:state", ledger.prefix());
+                let (detail, remedy) = match check {
+                    "orphaned" => (
+                        format!(
+                            "{short} is held by {} (a machine claim) in `{state_word}`, which is \
+                             not in flight",
+                            holder.as_deref().unwrap_or("?")
+                        ),
+                        format!(
+                            "release it (`delete {claim} item={number}`), or move it into flight \
+                             (`sink {state_part} from={state_word} to=<an in-flight state>`)"
+                        ),
+                    ),
+                    "abandoned" => (
+                        format!(
+                            "{short} is in `{state_word}`, which is in flight, and nobody holds it"
+                        ),
+                        format!(
+                            "claim it (`sink {claim} item={number}`), or move it out of flight \
+                             (`sink {state_part} from={state_word} to=<a drained state>`)"
+                        ),
+                    ),
+                    "lease-expired" => (
+                        format!(
+                            "{short}'s lease for {} expired at {}",
+                            holder.as_deref().unwrap_or("?"),
+                            expires.as_deref().unwrap_or("?")
+                        ),
+                        format!(
+                            "take it over (`sink {claim} item={number} takeover=true from={}`), \
+                             or release it (`delete {claim} item={number}`)",
+                            holder.as_deref().unwrap_or("<holder>")
+                        ),
+                    ),
+                    "unknown-state" => (
+                        format!(
+                            "{short} holds the state {}, which the lifecycle `{}` does not declare",
+                            states
+                                .iter()
+                                .map(|s| format!("`{s}`"))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            lifecycle.name()
+                        ),
+                        format!(
+                            "no transition can name it as `from`: set a state of `{}` with one \
+                             SPARQL UPDATE over `{}`",
+                            lifecycle.iri(),
+                            ledger.graph()
+                        ),
+                    ),
+                    _ => (
+                        format!(
+                            "{short} holds {} states ({}); a transition is one compare-and-set, \
+                             so a write around it did this",
+                            states.len(),
+                            states.join(", ")
+                        ),
+                        format!(
+                            "keep one and remove the rest with one SPARQL UPDATE over `{}`",
+                            ledger.graph()
+                        ),
+                    ),
+                };
+                problems.push(json::Problem {
+                    check: check.to_string(),
+                    item: json::item_ref(&ledger, number, &iri),
+                    detail,
+                    remedy,
+                    holder,
+                    states: if states.is_empty() {
+                        vec![FILED.to_string()]
+                    } else {
+                        states
+                    },
+                    expires,
+                });
+            }
+        }
+
+        let repr = if want == JSON {
+            json_repr(json::render(&json::DoctorDocument {
+                schema: json::SCHEMA,
+                ledger: ledger.name().to_string(),
+                lifecycle: lifecycle.name().to_string(),
+                checked_at: iso8601(now),
+                checks: CHECKS.iter().map(|(c, _)| c.to_string()).collect(),
+                problems,
+            })?)
+        } else {
+            let mut text = format!(
+                "doctor: {} (lifecycle {}): {}\n",
+                ledger.name(),
+                lifecycle.name(),
+                match problems.len() {
+                    0 => "no problems".to_string(),
+                    n => format!("{n} problem(s)"),
+                }
+            );
+            for problem in &problems {
+                text.push_str(&format!(
+                    "\n  {:<14} {}\n  {:<14} remedy: {}\n",
+                    problem.check, problem.detail, "", problem.remedy
+                ));
+            }
+            text.push_str(&format!(
+                "\nchecked: {} at {}\n",
+                CHECKS
+                    .iter()
+                    .map(|(c, _)| *c)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                iso8601(now)
+            ));
+            plain(text)
+        };
+
+        // ★ Cached under the store's write threads AND until the earliest running lease ends:
+        // that moment adds a `lease-expired` problem with nothing written, and reading the
+        // clock records no dependency. `next` has the same horizon for the same reason.
+        let next = client
+            .select(&fill(NEXT_EXPIRY, &client, lifecycle, now)?)
+            .await?
+            .first()
+            .and_then(|row| row.get("next"))
+            .and_then(|b| model::millis(&b.value));
+        let repr = match next {
+            None => repr.cacheable(),
+            Some(deadline) if deadline > now => {
+                repr.cacheable_until(ikigai_core::Time::from_millis(deadline))
+            }
+            Some(_) => repr,
+        };
+        Ok(repr
+            .depends_on(ikigai_store::UPDATE_THREAD)
+            .depends_on(ikigai_store::LOAD_THREAD)
+            .depends_on(ikigai_store::GRAPH_UPDATE_THREAD))
+    }
+
+    fn name(&self) -> &str {
+        "ledger-doctor"
+    }
+
+    fn describe(&self) -> Description {
+        read_scopes(
+            Description::new("ledger-doctor")
+                .title("What is structurally wrong with a ledger")
+                .summary(
+                    "Read-only, and it never repairs: every item with a machine claim and no \
+                     in-flight state (orphaned), an in-flight state and no claim (abandoned), an \
+                     expired lease, a state the ledger's lifecycle does not declare, or two \
+                     states — all at once, each with a remedy. Each check is a stored SPARQL \
+                     query over the ledger's graph.",
+                )
+                .verb(Verb::Source)
+                .verb(Verb::Meta)
+                .input(ledger_arg())
+                .input(as_arg(&STATE_FACES))
+                .output(PLAIN)
+                .output(JSON),
+        )
     }
 }

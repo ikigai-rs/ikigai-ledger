@@ -186,7 +186,7 @@ ledger:claimedBy a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range xsd:string ;
     rdfs:label "claimedBy" ;
-    rdfs:comment "Who holds this item. The ready set never offers a claimed item, which is most of what \"what should I do next\" means when more than one worker shares a ledger. ⚠ A HARD claim only: kata also has timed claims that lapse, which is our 90-minute auto-claim by another name and is not modelled here yet." .
+    rdfs:comment "Who holds this item. The ready set never offers a claimed item, which is most of what \"what should I do next\" means when more than one worker shares a ledger. A claim may carry a lease (ledger:lease, ledger:leaseExpires) and always carries the kind of its holder (ledger:claimKind, stamped by the host). An expired lease is observable and never silently free." .
 
 ledger:claimedAt a rdf:Property ;
     rdfs:domain ledger:Item ;
@@ -415,3 +415,37 @@ ledger:stateToken a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "stateToken" ;
     rdfs:comment "An opaque id minted for each transition and written by it: the receipt the compare-and-set reads back to learn whether ITS update was the one that applied. Two transitions racing from one state to the same state would otherwise both read back the state they asked for and both report success." .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Claims: who holds an item (as the host says), and for how long
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:ClaimKind a rdfs:Class ;
+    rdfs:label "ClaimKind" ;
+    rdfs:comment "Whether a claim is held by a machine or a person. ★ STAMPED BY THE HOST, never taken from the caller: the doctor reports a machine claim on an item that is not in flight and leaves a person's hold alone, so a kind the caller could choose would let a machine pose as a person to escape it. A claim from before ledger:claimKind existed is read as a machine's." .
+
+ledger:machine a ledger:ClaimKind ;
+    rdfs:label "machine" ;
+    rdfs:comment "A claim held by a loop, an agent or a client. The kind a host that does not decide stamps on every claim." .
+
+ledger:person a ledger:ClaimKind ;
+    rdfs:label "person" ;
+    rdfs:comment "A claim held by a person, deliberately." .
+
+ledger:claimKind a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range ledger:ClaimKind ;
+    rdfs:label "claimKind" ;
+    rdfs:comment "Who holds this item's claim: ledger:machine or ledger:person, as the host stamped it when the claim was taken." .
+
+ledger:lease a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:duration ;
+    rdfs:label "lease" ;
+    rdfs:comment "How long the claim was taken for. Absent for a claim held until it is released." .
+
+ledger:leaseExpires a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "leaseExpires" ;
+    rdfs:comment "When the claim's lease runs out, from the kernel's clock. ⚠ An expired lease is NOT a free item: the claim stays, `next` excludes the item as lease-expired naming the holder and this time, and only `claim takeover=true from=<holder>` takes it — a compare-and-set against that holder. A lease that expired silently would make \"owned\" mean \"owned as of an unspecified time\"." .

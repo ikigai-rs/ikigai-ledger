@@ -120,12 +120,13 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:comment` | Sink | append a comment | `write:{ledger}` |
 | `…:{ledger}:close` | Sink | close with a reason | `write:{ledger}` |
 | `…:{ledger}:reopen` | Sink | undo a close | `write:{ledger}` |
-| `…:{ledger}:claim` | Sink · Delete | take it / hand it back | `write:{ledger}` |
+| `…:{ledger}:claim` | Sink · Delete | take it (optionally on a lease) / hand it back / take over an expired lease | `write:{ledger}` |
 | `…:{ledger}:defer` | Sink · Delete | not now / now again | `write:{ledger}` |
 | `…:{ledger}:link` | Sink · Delete | blocks / parent / related | `write:{ledger}` |
 | `…:{ledger}:label` | Sink · Delete | tag / untag | `write:{ledger}` |
 | `…:{ledger}:purge` | Delete | destroy, leaving a tombstone | `purge:{ledger}` |
 | `…:{ledger}:next` | Source | the ready set, ranked | `read:{ledger}` |
+| `…:{ledger}:doctor` | Source | what is structurally wrong, every problem at once; repairs nothing | `read:{ledger}` |
 | `…:{ledger}:item:{id}:state` | Source · Sink | the one lifecycle state; a compare-and-set transition | `read` / `write` of `{ledger}` |
 | `…:{ledger}:item:{id}:state:{value}` | Exists | is it in that state? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:holder:{holder}` | Exists | is it held by that holder? | `read:{ledger}` |
@@ -182,7 +183,7 @@ because the data has to say which ledger it is in even when the request did not.
 
 ⚠ **The sugar costs a reserved-word list.** `urn:iki:ledger:items` has to mean *the
 default ledger's listing* rather than *a ledger called `items`*, and only one of those can
-be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and thirteen others are not
+be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and fourteen others are not
 available as ledger names, and a name that is refused says which word it must not use.
 Names are otherwise lowercase letters, digits, `-` and `_`; the shape is fixed because the
 name becomes a capability token that is matched **exactly**, and a token must not be
@@ -330,7 +331,8 @@ first".
 | --- | --- |
 | `item:{id}` | `{schema, ledger, item}` |
 | `items` | `{schema, ledger, count, items: [item…], unreadable: [{iri, defects}]}` — `unreadable` is the plain face's ⚠ footer, as data: the items NOT in `items`. An item listed with a stand-in timestamp carries its own `defects` instead |
-| `next` | `{schema, ledger, policy, weighs, generated_at, ready, ranking: [{rank, score, because, item}], excluded: [{why, reason, holder, blocked_by, item}]}` — `why` is `claimed`, `deferred` or `blocked` |
+| `next` | `{schema, ledger, policy, weighs, generated_at, ready, ranking: [{rank, score, because, item}], excluded: [{why, reason, holder, expires, blocked_by, item}]}` — `why` is `claimed`, `lease-expired`, `deferred` or `blocked` |
+| `doctor` | `{schema, ledger, lifecycle, checked_at, checks, problems: [{check, item: {number, display, iri}, detail, remedy, holder, states, expires}]}` |
 | `append`, `comment`, `close`, `link` | `{schema, ledger, outcome, item: {number, display, iri}, …}` — `outcome` is `filed`, `existing`, `commented`, `closed`, `linked` or `unlinked`, and only that outcome's own fields follow: `status` and `key` (append), `comment` (comment, and close with a note), `reason` (close), `type` and `target` (link) |
 
 `links` are the item's **outbound** edges — `blocks`, then `parent`, then `related` — and a
@@ -580,6 +582,90 @@ state resource relies on not having: a state whose IRI is not `{lifecycle}:{name
 names or orders, a state outside the flight with no drain, a state in flight with one, and a
 lifecycle that does not declare `filed` first.
 
+## Claims: a lease, a kind, and a takeover
+
+```text
+$ sink urn:iki:ledger:claim item=12 lease=30m <<< "kata-ship/0abc1234"
+#12 claimed by kata-ship/0abc1234 until 2026-10-09T15:30:00.000Z
+$ source urn:iki:ledger:next
+…
+  not #12: lease expired: claimed by kata-ship/0abc1234 until 2026-10-09T15:30:00.000Z
+$ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "kata-ship/9fff0000"
+#12 taken over from kata-ship/0abc1234 by kata-ship/9fff0000
+```
+
+- **Every take is one guarded store update** (since this release; until now a claim was
+  read-then-write, and two claimants could both read the item free and both write). The update
+  holds only while the item is free or already this holder's, and the holder is read back: of
+  two claimants racing for one item, exactly one holds it and the other gets a `Conflict`
+  naming them. Claiming again as the same holder renews the claim and its lease.
+- **`lease=`** (`90s`, `30m`, `2h`, `1d`, or an `xsd:duration` like `PT30M`) records
+  `ledger:leaseExpires` from the **kernel's** clock, so a test pins expiry without sleeping and
+  an as-of corridor can ask who held what when. Omit it for a claim held until released.
+- ★ **An expired lease is never silently free.** The claim stays. `next` excludes the item with
+  `why: "lease-expired"`, the holder and the expiry, and a cached `next` (and doctor) holds
+  only until the earliest running lease ends, because that moment changes the answer with
+  nothing written. A plain claim on it is a `Conflict` that says how to take it, and the only
+  way to take it is **`takeover=true from=<holder>`**: a compare-and-set against that holder,
+  so of two takers exactly one wins. A live lease, or a claim with no lease, is never taken
+  over; it is released (`delete …:claim`), which is the deliberate act.
+- **The claim's kind**, `machine` or `person`, is in the JSON face (`claim.kind`) and in the
+  graph (`ledger:claimKind`). The doctor reports a machine claim on an item that is not in
+  flight and leaves a person's hold alone.
+
+### ★ The kind is the HOST's to stamp, and a direct embedder owns that
+
+`claim` declares **no `kind` argument and ignores one if it is sent**: a kind the caller could
+choose would let a machine pose as a person to escape the doctor. The kind comes from a
+function the host gives the space, which sees the invocation (what the host's own door put on
+the request, and the capability), never a caller's choice:
+
+```rust
+let stamper: ClaimKindStamper = Arc::new(|inv| match inv.inline_str("principal") {
+    Ok(p) if is_a_person(p) => ClaimKind::Person,
+    _ => ClaimKind::Machine,
+});
+let space = ikigai_ledger::space_with(SpaceConfig::default().claim_kind(stamper));
+```
+
+**The default stamps every claim `machine`**, the kind the doctor reports on, so a host that
+never decides cannot let anything escape it; the cost is that a person's hold reads as an
+orphaned machine claim until the host stamps properly. ⚠ **A stamper is only as good as what it
+reads**: gonk's reads the `principal` its door stamps on every request, which works because the
+door OVERWRITES that argument. A host whose door merely fills it in when absent has handed the
+choice back to the caller. A claim taken before kinds existed carries no `ledger:claimKind`; the
+JSON face says `null` and the doctor reads it as a machine's.
+
+## The doctor: everything wrong, at once, and nothing repaired
+
+```text
+$ source urn:iki:ledger:doctor
+doctor: default (lifecycle kata-flight): 2 problem(s)
+
+  orphaned       #3 is held by kata-ship/0abc (a machine claim) in `filed`, which is not in flight
+                 remedy: release it (`delete urn:iki:ledger:claim item=3`), or move it into flight …
+
+  lease-expired  #7's lease for kata-ship/9fff expired at 2026-10-09T15:30:00.000Z
+                 remedy: take it over (`sink urn:iki:ledger:claim item=7 takeover=true from=kata-ship/9fff`), …
+```
+
+Five checks, each a **stored SPARQL query** (`src/doctor/*.rq`) over the ledger's graph, with the
+ledger's lifecycle filled in as terms:
+
+| check | what it finds |
+| --- | --- |
+| `orphaned` | a machine claim (or one with no recorded kind) on an item whose state is not in flight |
+| `abandoned` | an item in an in-flight state that nobody holds |
+| `lease-expired` | a claim whose lease ran out, judged on the kernel's clock |
+| `unknown-state` | a `ledger:state` the ledger's lifecycle does not declare (a hand edit, an import, a ledger whose lifecycle changed) |
+| `two-states` | an item holding more than one state, which only a raw store write can produce |
+
+It is a read under the ledger's read grant, it reports every problem in one answer with a
+remedy for each, and it **never repairs**: what to do about an orphan is a judgment, and a
+detector that acts on its own findings is a reaper with a confidence problem. `as=application/json`
+is the machine face. A `closed` item is checked like any other: a closed item still held, or
+still in flight, is exactly the kind of leftover the doctor exists to show.
+
 ### Assertions: ask whether a step happened
 
 ```text
@@ -761,10 +847,9 @@ one graph.
   is the kernel's to tell — `ikigai-log`'s tracer already writes resolutions, cache hits and
   capability denials — and duplicating it in the domain graph would be two records to
   disagree.
-- **No timed claims.** Claims are held until released; nothing expires them. A claim race
-  between two requests in one process is also possible — RDF has no partial unique index, and
-  SHACL cannot see a race. Both are safe for a single operator and are the first things to
-  harden for more than one.
+- **No reaper.** A lease that runs out is reported (by `next` and the doctor) and taken over
+  by an explicit act; nothing releases or reassigns a claim on its own, because "owned" has to
+  mean something a reader can check.
 - **No key on an existing item.** A key is given at filing and never changed, so an item
   filed before keys existed cannot gain one through a resource here — that is one SPARQL
   UPDATE over the graph, and a migration's job rather than an endpoint's.
@@ -776,31 +861,42 @@ one graph.
 
 ## Status
 
-All nineteen resources are bound, tested, and walked clean by `ikigai-conformance`
+All twenty resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces).
 
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Next (a minor release): lifecycle state and assertions (ledger #775, step 1)
+### Next (a minor release): lifecycle state, assertions, leases and the doctor (ledger #775)
 
-The first of kata-flight's ledger seams. Additive in behavior — every request 0.4.2 accepted
+kata-flight's ledger seams, steps 1 and 2. Additive in behavior — every request 0.4.2 accepted
 answers the same bytes in the plain face, and the JSON face gains one field — but **a minor
 release**, because three public constants change type: `ledger::RESERVED` gains `lifecycle`
-(19 words), `vocabulary::STRUCTURAL_CLASSES` gains `Lifecycle` and `LifecycleState` (12), and
-a `[&str; 18]` binding of the old array stops compiling. And `lifecycle` is now a reserved
-ledger name: a ledger called that could not be told apart from `urn:iki:ledger:lifecycle:{name}`.
+(20 words, with `doctor`), `vocabulary::STRUCTURAL_CLASSES` gains `Lifecycle`, `LifecycleState`
+and `ClaimKind` (13), and
+a `[&str; 18]` binding of the old array stops compiling; `select::Excluded` gains a variant
+(and becomes `#[non_exhaustive]`). And `lifecycle` and `doctor` are now reserved ledger names:
+a ledger called `lifecycle` could not be told apart from `urn:iki:ledger:lifecycle:{name}`,
+and `doctor` joins every other action word.
 
 - **`…:item:{id}:state`** (Source, Sink): one state or none (`filed`), moved by a compare-and-set
   in one store update; a lost race is a typed `Conflict`. See "Lifecycle state".
 - **`urn:iki:ledger:lifecycle:{name}`** (Source, Exists): the lifecycles a host offers; the
   built-in is `kata-flight`. `SpaceConfig` and `space_with` take a host's own.
+- **Claims** (step 2): `lease=`, a host-stamped kind (`SpaceConfig::claim_kind`, default
+  `machine`), `takeover=true from=<holder>` for an expired lease, and every take is now one
+  guarded store update. `next` excludes an expired lease as `lease-expired`. See "Claims".
+- **`…:{ledger}:doctor`** (Source): orphaned, abandoned, lease-expired, unknown-state and
+  two-states, as stored SPARQL, read-only. See "The doctor".
 - **Assertions** (Exists): `…:item:{id}:state:{value}`, `…:holder:{holder}`, `…:closed`.
-- **JSON**: every item object gains `state`. The plain item detail gains a `state:` line, only
+- **JSON**: every item object gains `state`; `claim` gains `kind`, `expires` and `lease`;
+  `next`'s exclusions gain `expires` and the `why` `lease-expired`; the doctor serves its own
+  document. The plain item detail gains a `state:` line, only
   for an item that has one.
 - Vocabulary: `ledger:Lifecycle`, `LifecycleState`, `hasState`, `order`, `inFlight`, `drain`,
-  `state`, `stateAt`, `stateToken`.
+  `state`, `stateAt`, `stateToken`; `ClaimKind`, `machine`, `person`, `claimKind`, `lease`,
+  `leaseExpires`.
 
 ### 0.4.2 (2026-10-07): one bad timestamp no longer drops an item (ledger #866)
 

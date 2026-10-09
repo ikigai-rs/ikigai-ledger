@@ -273,7 +273,10 @@ fn the_json_item_document_is_schema_1() {
     "revision": "f41a333",
     "claim": {
       "holder": "satellite",
-      "purpose": "brief-x"
+      "purpose": "brief-x",
+      "kind": "machine",
+      "expires": null,
+      "lease": null
     },
     "created": "2026-09-15T00:00:00.000Z",
     "modified": "2026-09-15T00:00:00.000Z",
@@ -432,6 +435,7 @@ fn the_json_next_document_is_schema_1() {
       "why": "blocked",
       "reason": "blocked by #1",
       "holder": null,
+      "expires": null,
       "blocked_by": [
         1
       ],
@@ -464,6 +468,7 @@ fn the_json_next_document_is_schema_1() {
       "why": "claimed",
       "reason": "claimed by satellite",
       "holder": "satellite",
+      "expires": null,
       "blocked_by": [],
       "item": {
         "number": 1,
@@ -488,7 +493,10 @@ fn the_json_next_document_is_schema_1() {
         "revision": "f41a333",
         "claim": {
           "holder": "satellite",
-          "purpose": "brief-x"
+          "purpose": "brief-x",
+          "kind": "machine",
+          "expires": null,
+          "lease": null
         },
         "created": "2026-09-15T00:00:00.000Z",
         "modified": "2026-09-15T00:00:00.000Z",

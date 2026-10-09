@@ -179,6 +179,7 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-item-state-is")
         .cacheable("ledger-item-holder-is")
         .cacheable("ledger-item-closed")
+        .cacheable("ledger-doctor")
         .pure("ledger-policy")
         .pure("ledger-lifecycle")
 }
@@ -198,7 +199,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
     // The store's seven are in the walk too (they are bound in this kernel); this test is
-    // about the nineteen THIS crate binds.
+    // about the twenty THIS crate binds.
     let mut walked: Vec<&str> = report
         .walked
         .iter()
@@ -214,6 +215,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-close",
             "ledger-comment",
             "ledger-defer",
+            "ledger-doctor",
             "ledger-item",
             "ledger-item-closed",
             "ledger-item-holder-is",

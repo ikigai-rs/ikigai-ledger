@@ -1,0 +1,10 @@
+# LEASE EXPIRED: a claim whose lease ran out at or before $NOW (the kernel's clock).
+# Still a claim: an expired lease is never silently free.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT ?item ?number ?holder ?expires WHERE {
+  GRAPH $GRAPH {
+    ?item a ledger:Item ; ledger:number ?number ;
+          ledger:claimedBy ?holder ; ledger:leaseExpires ?expires .
+    FILTER(?expires <= $NOW)
+  }
+} ORDER BY ?number

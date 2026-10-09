@@ -217,7 +217,7 @@ fn script() -> Vec<Step> {
             "ledger-claim",
             Verb::Sink,
             at("claim"),
-            &[("item", "#1"), ("content", "session-a")],
+            &[("item", "#1"), ("content", "session-a"), ("lease", "30m")],
         ),
         step("ledger-claim", Verb::Delete, at("claim"), &[("item", "#1")]),
         // The flight seams (ledger #775): a state read and a real transition, and the three
@@ -261,6 +261,7 @@ fn script() -> Vec<Step> {
         ),
         step("ledger-reopen", Verb::Sink, at("reopen"), &[("item", "#1")]),
         step("ledger-next", Verb::Source, at("next"), &[]),
+        step("ledger-doctor", Verb::Source, at("doctor"), &[]),
         // The two ledger-less resources. `ledgers` is the one that must not need a broad
         // grant either: it answers what this capability may read, from what it holds.
         step(

@@ -64,6 +64,8 @@ pub mod ext {
     pub const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
     /// `xsd:integer`
     pub const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    /// `xsd:duration`
+    pub const XSD_DURATION: &str = "http://www.w3.org/2001/XMLSchema#duration";
     /// `xsd:boolean`
     pub const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
     /// `xsd:string`
@@ -221,6 +223,18 @@ term! {
     STATE_AT => "stateAt";
     /// `ledger:stateToken` — the receipt of the transition that set the current state.
     STATE_TOKEN => "stateToken";
+    /// `ledger:ClaimKind` — machine or person.
+    CLAIM_KIND_CLASS => "ClaimKind";
+    /// `ledger:machine` — a claim held by a loop, an agent, a client.
+    MACHINE => "machine";
+    /// `ledger:person` — a claim held by a person.
+    PERSON => "person";
+    /// `ledger:claimKind` — who holds the claim, as the HOST stamped it.
+    CLAIM_KIND => "claimKind";
+    /// `ledger:lease` — how long the claim was taken for (`xsd:duration`).
+    LEASE => "lease";
+    /// `ledger:leaseExpires` — when the lease runs out, from the kernel's clock.
+    LEASE_EXPIRES => "leaseExpires";
 }
 
 /// The `@prefix` header every Turtle face this module emits carries.
@@ -234,7 +248,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 12] = [
+pub const STRUCTURAL_CLASSES: [&str; 13] = [
     COMMENT_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
@@ -247,6 +261,7 @@ pub const STRUCTURAL_CLASSES: [&str; 12] = [
     CLOSE_REASON_CLASS,
     LIFECYCLE_CLASS,
     LIFECYCLE_STATE_CLASS,
+    CLAIM_KIND_CLASS,
 ];
 
 /// The close reasons, as `(short name, IRI)` — the `one_of` an ArgSpec declares and the
