@@ -56,7 +56,7 @@ pub const DEFAULT: &str = "default";
 /// has to mean *the default ledger's listing* rather than *a ledger called `items`*, and
 /// only one of those can be true. Reserving is the cheaper half: a ledger can be called
 /// almost anything, and the refusal says which word it must not use.
-pub const RESERVED: [&str; 18] = [
+pub const RESERVED: [&str; 19] = [
     "append",
     "claim",
     "close",
@@ -68,6 +68,7 @@ pub const RESERVED: [&str; 18] = [
     "items",
     "label",
     "ledgers",
+    "lifecycle",
     "link",
     "next",
     "policy",
@@ -420,6 +421,87 @@ impl Grammar for LedgerGrammar {
     }
 }
 
+/// A grammar for one PART of an item: `urn:iki:ledger:{ledger}:item:{id}:{part}`, or with a
+/// trailing value, `…:item:{id}:{part}:{value}` — plus the bare spelling, as
+/// [`LedgerGrammar`] does.
+///
+/// ★ **`{id}` is ONE segment here: a number or an opaque id, never `key:{key}`.** A key may
+/// contain `:` (`urn:kata:issue:01JZ`), so `item:key:a:state` could name the state of the
+/// item keyed `a` or the item keyed `a:state`, and `item:{id}` has answered the second
+/// since 0.4.0. A part therefore refuses an id of `key`, the item resource keeps every key,
+/// and a keyed item's parts are reached through its number or its IRI. Bound AHEAD of
+/// `item:{id}` (whose `{id}` takes the rest of the IRI) so `item:12:state` is the part and
+/// not an item whose id is `12:state` — which was a NotFound before, so nothing changes
+/// meaning.
+pub(crate) struct ItemPartGrammar {
+    part: &'static str,
+    /// The variable a trailing value is captured as, when the part takes one.
+    value: Option<&'static str>,
+}
+
+impl ItemPartGrammar {
+    /// `…:item:{id}:{part}`.
+    pub(crate) fn part(part: &'static str) -> Self {
+        ItemPartGrammar { part, value: None }
+    }
+
+    /// `…:item:{id}:{part}:{var}`, where the value is the rest of the IRI (it may contain
+    /// `:` — a holder is often an IRI).
+    pub(crate) fn with_value(part: &'static str, var: &'static str) -> Self {
+        ItemPartGrammar {
+            part,
+            value: Some(var),
+        }
+    }
+
+    fn match_tail(&self, tail: &str, name: &str) -> Option<Bindings> {
+        let rest = tail.strip_prefix("item:")?;
+        let (id, rest) = rest.split_once(':')?;
+        if id.is_empty() || id == "key" {
+            return None;
+        }
+        let rest = rest.strip_prefix(self.part)?;
+        let mut bindings = Bindings::new();
+        bindings.insert("ledger", name);
+        bindings.insert("id", id);
+        match self.value {
+            None if rest.is_empty() => {}
+            None => return None,
+            Some(var) => {
+                let value = rest.strip_prefix(':')?;
+                if value.is_empty() {
+                    return None;
+                }
+                bindings.insert(var, value);
+            }
+        }
+        Some(bindings)
+    }
+}
+
+impl Grammar for ItemPartGrammar {
+    fn match_iri(&self, iri: &Iri) -> Option<Bindings> {
+        let rest = iri.as_str().strip_prefix(PREFIX)?;
+        // The bare form first, for the reason `LedgerGrammar` gives; `item` is reserved, so a
+        // ledger can never be called that.
+        if let Some(bindings) = self.match_tail(rest, DEFAULT) {
+            return Some(bindings);
+        }
+        let (name, tail) = rest.split_once(':')?;
+        if name.is_empty() {
+            return None;
+        }
+        self.match_tail(tail, name)
+    }
+
+    fn pattern(&self) -> String {
+        match self.value {
+            None => format!("{PREFIX}{{ledger}}:item:{{id}}:{}", self.part),
+            Some(var) => format!("{PREFIX}{{ledger}}:item:{{id}}:{}:{{{var}}}", self.part),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +629,54 @@ mod tests {
         );
         assert!(Ledger::of_subject("urn:iki:ledger:item:01abc").is_none());
         assert!(Ledger::of_subject("urn:repo:file:x").is_none());
+    }
+
+    #[test]
+    fn an_item_part_captures_the_id_and_its_value_in_both_spellings() {
+        let state = ItemPartGrammar::part("state");
+        let bare = state
+            .match_iri(&iri("urn:iki:ledger:item:12:state"))
+            .unwrap();
+        assert_eq!(bare.get("ledger"), Some("default"));
+        assert_eq!(bare.get("id"), Some("12"));
+        let named = state
+            .match_iri(&iri("urn:iki:ledger:acme:item:01abc:state"))
+            .unwrap();
+        assert_eq!(named.get("ledger"), Some("acme"));
+        assert_eq!(named.get("id"), Some("01abc"));
+        // The valued form is a different resource.
+        assert!(state
+            .match_iri(&iri("urn:iki:ledger:item:12:state:queued"))
+            .is_none());
+        let is = ItemPartGrammar::with_value("state", "value");
+        assert_eq!(
+            is.match_iri(&iri("urn:iki:ledger:item:12:state:queued"))
+                .unwrap()
+                .get("value"),
+            Some("queued")
+        );
+        // A holder may be an IRI, colons and all.
+        let holder = ItemPartGrammar::with_value("holder", "holder");
+        assert_eq!(
+            holder
+                .match_iri(&iri(
+                    "urn:iki:ledger:acme:item:3:holder:urn:agents:session:x"
+                ))
+                .unwrap()
+                .get("holder"),
+            Some("urn:agents:session:x")
+        );
+    }
+
+    /// ⚠ A key may contain `:`, so a part never reads one: `item:key:a:state` stays the item
+    /// keyed `a:state`, which is what it has meant since keys arrived.
+    #[test]
+    fn an_item_part_never_takes_a_key() {
+        assert!(ItemPartGrammar::part("state")
+            .match_iri(&iri("urn:iki:ledger:item:key:a:state"))
+            .is_none());
+        assert!(LedgerGrammar::with_id("item")
+            .match_iri(&iri("urn:iki:ledger:item:key:a:state"))
+            .is_some());
     }
 }

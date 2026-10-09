@@ -30,6 +30,9 @@ pub mod iri {
     /// `urn:iki:ledger:policy:{name}` — a property of the host's configuration rather
     /// than of any one ledger, which is why it has no ledger segment.
     pub const POLICY: &str = "urn:iki:ledger:policy:";
+    /// `urn:iki:ledger:lifecycle:{name}` — host configuration like a policy, and every state
+    /// of one is `{that}:{state}`. See [`crate::lifecycle`].
+    pub const LIFECYCLE: &str = crate::lifecycle::PREFIX;
 }
 
 /// External terms, reused rather than reinvented.
@@ -200,6 +203,24 @@ term! {
     BECAUSE => "because";
     /// `ledger:leverage`
     LEVERAGE => "leverage";
+    /// `ledger:Lifecycle` — the legal states of an item, as a resource.
+    LIFECYCLE_CLASS => "Lifecycle";
+    /// `ledger:LifecycleState` — one of them.
+    LIFECYCLE_STATE_CLASS => "LifecycleState";
+    /// `ledger:hasState` — a lifecycle's states.
+    HAS_STATE => "hasState";
+    /// `ledger:order` — a state's position in its lifecycle.
+    ORDER => "order";
+    /// `ledger:inFlight` — whether an item in this state is being worked.
+    IN_FLIGHT => "inFlight";
+    /// `ledger:drain` — who picks an item up from a state outside the flight.
+    DRAIN => "drain";
+    /// `ledger:state` — the one lifecycle state an item is in; absent means `filed`.
+    STATE => "state";
+    /// `ledger:stateAt` — when the item entered its current state.
+    STATE_AT => "stateAt";
+    /// `ledger:stateToken` — the receipt of the transition that set the current state.
+    STATE_TOKEN => "stateToken";
 }
 
 /// The `@prefix` header every Turtle face this module emits carries.
@@ -213,7 +234,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 10] = [
+pub const STRUCTURAL_CLASSES: [&str; 12] = [
     COMMENT_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
@@ -224,6 +245,8 @@ pub const STRUCTURAL_CLASSES: [&str; 10] = [
     EXCLUSION_CLASS,
     STATUS_CLASS,
     CLOSE_REASON_CLASS,
+    LIFECYCLE_CLASS,
+    LIFECYCLE_STATE_CLASS,
 ];
 
 /// The close reasons, as `(short name, IRI)` — the `one_of` an ArgSpec declares and the

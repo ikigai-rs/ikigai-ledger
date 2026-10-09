@@ -155,6 +155,14 @@ pub struct Item {
     /// for it, and this list says so on every face. Only an item with NO readable
     /// timestamp is still unlistable, because no time it could be shown at is true.
     pub defects: Vec<String>,
+    /// The NAMES of the lifecycle states the item holds (`queued`), sorted — empty means the
+    /// state named `filed`. Through a ledger Sink there is at most one, because the state
+    /// resource sets it by compare-and-set in one store update; two can only come from an
+    /// out-of-band write, which the doctor reports. [`Item::state`] reads it.
+    pub states: Vec<String>,
+    /// The `ledger:state` values as stored, for the Turtle face and for comparing against a
+    /// lifecycle's IRIs (a name alone would match another lifecycle's state of that name).
+    pub(crate) state_values: Vec<sparql::Binding>,
     /// The unreadable timestamp values themselves, so the Turtle face can carry them
     /// as stored instead of asserting the stand-in as `dcterms:created`/`modified`.
     pub(crate) unread: Vec<(&'static str, sparql::Binding)>,
@@ -163,6 +171,22 @@ pub struct Item {
 }
 
 impl Item {
+    /// The one state this item is in: [`FILED`](crate::lifecycle::FILED) when it holds none,
+    /// the state's name when it holds one, and `None` when it holds several — which no ledger
+    /// write produces, and which the doctor reports.
+    pub fn state(&self) -> Option<&str> {
+        match self.states.as_slice() {
+            [] => Some(crate::lifecycle::FILED),
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    /// The `ledger:state` values exactly as stored — IRIs for every state a transition wrote.
+    pub fn state_iris(&self) -> Vec<&str> {
+        self.state_values.iter().map(|b| b.value.as_str()).collect()
+    }
+
     /// The display number: `#12` in the default ledger, `acme#12` elsewhere.
     ///
     /// ★ Read from the item's own IRI rather than passed in, because the IRI is
@@ -251,6 +275,11 @@ impl Item {
         if let Some(purpose) = &self.purpose {
             out.push_str(&format!("  purpose:  {purpose}\n"));
         }
+        // Only when there is one, like `key:`, so an item that never entered a lifecycle
+        // renders exactly as it did in 0.4.2.
+        for state in &self.states {
+            out.push_str(&format!("  state:    {state}\n"));
+        }
         if !self.body.is_empty() {
             out.push('\n');
             for line in self.body.lines() {
@@ -335,6 +364,13 @@ impl Item {
         for (predicate, value) in &self.unread {
             if let Some(term) = stored(value) {
                 push(predicate, term);
+            }
+        }
+        // As stored: a state is an IRI when a transition wrote it, and whatever an
+        // out-of-band write left when one did not.
+        for value in &self.state_values {
+            if let Some(term) = stored(value) {
+                push(v::STATE, term);
             }
         }
         for label in &self.labels {
@@ -765,7 +801,7 @@ async fn load(
     let limit = limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified WHERE {{ {} }} \
+         ?revision ?key ?holder ?purpose ?created ?modified ?state WHERE {{ {} }} \
          ORDER BY DESC({RECENCY}) DESC(?number){limit}",
         client.in_graph(&format!(
             "?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -781,7 +817,8 @@ async fn load(
              OPTIONAL {{ ?item <{revision}> ?revision }}\n\
              OPTIONAL {{ ?item <{key}> ?key }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
-             OPTIONAL {{ ?item <{purpose}> ?purpose }}\n{filters}",
+             OPTIONAL {{ ?item <{purpose}> ?purpose }}\n\
+             OPTIONAL {{ ?item <{state}> ?state }}\n{filters}",
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
             number = v::NUMBER,
@@ -798,6 +835,7 @@ async fn load(
             key = v::KEY,
             holder = v::CLAIMED_BY,
             purpose = v::PURPOSE,
+            state = v::STATE,
             filters = filter_clauses(filter)?,
         ))
     );
@@ -811,7 +849,7 @@ async fn load(
 pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option<Item>> {
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified WHERE {{ {} }} \
+         ?revision ?key ?holder ?purpose ?created ?modified ?state WHERE {{ {} }} \
          ORDER BY DESC({RECENCY})",
         client.in_graph(&format!(
             "BIND({subject} AS ?item)\n\
@@ -828,7 +866,8 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{revision}> ?revision }}\n\
              OPTIONAL {{ ?item <{key}> ?key }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
-             OPTIONAL {{ ?item <{purpose}> ?purpose }}",
+             OPTIONAL {{ ?item <{purpose}> ?purpose }}\n\
+             OPTIONAL {{ ?item <{state}> ?state }}",
             subject = sparql::iri(iri, "item")?,
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
@@ -846,6 +885,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
             key = v::KEY,
             holder = v::CLAIMED_BY,
             purpose = v::PURPOSE,
+            state = v::STATE,
         ))
     );
     let rows = client.select(&query).await?;
@@ -1400,6 +1440,20 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         }
     }
     defects.sort();
+    // Every distinct `ledger:state` across the subject's rows: the OPTIONAL multiplies rows
+    // when there are several, exactly as a doubled timestamp does.
+    let mut state_values: Vec<sparql::Binding> = Vec::new();
+    for value in rows.iter().filter_map(|row| row.get("state")) {
+        if !state_values.contains(value) {
+            state_values.push(value.clone());
+        }
+    }
+    state_values.sort_by(|a, b| a.value.cmp(&b.value));
+    let mut states: Vec<String> = state_values
+        .iter()
+        .map(|b| crate::lifecycle::state_name(&b.value))
+        .collect();
+    states.sort();
     Some(Item {
         iri: row.get("item")?.value.clone(),
         kind: row.get("kind").map(|b| b.value.clone()),
@@ -1432,6 +1486,8 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         parents: Vec::new(),
         related: Vec::new(),
         defects,
+        states,
+        state_values,
         unread,
         read: (created.is_some(), modified.is_some()),
     })
@@ -1446,7 +1502,7 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
 /// `item_from_row` dropped the row, and every newly filed item read back as if it had
 /// never been written. Accept an optional fraction and an optional numeric offset, which
 /// is what `xsd:dateTime` actually permits.
-fn millis(iso: &str) -> Option<u64> {
+pub(crate) fn millis(iso: &str) -> Option<u64> {
     let text = iso.trim();
     let bytes = text.as_bytes();
     if text.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
@@ -1532,6 +1588,8 @@ mod tests {
             parents: Vec::new(),
             related: Vec::new(),
             defects: Vec::new(),
+            states: Vec::new(),
+            state_values: Vec::new(),
             unread: Vec::new(),
             read: (true, true),
         }

@@ -1,4 +1,6 @@
-//! The fourteen resources this crate binds, each of them **per ledger**.
+//! The resources this crate binds, each of them **per ledger** but the three a host
+//! configures (`ledgers`, `policy:{name}`, `lifecycle:{name}`). The lifecycle state and the
+//! assertions are in the `flight` submodule.
 //!
 //! ```text
 //! urn:iki:ledger:{ledger}:items          Source              the list, filtered
@@ -15,14 +17,19 @@
 //! urn:iki:ledger:{ledger}:next           Source              the ready set, ranked
 //! urn:iki:ledger:ledgers                 Source              which ledgers exist
 //! urn:iki:ledger:policy:{name}           Source              what a policy weighs
+//! urn:iki:ledger:lifecycle:{name}        Source Exists       the legal states, in order
+//! urn:iki:ledger:{ledger}:item:{id}:state            Source Sink  one state; a CAS
+//! urn:iki:ledger:{ledger}:item:{id}:state:{value}    Exists       is it in that state?
+//! urn:iki:ledger:{ledger}:item:{id}:holder:{holder}  Exists       is it held by them?
+//! urn:iki:ledger:{ledger}:item:{id}:closed           Exists       is it closed?
 //! ```
 //!
 //! Omit the `{ledger}` segment and you address the ledger called `default`, through the
 //! same grammar match and therefore the same capability — see [`crate::ledger`].
 //!
-//! The last two have no `{ledger}` segment because neither is a ledger's own state:
-//! `ledgers` is the inventory across them and a policy is a property of the host's
-//! configuration.
+//! `ledgers`, `policy:{name}` and `lifecycle:{name}` have no `{ledger}` segment because none
+//! is a ledger's own state: `ledgers` is the inventory across them, and a policy or a
+//! lifecycle is a property of the host's configuration.
 //!
 //! # Why `purge` is a resource and not an argument
 //!
@@ -99,7 +106,8 @@ use oxrdf::Graph;
 use sha2::{Digest, Sha256};
 
 use crate::json;
-use crate::ledger::{Ledger, LedgerGrammar};
+use crate::ledger::{ItemPartGrammar, Ledger, LedgerGrammar};
+use crate::lifecycle::Lifecycles;
 use crate::model::{self, Deferred, Filter, Holder, Item, Status};
 use crate::policy::{OrderingPolicy, Policies};
 use crate::select;
@@ -192,10 +200,50 @@ const READ_FACES: [&str; 3] = [PLAIN, TURTLE, JSON];
 /// answer is a receipt, not a graph, and the graph is one read away.
 const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 
+mod flight;
+
 /// Bind the ledger with the built-in ordering policies (`priority-recency`, then
-/// `leverage`).
+/// `leverage`) and the built-in lifecycle (`kata-flight`).
 pub fn space() -> EndpointSpace {
-    space_with_policies(Policies::default().all().to_vec())
+    space_with(SpaceConfig::default())
+}
+
+/// What a host configures when it binds the ledger: the ordering policies `next` offers and
+/// the lifecycles item states are checked against. Built from [`SpaceConfig::default`] — the
+/// built-ins — and handed to [`space_with`].
+///
+/// ★ A builder rather than another `space_with_*` function per knob, because the knobs keep
+/// arriving (policies in 0.1, lifecycles in 0.5) and a function per combination is how an
+/// API grows a flag day. It is `#[non_exhaustive]` and built through its methods, so the next
+/// knob is additive.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct SpaceConfig {
+    policies: Vec<Arc<dyn OrderingPolicy>>,
+    lifecycles: Lifecycles,
+}
+
+impl Default for SpaceConfig {
+    fn default() -> Self {
+        SpaceConfig {
+            policies: Policies::default().all().to_vec(),
+            lifecycles: Lifecycles::default(),
+        }
+    }
+}
+
+impl SpaceConfig {
+    /// The ordering policies `next` offers. **The first is the default.**
+    pub fn policies(mut self, policies: Vec<Arc<dyn OrderingPolicy>>) -> Self {
+        self.policies = policies;
+        self
+    }
+
+    /// The lifecycles, and which ledger uses which — see [`Lifecycles`].
+    pub fn lifecycles(mut self, lifecycles: Lifecycles) -> Self {
+        self.lifecycles = lifecycles;
+        self
+    }
 }
 
 /// Bind the ledger with a host's own ordering policies. **The first is the default.**
@@ -209,7 +257,17 @@ pub fn space() -> EndpointSpace {
 /// On an empty policy list: a `next` with nothing to rank with should fail where the
 /// manifest is, not at the first request.
 pub fn space_with_policies(policies: Vec<Arc<dyn OrderingPolicy>>) -> EndpointSpace {
-    let policies = Arc::new(Policies::new(policies));
+    space_with(SpaceConfig::default().policies(policies))
+}
+
+/// Bind the ledger with a host's own configuration — see [`SpaceConfig`].
+///
+/// # Panics
+///
+/// On an empty policy list, as [`space_with_policies`] does.
+pub fn space_with(config: SpaceConfig) -> EndpointSpace {
+    let policies = Arc::new(Policies::new(config.policies));
+    let lifecycles = Arc::new(config.lifecycles);
     // ⚠ **Bind order is resolution order** (`EndpointSpace` takes the first grammar that
     // matches), and the two ledger-less resources go FIRST. `urn:iki:ledger:policy:next`
     // would otherwise be read as the `next` resource of a ledger called `policy` — which
@@ -223,7 +281,42 @@ pub fn space_with_policies(policies: Vec<Arc<dyn OrderingPolicy>>) -> EndpointSp
                 policies: Arc::clone(&policies),
             },
         )
+        .bind(
+            UriTemplate::parse("urn:iki:ledger:lifecycle:{name}").expect("a constant template"),
+            flight::LifecycleEndpoint {
+                lifecycles: Arc::clone(&lifecycles),
+            },
+        )
         .bind(LedgerGrammar::action("items"), ItemsEndpoint)
+        // ⚠ The item PARTS go ahead of `item:{id}`, whose `{id}` takes the rest of the IRI:
+        // bound after it, `item:12:state` would be read as an item whose id is `12:state`.
+        .bind(
+            ItemPartGrammar::part("state"),
+            flight::StateEndpoint {
+                lifecycles: Arc::clone(&lifecycles),
+            },
+        )
+        .bind(
+            ItemPartGrammar::with_value("state", "value"),
+            flight::AssertionEndpoint {
+                assertion: flight::Assertion::State,
+                lifecycles: Arc::clone(&lifecycles),
+            },
+        )
+        .bind(
+            ItemPartGrammar::with_value("holder", "holder"),
+            flight::AssertionEndpoint {
+                assertion: flight::Assertion::Holder,
+                lifecycles: Arc::clone(&lifecycles),
+            },
+        )
+        .bind(
+            ItemPartGrammar::part("closed"),
+            flight::AssertionEndpoint {
+                assertion: flight::Assertion::Closed,
+                lifecycles: Arc::clone(&lifecycles),
+            },
+        )
         .bind(LedgerGrammar::with_id("item"), ItemEndpoint)
         .bind(LedgerGrammar::action("append"), AppendEndpoint)
         .bind(LedgerGrammar::action("comment"), CommentEndpoint)

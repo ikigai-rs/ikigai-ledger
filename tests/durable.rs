@@ -168,3 +168,75 @@ fn concurrent_keyed_appends_file_one_item_on_the_durable_store() {
         let _ = std::fs::remove_dir_all(&path);
     }
 }
+
+/// 5. **A state transition's compare-and-set holds on RocksDB** (ledger #775), for the same
+///    reason as the keyed append: the guarantee is the store's write lock across one update's
+///    evaluation and insert. Eight writers move one item out of `queued` at once, each to its
+///    own state; exactly one succeeds, the rest are Conflicts, and one state is stored.
+#[test]
+fn concurrent_transitions_from_one_state_apply_once_on_the_durable_store() {
+    for round in 0..5 {
+        let path = scratch(&format!("state-{round}"));
+        let kernel = kernel_over(DurableStore::open(&path).expect("open the store"));
+        append(&kernel, "In a wave", &[]);
+        sink(
+            &kernel,
+            "urn:iki:ledger:item:1:state",
+            &[("from", "filed"), ("to", "queued")],
+        );
+        let barrier = std::sync::Barrier::new(8);
+        let targets = [
+            "reviewed",
+            "resolving",
+            "refining",
+            "shipping",
+            "filed",
+            "reviewed",
+            "resolving",
+            "refining",
+        ];
+        let answers: Vec<Result<String, ikigai_core::Error>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = targets
+                .iter()
+                .map(|to| {
+                    let (kernel, barrier) = (&kernel, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        try_verb(
+                            kernel,
+                            Verb::Sink,
+                            "urn:iki:ledger:item:1:state",
+                            &[("from", "queued"), ("to", to)],
+                        )
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(
+            answers.iter().filter(|a| a.is_ok()).count(),
+            1,
+            "round {round}: {answers:#?}"
+        );
+        assert!(
+            answers
+                .iter()
+                .filter_map(|a| a.as_ref().err())
+                .all(|e| matches!(e, ikigai_core::Error::Conflict(_))),
+            "round {round}: {answers:#?}"
+        );
+        let stored = select(
+            &kernel,
+            "SELECT (COUNT(?s) AS ?n) WHERE { GRAPH <urn:iki:ledger:graph:default> \
+             { ?i <https://ikigai-rs.dev/ns/ledger#state> ?s } }",
+        );
+        // `filed` is absence, so a winner that moved it there leaves zero; anything else, one.
+        let winner_filed = answers
+            .iter()
+            .any(|a| a.as_ref().is_ok_and(|text| text.contains(" filed ")));
+        let want = if winner_filed { "\"0\"" } else { "\"1\"" };
+        assert!(stored.contains(want), "round {round}: {stored}");
+        drop(kernel);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}

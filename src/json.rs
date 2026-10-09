@@ -184,6 +184,12 @@ pub struct Item {
     /// document from 0.4.1 still reads.
     #[serde(default)]
     pub defects: Vec<String>,
+    /// The lifecycle state it is in: `filed` when it holds none, the state's name when it
+    /// holds one (`queued`), and `null` when it holds several — which only an out-of-band
+    /// write produces, and which the ledger's doctor reports. Added in 0.5.0;
+    /// `#[serde(default)]`, so an earlier document reads with `null` here.
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 /// `item:{id}`.
@@ -326,6 +332,38 @@ pub struct Answer {
     pub comment: Option<Comment>,
 }
 
+/// `…:item:{id}:state` — read, or the answer of a transition.
+///
+/// `outcome` and `from` are present only on a transition's answer: `outcome` is
+/// `transitioned`, or `unchanged` when `to` was the state it was already in (nothing was
+/// written), and `from` is the state it left.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StateDocument {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// The item.
+    pub item: ItemRef,
+    /// The ledger's lifecycle — the `{name}` of `urn:iki:ledger:lifecycle:{name}`.
+    pub lifecycle: String,
+    /// The state's name; `filed` when the item holds no `ledger:state`.
+    pub state: String,
+    /// Whether that state is in flight (worked under a claim).
+    pub in_flight: bool,
+    /// Who picks the item up from that state; `null` exactly when it is in flight.
+    pub drain: Option<String>,
+    /// When the item entered that state; `null` for an item that has never had one.
+    pub since: Option<String>,
+    /// `transitioned` or `unchanged` (a transition's answer only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The state it left (a transition's answer only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+}
+
 // ------------------------------------------------------------------ building them
 
 /// One compact line of JSON and a newline — what every document here is served as.
@@ -410,6 +448,7 @@ pub(crate) fn item(
         links,
         comments: comments.iter().map(self::comment).collect(),
         defects: item.defects.clone(),
+        state: item.state().map(str::to_string),
     }
 }
 

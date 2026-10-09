@@ -126,15 +126,21 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:label` | Sink · Delete | tag / untag | `write:{ledger}` |
 | `…:{ledger}:purge` | Delete | destroy, leaving a tombstone | `purge:{ledger}` |
 | `…:{ledger}:next` | Source | the ready set, ranked | `read:{ledger}` |
+| `…:{ledger}:item:{id}:state` | Source · Sink | the one lifecycle state; a compare-and-set transition | `read` / `write` of `{ledger}` |
+| `…:{ledger}:item:{id}:state:{value}` | Exists | is it in that state? | `read:{ledger}` |
+| `…:{ledger}:item:{id}:holder:{holder}` | Exists | is it held by that holder? | `read:{ledger}` |
+| `…:{ledger}:item:{id}:closed` | Exists | is it closed? | `read:{ledger}` |
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
 | `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
+| `urn:iki:ledger:lifecycle:{name}` | Source · Exists | the legal states, in order | any `read:*` |
 
-The last two carry no ledger segment because neither is a ledger's own state: the
+The last three carry no ledger segment because neither is a ledger's own state: the
 inventory spans them, and a policy is a property of the host's configuration. **The
 capability column is only half the grant** — every row but the last also needs the store's
 per-graph token for that ledger; see "What is enforced, and where" for the whole list.
-`urn:iki:ledger:policy:{name}` is the exception that needs no store grant at all: a policy
-is code the host registered at boot and nothing about it is in the graph.
+`urn:iki:ledger:policy:{name}` and `urn:iki:ledger:lifecycle:{name}` are the exceptions that
+need no store grant at all: each is configuration the host registered at boot, and nothing
+about it is in the graph.
 
 Every read serves `text/plain` (the default — a line per item, greppable) and
 `text/turtle` (the graph); `items`, `item:{id}` and `next` also serve `application/json`,
@@ -176,7 +182,7 @@ because the data has to say which ledger it is in even when the request did not.
 
 ⚠ **The sugar costs a reserved-word list.** `urn:iki:ledger:items` has to mean *the
 default ledger's listing* rather than *a ledger called `items`*, and only one of those can
-be true — so `append`, `items`, `next`, `policy`, `ledgers` and eleven others are not
+be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and thirteen others are not
 available as ledger names, and a name that is refused says which word it must not use.
 Names are otherwise lowercase letters, digits, `-` and `_`; the shape is fixed because the
 name becomes a capability token that is matched **exactly**, and a token must not be
@@ -308,8 +314,11 @@ object is the same wherever it appears:
   "links":[{"type":"blocks","target":{"number":13,"display":"#13","iri":"urn:iki:ledger:default:item:01m5…"}}],
   "comments":[{"id":"urn:iki:ledger:default:comment:01m6…","author":"chris",
                "time":"2026-09-15T00:00:00.000Z","text":"looked at it"}],
-  "defects":[]}}
+  "defects":[],"state":"filed"}}
 ```
+
+`state` is the item's lifecycle state: `filed` when it holds none, and `null` only when an
+out-of-band write left it holding several (see "Lifecycle state").
 
 `defects` is empty for every item written through a ledger Sink. When an out-of-band write
 left one of its timestamps unreadable or missing, it names that value
@@ -496,6 +505,105 @@ Two things that were designed in rather than discovered later:
 ⚠ **Selection OFFERS; it never authorizes.** `next` naming an item is an affordance. Acting
 on it still requires the actor's own capability, checked by the kernel at that action.
 
+## Lifecycle state: one value, moved by one update
+
+kata-flight keeps an item's place in its shipping loop in `lifecycle:*` labels, "at most one" by
+convention, and moves it by removing one label and adding the next. That is two writes, so a
+crash or a race between them leaves two labels, which its reaper then hunts for. This ledger
+has label add and label remove too, and **composing a transition out of them would reproduce
+that defect exactly** (`tests/lifecycle_state.rs` reproduces it, as a record). So the state is
+its own resource:
+
+```text
+$ source urn:iki:ledger:item:12:state
+filed
+$ sink urn:iki:ledger:item:12:state from=filed to=queued
+#12 queued (was filed)
+$ sink urn:iki:ledger:item:12:state from=filed to=reviewed
+conflict: #12 is in `queued`, not `filed`. A transition is a compare-and-set: …
+```
+
+- **One value or none.** An item holds at most one `ledger:state`, and an item that holds none
+  is in the state named **`filed`**, so absence is a state with an owner and not a residue.
+- **A transition is a compare-and-set in ONE store update.** `to=` and `from=` are both
+  required; the update's `WHERE` holds only while the item is in exactly `from`, and with no
+  solution the `DELETE … INSERT` does nothing. The store holds its write lock across one
+  update's evaluation and insert, so an interrupted transition leaves the old state or the new
+  one, never both and never neither, and of two writers moving one item out of one state
+  **exactly one wins and the other gets a typed `Conflict` naming the state the item is in
+  now**. The update cannot report whether it applied, so it writes a receipt
+  (`ledger:stateToken`, minted per transition) and reads it back; a read of the state alone
+  could not tell two racers apart when both asked for the same `to=`. Twenty rounds of that
+  race run in memory and five on RocksDB.
+- **A state outside the lifecycle is refused** (`InvalidArgument`, naming the legal ones)
+  before anything is read. `from=X to=X` is answered `unchanged` without a write, because a
+  no-op update still invalidates every cached read of the ledger. A refused transition writes
+  nothing, not even `dcterms:modified`.
+- `content=` is an optional note, recorded as a comment when the item moves; `as=application/json`
+  answers `{schema, ledger, item, lifecycle, state, in_flight, drain, since, outcome, from}`.
+- `close` does not touch the state, and the state does not touch `close`: they are different
+  facts, and a loop that wants an item closed AND out of the flight asks for both.
+
+### Lifecycles are resources
+
+`urn:iki:ledger:lifecycle:{name}` is a small Turtle document: the states in order, which are
+**in flight** (worked under a claim) and, for every state that is not, the **drain** that owns
+an item parked there. One ships built in, **`kata-flight`**:
+
+| state | in flight | drain |
+| --- | --- | --- |
+| `filed` (no `ledger:state`) | no | `triage` |
+| `queued` | no | `review-gate` |
+| `reviewed` | no | `ship` |
+| `resolving` | yes | — |
+| `refining` | yes | — |
+| `shipping` | yes | — |
+
+The state names are kata-flight's; the drain names are ours. A state's IRI is
+`urn:iki:ledger:lifecycle:{lifecycle}:{state}` and that IRI is what `ledger:state` holds, so a
+state from another lifecycle can never pass for one of this one's. A host brings its own the
+way it brings its own ordering policies:
+
+```rust
+let config = ikigai_ledger::SpaceConfig::default().lifecycles(
+    Lifecycles::new(vec![Lifecycle::kata_flight(), Lifecycle::parse(MY_TTL)?])
+        .assign("acme", "my-lifecycle"),
+);
+let space = ikigai_ledger::space_with(config);
+```
+
+**One lifecycle per ledger, fixed by the host** — the first registered, unless `assign` names
+another — where an ordering policy is chosen per request. A policy only orders an answer; a
+lifecycle decides which values a state may hold, and two of them in one ledger would let two
+writers disagree about what is legal. `Lifecycle::parse` refuses, at boot, every shape the
+state resource relies on not having: a state whose IRI is not `{lifecycle}:{name}`, duplicate
+names or orders, a state outside the flight with no drain, a state in flight with one, and a
+lifecycle that does not declare `filed` first.
+
+### Assertions: ask whether a step happened
+
+```text
+$ exists urn:iki:ledger:item:12:state:resolving
+true
+$ exists urn:iki:ledger:item:12:holder:urn:agents:session:4f2a
+true
+$ exists urn:iki:ledger:item:12:closed
+false
+```
+
+A loop that has just claimed, moved or closed an item asks `exists` on the NAME of what should
+now be true, and stops on `false` — so a skipped step is a failed check rather than a narrated
+success. `holder:none` asks whether it is unclaimed and `holder:any` whether anyone holds it
+(the `holder=` filter's keywords). An assertion about an item that does not exist is `false`; a
+state name the ledger's lifecycle does not declare is **refused**, so a typo cannot read as "not
+in that state". Each is a cacheable read under the store's write threads, so an unchanged
+ledger answers from cache and **a write to the item invalidates it** (pinned).
+
+⚠ **An item part takes a number or an opaque id, never `key:{key}`.** A key may contain `:`, so
+`item:key:a:state` could be the state of the item keyed `a` or the item keyed `a:state` — and
+the second is what `item:{id}` has answered since 0.4.0, so it keeps it. Reach a keyed item's
+parts through its number or its IRI (`{iri}:state` works, since the IRI's id is opaque).
+
 ## Levels: different types, shared plumbing
 
 Every item asserts `ledger:Item`, and may **also** assert a more specific class for its
@@ -668,12 +776,31 @@ one graph.
 
 ## Status
 
-All fourteen resources are bound, tested, and walked clean by `ikigai-conformance`
+All nineteen resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces).
 
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### Next (a minor release): lifecycle state and assertions (ledger #775, step 1)
+
+The first of kata-flight's ledger seams. Additive in behavior — every request 0.4.2 accepted
+answers the same bytes in the plain face, and the JSON face gains one field — but **a minor
+release**, because three public constants change type: `ledger::RESERVED` gains `lifecycle`
+(19 words), `vocabulary::STRUCTURAL_CLASSES` gains `Lifecycle` and `LifecycleState` (12), and
+a `[&str; 18]` binding of the old array stops compiling. And `lifecycle` is now a reserved
+ledger name: a ledger called that could not be told apart from `urn:iki:ledger:lifecycle:{name}`.
+
+- **`…:item:{id}:state`** (Source, Sink): one state or none (`filed`), moved by a compare-and-set
+  in one store update; a lost race is a typed `Conflict`. See "Lifecycle state".
+- **`urn:iki:ledger:lifecycle:{name}`** (Source, Exists): the lifecycles a host offers; the
+  built-in is `kata-flight`. `SpaceConfig` and `space_with` take a host's own.
+- **Assertions** (Exists): `…:item:{id}:state:{value}`, `…:holder:{holder}`, `…:closed`.
+- **JSON**: every item object gains `state`. The plain item detail gains a `state:` line, only
+  for an item that has one.
+- Vocabulary: `ledger:Lifecycle`, `LifecycleState`, `hasState`, `order`, `inFlight`, `drain`,
+  `state`, `stateAt`, `stateToken`.
 
 ### 0.4.2 (2026-10-07): one bad timestamp no longer drops an item (ledger #866)
 
