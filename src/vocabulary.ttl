@@ -361,3 +361,57 @@ ledger:leverage a rdf:Property ;
     rdfs:range xsd:integer ;
     rdfs:label "leverage" ;
     rdfs:comment "How many OPEN items this one blocks, transitively. It falls out of the link graph for free and is usually the best single signal, because finishing a blocker converts several unready items into ready ones — and a priority sort cannot see it at all." .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Lifecycles: the one state an item is in, and the vocabulary that says which are legal
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:Lifecycle a rdfs:Class ;
+    rdfs:label "Lifecycle" ;
+    rdfs:comment "The legal states an item moves through, in order, as a resource at urn:iki:ledger:lifecycle:{name}: which are IN FLIGHT (worked under a claim) and, for every other state, the DRAIN that owns an item parked there. Host configuration like a ledger:Policy, but fixed per ledger rather than chosen per request: a policy only orders an answer, while a lifecycle decides which values a state may hold. ★ An item holding no ledger:state is in the state named `filed`, which every lifecycle declares, so absence is a state with an owner rather than a residue." .
+
+ledger:LifecycleState a rdfs:Class ;
+    rdfs:label "LifecycleState" ;
+    rdfs:comment "One state of a ledger:Lifecycle, named {lifecycle IRI}:{name} so the IRI a transition writes is the one the lifecycle declares. rdfs:label is its name." .
+
+ledger:hasState a rdf:Property ;
+    rdfs:domain ledger:Lifecycle ;
+    rdfs:range ledger:LifecycleState ;
+    rdfs:label "hasState" ;
+    rdfs:comment "A state of this lifecycle. The states' ledger:order puts them in sequence." .
+
+ledger:order a rdf:Property ;
+    rdfs:domain ledger:LifecycleState ;
+    rdfs:range xsd:integer ;
+    rdfs:label "order" ;
+    rdfs:comment "A state's position in its lifecycle; `filed` is first. Unique within one lifecycle." .
+
+ledger:inFlight a rdf:Property ;
+    rdfs:domain ledger:LifecycleState ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "inFlight" ;
+    rdfs:comment "Whether an item in this state is being worked, and so should be held by a claim. The doctor reports an in-flight item with no claim (abandoned) and a machine claim on an item that is not in flight (orphaned)." .
+
+ledger:drain a rdf:Property ;
+    rdfs:domain ledger:LifecycleState ;
+    rdfs:range xsd:string ;
+    rdfs:label "drain" ;
+    rdfs:comment "Who picks an item up from this state: present exactly when the state is not in flight. The contract's rule that nothing parks outside the flight without saying who owns it, made a required property of the vocabulary." .
+
+ledger:state a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range ledger:LifecycleState ;
+    rdfs:label "state" ;
+    rdfs:comment "The ONE lifecycle state this item is in; absent means `filed`. Written only by urn:iki:ledger:{ledger}:item:{id}:state, as a compare-and-set in a single store update, so an interrupted transition leaves the old state or the new one and never both. ⚠ Two values can only come from an out-of-band write, and the doctor reports them." .
+
+ledger:stateAt a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "stateAt" ;
+    rdfs:comment "When the item entered its current state, from the kernel's clock." .
+
+ledger:stateToken a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:string ;
+    rdfs:label "stateToken" ;
+    rdfs:comment "An opaque id minted for each transition and written by it: the receipt the compare-and-set reads back to learn whether ITS update was the one that applied. Two transitions racing from one state to the same state would otherwise both read back the state they asked for and both report success." .

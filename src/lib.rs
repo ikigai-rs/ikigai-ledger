@@ -22,6 +22,17 @@
 //! urn:iki:ledger:{ledger}:next       Source              the ready set, ranked      read
 //! urn:iki:ledger:ledgers             Source              which ledgers exist        read
 //! urn:iki:ledger:policy:{name}       Source              what a policy weighs       read
+//! urn:iki:ledger:lifecycle:{name}    Source              the legal states, in order read
+//! ```
+//!
+//! An item also has PARTS, named under its own IRI — its lifecycle state, and the assertions
+//! a loop checks after each step (see [`lifecycle`] and `README.md`, "Lifecycle state"):
+//!
+//! ```text
+//! …:{ledger}:item:{id}:state              Source Sink   one state; a compare-and-set     read/write
+//! …:{ledger}:item:{id}:state:{value}      Exists        is it in that state?             read
+//! …:{ledger}:item:{id}:holder:{holder}    Exists        is it held by that holder?       read
+//! …:{ledger}:item:{id}:closed             Exists        is it closed?                    read
 //! ```
 //!
 //! # Composition: this crate owns no bytes
@@ -107,14 +118,18 @@
 pub mod endpoints;
 pub mod json;
 pub mod ledger;
+pub mod lifecycle;
 pub mod model;
 pub mod policy;
 pub mod select;
 pub mod sparql;
 pub mod vocabulary;
 
-pub use endpoints::{space, space_with_policies, CAP_DELETE, CAP_PURGE, CAP_READ, CAP_WRITE};
+pub use endpoints::{
+    space, space_with, space_with_policies, SpaceConfig, CAP_DELETE, CAP_PURGE, CAP_READ, CAP_WRITE,
+};
 pub use ledger::Ledger;
+pub use lifecycle::{Lifecycle, Lifecycles};
 pub use policy::{Candidate, OrderingPolicy, Ranked, SelectionInputs};
 pub use select::{ready, Selection};
 pub use vocabulary::{LEDGER_NS, VOCABULARY_TTL};

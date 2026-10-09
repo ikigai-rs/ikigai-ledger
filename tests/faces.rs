@@ -295,7 +295,8 @@ fn the_json_item_document_is_schema_1() {
         "text": "looked at it"
       }
     ],
-    "defects": []
+    "defects": [],
+    "state": "filed"
   }
 }"##
     );
@@ -336,7 +337,8 @@ fn the_json_items_document_is_schema_1() {
       "modified": "2026-09-15T00:00:00.000Z",
       "links": [],
       "comments": [],
-      "defects": []
+      "defects": [],
+      "state": "filed"
     },
     {
       "number": 3,
@@ -366,7 +368,8 @@ fn the_json_items_document_is_schema_1() {
           "text": "not worth it"
         }
       ],
-      "defects": []
+      "defects": [],
+      "state": "filed"
     }
   ],
   "unreadable": []
@@ -419,7 +422,8 @@ fn the_json_next_document_is_schema_1() {
         "modified": "2026-09-15T00:00:00.000Z",
         "links": [],
         "comments": [],
-        "defects": []
+        "defects": [],
+        "state": "filed"
       }
     }
   ],
@@ -452,7 +456,8 @@ fn the_json_next_document_is_schema_1() {
         "modified": "2026-09-15T00:00:00.000Z",
         "links": [],
         "comments": [],
-        "defects": []
+        "defects": [],
+        "state": "filed"
       }
     },
     {
@@ -505,7 +510,8 @@ fn the_json_next_document_is_schema_1() {
             "text": "looked at it"
           }
         ],
-        "defects": []
+        "defects": [],
+        "state": "filed"
       }
     }
   ]

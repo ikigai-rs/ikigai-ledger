@@ -1,0 +1,70 @@
+# The kata-flight lifecycle: the states Chris Wensel's shipping loop moves an item through,
+# as a resource (`urn:iki:ledger:lifecycle:kata-flight`) rather than as a label namespace.
+#
+# In kata-flight these are `lifecycle:*` labels, "at most one" by convention, and a transition
+# is a label remove followed by a label add — so a crash or a race between the two leaves an
+# item with two of them, which its reaper then hunts for. Here the state is ONE value set by
+# ONE store update (`urn:iki:ledger:{ledger}:item:{id}:state`), and this document is the
+# vocabulary that update is checked against.
+#
+# The state names are kata-flight's. The DRAIN names are ours: each non-flight state names
+# who picks an item up from it, which is the contract's rule that nothing parks outside the
+# flight without saying who owns it. "No state" is the named state `filed`, declared here so
+# that it has a drain too — absence is a state, not a residue.
+#
+# Every state's IRI is the lifecycle's IRI plus `:{name}`; the loader refuses anything else,
+# because the state Sink writes the IRI it builds from a name.
+
+@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+
+<urn:iki:ledger:lifecycle:kata-flight> a ledger:Lifecycle ;
+    rdfs:label "kata-flight" ;
+    rdfs:comment "kata-flight's shipping loop: select a wave, review-gate it, then per item claim it, resolve it in a worktree, refine it, ship it and close it." ;
+    ledger:hasState
+        <urn:iki:ledger:lifecycle:kata-flight:filed> ,
+        <urn:iki:ledger:lifecycle:kata-flight:queued> ,
+        <urn:iki:ledger:lifecycle:kata-flight:reviewed> ,
+        <urn:iki:ledger:lifecycle:kata-flight:resolving> ,
+        <urn:iki:ledger:lifecycle:kata-flight:refining> ,
+        <urn:iki:ledger:lifecycle:kata-flight:shipping> .
+
+<urn:iki:ledger:lifecycle:kata-flight:filed> a ledger:LifecycleState ;
+    rdfs:label "filed" ;
+    rdfs:comment "Filed and in no wave yet. The item holds no ledger:state at all: absence is this state." ;
+    ledger:order 0 ;
+    ledger:inFlight false ;
+    ledger:drain "triage" .
+
+<urn:iki:ledger:lifecycle:kata-flight:queued> a ledger:LifecycleState ;
+    rdfs:label "queued" ;
+    rdfs:comment "Selected into a wave, waiting for the review gate." ;
+    ledger:order 1 ;
+    ledger:inFlight false ;
+    ledger:drain "review-gate" .
+
+<urn:iki:ledger:lifecycle:kata-flight:reviewed> a ledger:LifecycleState ;
+    rdfs:label "reviewed" ;
+    rdfs:comment "Passed the review gate; the ship loop claims it next." ;
+    ledger:order 2 ;
+    ledger:inFlight false ;
+    ledger:drain "ship" .
+
+<urn:iki:ledger:lifecycle:kata-flight:resolving> a ledger:LifecycleState ;
+    rdfs:label "resolving" ;
+    rdfs:comment "Claimed by the ship loop and being resolved in an isolated worktree." ;
+    ledger:order 3 ;
+    ledger:inFlight true .
+
+<urn:iki:ledger:lifecycle:kata-flight:refining> a ledger:LifecycleState ;
+    rdfs:label "refining" ;
+    rdfs:comment "Resolved; being rebased and reviewed before it ships." ;
+    ledger:order 4 ;
+    ledger:inFlight true .
+
+<urn:iki:ledger:lifecycle:kata-flight:shipping> a ledger:LifecycleState ;
+    rdfs:label "shipping" ;
+    rdfs:comment "Being fast-forward merged and closed." ;
+    ledger:order 5 ;
+    ledger:inFlight true .

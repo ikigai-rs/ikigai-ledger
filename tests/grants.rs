@@ -86,7 +86,9 @@ fn concrete(pattern: &str) -> String {
     let iri = pattern
         .replace("{ledger}", LEDGER)
         .replace("{id}", "1")
-        .replace("{name}", "leverage");
+        .replace("{name}", "leverage")
+        .replace("{value}", "filed")
+        .replace("{holder}", "none");
     assert!(
         !iri.contains('{'),
         "`{pattern}` has a template variable this test cannot expand; teach `concrete` \
@@ -218,6 +220,28 @@ fn script() -> Vec<Step> {
             &[("item", "#1"), ("content", "session-a")],
         ),
         step("ledger-claim", Verb::Delete, at("claim"), &[("item", "#1")]),
+        // The flight seams (ledger #775): a state read and a real transition, and the three
+        // assertions a loop checks after a step — all under the same grant list.
+        step(
+            "ledger-item-state",
+            Verb::Sink,
+            at("item:1:state"),
+            &[("from", "filed"), ("to", "queued")],
+        ),
+        step("ledger-item-state", Verb::Source, at("item:1:state"), &[]),
+        step(
+            "ledger-item-state-is",
+            Verb::Exists,
+            at("item:1:state:queued"),
+            &[],
+        ),
+        step(
+            "ledger-item-holder-is",
+            Verb::Exists,
+            at("item:1:holder:none"),
+            &[],
+        ),
+        step("ledger-item-closed", Verb::Exists, at("item:1:closed"), &[]),
         step(
             "ledger-defer",
             Verb::Sink,
@@ -255,6 +279,18 @@ fn script() -> Vec<Step> {
             "ledger-policy",
             Verb::Exists,
             "urn:iki:ledger:policy:leverage".to_string(),
+            &[],
+        ),
+        step(
+            "ledger-lifecycle",
+            Verb::Source,
+            "urn:iki:ledger:lifecycle:kata-flight".to_string(),
+            &[],
+        ),
+        step(
+            "ledger-lifecycle",
+            Verb::Exists,
+            "urn:iki:ledger:lifecycle:kata-flight".to_string(),
             &[],
         ),
         // Last, because they destroy what the rest acted on. Both need the graveyard's

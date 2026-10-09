@@ -106,6 +106,31 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .arg("content", "An edited title\n\nAnd an edited body."),
         )
         .fixture(Fixture::new("ledger-item", Verb::Delete).binding("id", a))
+        // The item PARTS (ledger #775) point at B, which nothing in the walk deletes. The
+        // transition is the identity (`filed` → `filed`), which is answered without a write:
+        // the walk may fire a Sink more than once, and a real transition fired twice is a
+        // Conflict the second time — correctly, and not a fact about the contract.
+        .fixture(Fixture::new("ledger-item-state", Verb::Source).binding("id", b))
+        .fixture(
+            Fixture::new("ledger-item-state", Verb::Sink)
+                .binding("id", b)
+                .arg("from", "filed")
+                .arg("to", "filed"),
+        )
+        .fixture(
+            Fixture::new("ledger-item-state-is", Verb::Exists)
+                .binding("id", b)
+                .binding("value", "filed"),
+        )
+        .fixture(
+            Fixture::new("ledger-item-holder-is", Verb::Exists)
+                .binding("id", b)
+                .binding("holder", "none"),
+        )
+        .fixture(Fixture::new("ledger-item-closed", Verb::Exists).binding("id", b))
+        // `urn:iki:ledger:lifecycle:{name}` — the built-in.
+        .fixture(Fixture::new("ledger-lifecycle", Verb::Source).binding("name", "kata-flight"))
+        .fixture(Fixture::new("ledger-lifecycle", Verb::Exists).binding("name", "kata-flight"))
         // `urn:iki:ledger:policy:{name}` — a policy this host really offers.
         .fixture(Fixture::new("ledger-policy", Verb::Source).binding("name", "leverage"))
         .fixture(Fixture::new("ledger-policy", Verb::Exists).binding("name", "leverage"))
@@ -150,7 +175,12 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-items")
         .cacheable("ledger-item")
         .cacheable("ledger-next")
+        .cacheable("ledger-item-state")
+        .cacheable("ledger-item-state-is")
+        .cacheable("ledger-item-holder-is")
+        .cacheable("ledger-item-closed")
         .pure("ledger-policy")
+        .pure("ledger-lifecycle")
 }
 
 #[test]
@@ -168,7 +198,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
     // The store's seven are in the walk too (they are bound in this kernel); this test is
-    // about the fourteen THIS crate binds.
+    // about the nineteen THIS crate binds.
     let mut walked: Vec<&str> = report
         .walked
         .iter()
@@ -185,9 +215,14 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-comment",
             "ledger-defer",
             "ledger-item",
+            "ledger-item-closed",
+            "ledger-item-holder-is",
+            "ledger-item-state",
+            "ledger-item-state-is",
             "ledger-items",
             "ledger-label",
             "ledger-ledgers",
+            "ledger-lifecycle",
             "ledger-link",
             "ledger-next",
             "ledger-policy",
