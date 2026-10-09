@@ -868,7 +868,7 @@ All twenty resources are bound, tested, and walked clean by `ikigai-conformance`
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Next (a minor release): lifecycle state, assertions, leases and the doctor (ledger #775)
+### 0.5.0 (2026-10-09): lifecycle state, assertions, leases and the doctor (ledger #775)
 
 kata-flight's ledger seams, steps 1 and 2. Additive in behavior — every request 0.4.2 accepted
 answers the same bytes in the plain face, and the JSON face gains one field — but **a minor
