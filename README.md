@@ -875,6 +875,16 @@ All twenty resources are bound, tested, and walked clean by `ikigai-conformance`
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.6.1 (2026-10-10): a real id nonce in the browser (ledger #797)
+
+On `wasm32-unknown-unknown` the id nonce now comes from `getrandom` over the JS `crypto`
+object. `std` has no entropy source there, so `RandomState` was seeded identically in every
+instance, and every browser load of the same module drew the same nonce: two loads filing one
+item under one frozen clock minted the same IRI (reproduced under node). Native and WASI are
+unchanged, byte for byte. A failed draw is refused as an endpoint error rather than replaced by
+a constant. New target-only dependency: `getrandom` 0.3.4 with `wasm_js`, already in the graph
+through oxigraph's `js` face.
+
 ### 0.6.0 (2026-10-09): `space()` names itself `urn:iki:space:ledger` (ledger #987)
 
 No resource, face or byte changes. `space()` now claims `urn:iki:space:ledger`
