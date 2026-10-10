@@ -34,8 +34,12 @@
 mod common;
 
 use common::*;
+use std::sync::Arc;
+
 use ikigai_conformance::{Fixture, Suite};
-use ikigai_core::{Kernel, Verb};
+use ikigai_core::{space_iri, Kernel, Verb};
+use ikigai_ledger::policy::Leverage;
+use ikigai_ledger::SpaceConfig;
 
 /// A kernel with three items filed, and their ids.
 fn seeded() -> (Kernel, String, String, String) {
@@ -182,6 +186,19 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-doctor")
         .pure("ledger-policy")
         .pure("ledger-lifecycle")
+        // SPACE-NAME (ledger #987). `space()` takes no configuration and reads nothing while
+        // it is built, so it names itself. The two configured constructors bind a host's own
+        // policies, lifecycles and claim stamper behind the same IRIs, so they claim nothing
+        // and the host names what it built.
+        .self_named_space("ledger", ikigai_ledger::space)
+        .host_named_space(
+            "ikigai_ledger::space_with(SpaceConfig::default())",
+            ikigai_ledger::space_with(SpaceConfig::default()),
+        )
+        .host_named_space(
+            "ikigai_ledger::space_with_policies(policies)",
+            ikigai_ledger::space_with_policies(vec![Arc::new(Leverage)]),
+        )
 }
 
 #[test]
@@ -190,6 +207,7 @@ fn conforms() {
     let report = suite(&a, &b, &c).run_blocking(&kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+    assert_eq!(space_iri("ledger").as_str(), ikigai_ledger::SPACE_ID);
 }
 
 /// ★ The positive half: a clean report over a walk that reached nothing would look
