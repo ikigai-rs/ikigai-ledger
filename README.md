@@ -898,6 +898,17 @@ All twenty-one resources are bound, tested, and walked clean by `ikigai-conforma
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.6.2 (2026-10-10): `ikigai-store` 0.2.10 is the floor, so a ledger's grants are no network egress (ledger #1085)
+
+A patch: no resource, face, argument or byte changes, and no `src/` change. The `ikigai-store`
+floor moves from 0.2.2 to 0.2.10, a SECURITY floor. Every ledger caller holds this ledger's
+store graph grants, and with them can resolve the store's graph doors directly; up to 0.2.9,
+in a host with `oxigraph/http-client` unified on (`ikigai-cli`), a `SERVICE` or a
+`LOAD … INTO GRAPH` sent there was an outbound request. Reproduced under exactly the
+published grant list against a local stub (three `POST`s from the read doors, a `POST` and
+two `GET`s from the update door); none on 0.2.10. See "SPARQL never leaves the process" above.
+New test gate `http-client` (no code path is cfg'd on it), which CI runs.
+
 ### 0.6.1 (2026-10-10): a real id nonce in the browser (ledger #797); a page says it is one, `about` on its own, true `ledger` summaries (ledger #419, #398, #425)
 
 A patch, by the JSON face's rule: fields and a resource ADDED, nothing renamed, removed or
