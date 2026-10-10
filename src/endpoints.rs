@@ -338,6 +338,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
                 lifecycles: Arc::clone(&lifecycles),
             },
         )
+        .bind(ItemPartGrammar::part("about"), AboutEndpoint)
         .bind(LedgerGrammar::with_id("item"), ItemEndpoint)
         .bind(LedgerGrammar::action("append"), AppendEndpoint)
         .bind(LedgerGrammar::action("comment"), CommentEndpoint)
@@ -774,13 +775,23 @@ fn write_scopes(spec: ikigai_core::ActionSpec, own: &str) -> ikigai_core::Action
 /// contract — the engine, the MCP projection, an agent — can form either spelling from
 /// it, and a catalog probe expands the template with the default rather than a
 /// placeholder.
-fn ledger_arg() -> ArgSpec {
+/// The `ledger` ArgSpec of the resource at `urn:iki:ledger:{ledger}:{path}`.
+///
+/// ★ **`path` is THIS resource's own tail, never a sibling's.** Until 0.6.1 the summary was
+/// one fixed string naming `urn:iki:ledger:append` as "the" default-ledger form, on every
+/// endpoint that shares this helper — so the manifold told a reader of `comment` to write to
+/// `append`, and one did: the comment became a junk item whose title was the argument string
+/// (ledger #425). A summary is contract an agent is handed, not decoration.
+/// `every_ledger_summary_names_the_resource_it_is_on` in `tests/contract_and_paging.rs` holds
+/// each binding's summary to that binding's own pattern.
+fn ledger_arg(path: &str) -> ArgSpec {
     ArgSpec::new("ledger")
-        .summary(
-            "Which ledger. Omit the segment entirely (`urn:iki:ledger:append`) for the \
-             ledger called `default` — the same resource under a shorter name, gated by \
-             the same capability. Lowercase letters, digits, `-` and `_`.",
-        )
+        .summary(format!(
+            "Which ledger: the `{{ledger}}` segment of `urn:iki:ledger:{{ledger}}:{path}`. Omit \
+             the segment entirely (`urn:iki:ledger:{path}`) for the ledger called `default` — \
+             the same resource under a shorter name, gated by the same capability. Lowercase \
+             letters, digits, `-` and `_`."
+        ))
         .class(v::ext::XSD_STRING)
         .default_value(crate::ledger::DEFAULT)
         .binding()
@@ -808,12 +819,18 @@ fn as_arg(faces: &[&'static str]) -> ArgSpec {
 }
 
 /// The `item` ArgSpec: a short number, an opaque id, or a full IRI.
+///
+/// Shared by every action that takes `item=`, so its summary names only what is true of all
+/// of them: the item IRI in its named form, with the short spelling marked as the `default`
+/// ledger's (the class of ledger #425 — a shared summary naming one concrete case).
 fn item_arg(summary: &str) -> ArgSpec {
     ArgSpec::new("item")
         .summary(format!(
             "{summary} Accepts `#12`, `12`, an opaque id, `key:{{key}}` (the caller's own \
-             name, from `append key=`), or the full `urn:iki:ledger:item:{{id}}` IRI — a \
-             human types the number and a machine carries the IRI."
+             name, from `append key=`), or the item's full IRI, \
+             `urn:iki:ledger:{{ledger}}:item:{{id}}` (`urn:iki:ledger:item:{{id}}` in the \
+             ledger called `default`) — a human types the number and a machine carries the \
+             IRI. An item of another ledger is refused, never looked up here."
         ))
         .class(v::ext::XSD_STRING)
 }
@@ -876,6 +893,7 @@ impl Endpoint for ItemsEndpoint {
             },
             text: inv.inline_str("text").ok().map(str::to_string),
             limit: parse_limit(inv, 50)?,
+            offset: parse_count(inv, "offset", 0)?,
         };
         let items = model::load_items(&client, &filter).await?;
         if want == TURTLE {
@@ -892,6 +910,8 @@ impl Endpoint for ItemsEndpoint {
                 schema: json::SCHEMA,
                 ledger: client.ledger().name().to_string(),
                 count: rendered.len(),
+                total: Some(model::count_items(&client, &filter).await?),
+                offset: filter.offset,
                 items: rendered,
                 unreadable: model::defects(&client)
                     .await?
@@ -901,14 +921,42 @@ impl Endpoint for ItemsEndpoint {
             };
             return Ok(json_face(json::render(&doc)?));
         }
-        let mut text = if items.is_empty() {
+        // ★ **The footer states the PAGE and the TOTAL, and they are different numbers**
+        // (ledger #419). Until 0.6.1 it said `50 item(s)` — the length of a page worded as a
+        // count of items — over a ledger of 385, and a reader reported the ledger as seven
+        // times smaller than it was. The total is a COUNT query, never `items.len()`, and a
+        // page smaller than the set names the argument that reaches the rest. The whole set
+        // on one page keeps the old `N item(s)` line, which is grepped.
+        let total = model::count_items(&client, &filter).await?;
+        let limit = model::page_limit(&filter);
+        let mut text = if total == 0 {
             "no items match\n".to_string()
+        } else if items.is_empty() {
+            format!(
+                "no items on this page: {total} item(s) match, and offset={} is past the \
+                 last of them\n",
+                filter.offset
+            )
         } else {
             let mut out: String = items
                 .iter()
                 .map(|item| format!("{}\n", item.line()))
                 .collect();
-            out.push_str(&format!("\n{} item(s)\n", items.len()));
+            let last = (filter.offset + limit).min(total);
+            if filter.offset == 0 && last == total {
+                out.push_str(&format!("\n{total} item(s)\n"));
+            } else {
+                out.push_str(&format!(
+                    "\n{}–{last} of {total} item(s)",
+                    filter.offset + 1
+                ));
+                if last < total {
+                    out.push_str(&format!(
+                        " — pass offset={last} for the next page, or a larger limit="
+                    ));
+                }
+                out.push('\n');
+            }
             out
         };
         // ★ The corpus check, on the read side. Anyone holding the store's write scope can
@@ -964,7 +1012,7 @@ impl Endpoint for ItemsEndpoint {
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)
-                .input(ledger_arg())
+                .input(ledger_arg("items"))
                 .input(
                     ArgSpec::new("status")
                         .summary("Which items: open (the default), closed, or all.")
@@ -1039,9 +1087,27 @@ impl Endpoint for ItemsEndpoint {
                 )
                 .input(
                     ArgSpec::new("limit")
-                        .summary("At most this many items (default 50).")
+                        .summary(
+                            "At most this many items on the page (default 50; `0` means 500). \
+                             A page is not the set: the plain face's footer and the JSON \
+                             face's `total` give how many items match, and `offset=` reaches \
+                             the rest. The Turtle face is the page's items alone.",
+                        )
                         .class(v::ext::XSD_INTEGER)
                         .default_value("50")
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("offset")
+                        .summary(
+                            "How many matching items to skip, in the listing's order (default \
+                             0); the next page is at `offset` plus `limit`. ⚠ The order is \
+                             most recently updated first, so an item updated between two page \
+                             reads moves to the front and is missed or repeated: when the \
+                             whole set matters, read it as one page.",
+                        )
+                        .class(v::ext::XSD_INTEGER)
+                        .default_value("0")
                         .optional(),
                 )
                 .input(as_arg(&READ_FACES))
@@ -1055,10 +1121,16 @@ impl Endpoint for ItemsEndpoint {
 /// `limit=`, or `default` when absent — and **refused** when present but not a count,
 /// rather than quietly read as the default (`limit=ten` answered with 50 rows).
 fn parse_limit(inv: &Invocation<'_>, default: usize) -> Result<usize> {
-    match inv.inline_str("limit") {
+    parse_count(inv, "limit", default)
+}
+
+/// A count of items named `name`, or `default` when absent — refused when present but not a
+/// count, as [`parse_limit`] is (`offset=ten` must not quietly read as the first page).
+fn parse_count(inv: &Invocation<'_>, name: &str, default: usize) -> Result<usize> {
+    match inv.inline_str(name) {
         Err(_) => Ok(default),
         Ok(text) => text.trim().parse().map_err(|_| Error::InvalidArgument {
-            name: "limit".to_string(),
+            name: name.to_string(),
             detail: format!("`{text}` is not a count of items"),
         }),
     }
@@ -1155,7 +1227,15 @@ impl Endpoint for ItemEndpoint {
                 let now = now_ms(inv)?;
                 let item = require_item(&client, id).await?;
                 let mut updates = Vec::new();
-                if let Ok(content) = inv.inline_str("content") {
+                // ★ **An EMPTY `content` is no content** (ledger #398). The engine's `sink`
+                // always sends `content` — the piped value, or the empty string when nothing
+                // was piped (`ikigai-engine`'s `write_request`) — so `sink …:item:12
+                // priority=3` arrives carrying `content=""`. Read as "replace the title with
+                // nothing" it was refused, which made every scalar edit from the command line
+                // impossible without resending the title and body verbatim. A blank title is
+                // refused anyway, so a blank `content` cannot mean a title edit: it means none.
+                let given = inv.inline_str("content").ok();
+                if let Some(content) = given.filter(|c| !c.trim().is_empty()) {
                     let (title, body) = split_content(content)?;
                     updates.push(replace_one(
                         &client,
@@ -1195,6 +1275,11 @@ impl Endpoint for ItemEndpoint {
                     }
                 }
                 if updates.is_empty() {
+                    // Nothing to change. A blank `content` alone still gets the title's
+                    // sentence, since that is what its sender most likely meant to send.
+                    if let Some(blank) = given {
+                        split_content(blank)?;
+                    }
                     return Err(Error::MissingArgument("content".to_string()));
                 }
                 updates.push(touch(&client, &item.iri, now));
@@ -1246,7 +1331,7 @@ impl Endpoint for ItemEndpoint {
             .verb(Verb::Meta)
             .action(read_action(
                 ikigai_core::ActionSpec::new(Verb::Source)
-                    .input(ledger_arg())
+                    .input(ledger_arg("item:{id}"))
                     .summary("The item, its metadata, its links and its comments.")
                     .input(id_input())
                     .input(as_arg(&READ_FACES))
@@ -1256,18 +1341,20 @@ impl Endpoint for ItemEndpoint {
             ))
             .action(read_action(
                 ikigai_core::ActionSpec::new(Verb::Exists)
-                    .input(ledger_arg())
+                    .input(ledger_arg("item:{id}"))
                     .summary("Whether the item exists.")
                     .input(id_input())
                     .output(PLAIN),
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("item:{id}"))
                     .summary(
                         "Edit the item: `content` replaces the title and body (first line, \
                          then the rest), `priority` replaces the priority, `about` ADDS a \
-                         target, `revision` replaces the filed-against revision.",
+                         target, `revision` replaces the filed-against revision. A blank \
+                         `content` — what `sink` sends when nothing is piped — changes \
+                         neither title nor body, so each of the others can be set alone.",
                     )
                     .input(id_input())
                     .input(
@@ -1286,8 +1373,9 @@ impl Endpoint for ItemEndpoint {
                     .input(
                         ArgSpec::new("about")
                             .summary(
-                                "Whitespace-separated resource IRIs to ADD. There is no \
-                                 remove yet; see the README's gaps.",
+                                "Whitespace-separated resource IRIs to ADD. \
+                                 `urn:iki:ledger:{ledger}:about` adds and removes them on \
+                                 their own.",
                             )
                             .class(v::ext::XSD_STRING)
                             .optional(),
@@ -1303,7 +1391,7 @@ impl Endpoint for ItemEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
-                    .input(ledger_arg())
+                    .input(ledger_arg("item:{id}"))
                     .summary(
                         "Delete the item: its quads and its comments MOVE to \
                          `urn:iki:ledger:graph:{ledger}:deleted`, and a tombstone stays behind \
@@ -1884,7 +1972,7 @@ impl Endpoint for AppendEndpoint {
     fn describe(&self) -> Description {
         let spec = write_scopes(
             ikigai_core::ActionSpec::new(Verb::Sink)
-                .input(ledger_arg())
+                .input(ledger_arg("append"))
                 .summary(
                     "File a new item. The number is allocated from the ledger's counter in \
                      the same statement that writes the item, so two concurrent appends \
@@ -2088,7 +2176,7 @@ impl Endpoint for CommentEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("comment"))
                     .summary("Append a stamped, attributed comment.")
                     .input(item_arg("The item to comment on."))
                     .input(
@@ -2180,7 +2268,7 @@ impl Endpoint for CloseEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("close"))
                     .summary("Set the status to closed and record why.")
                     .input(item_arg("The item to close."))
                     .input(
@@ -2263,7 +2351,7 @@ impl Endpoint for ReopenEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("reopen"))
                     .summary("Set the status back to open.")
                     .input(item_arg("The item to reopen."))
                     .input(
@@ -2628,7 +2716,7 @@ impl Endpoint for ClaimEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("claim"))
                     .summary(
                         "Claim the item for a holder, in one guarded store update; refuses \
                          (Conflict) if someone else holds it. The same holder claiming again \
@@ -2682,7 +2770,7 @@ impl Endpoint for ClaimEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
-                    .input(ledger_arg())
+                    .input(ledger_arg("claim"))
                     .summary("Release the claim, whoever holds it, lease and all.")
                     .input(item_arg("The item to release."))
                     .input(
@@ -2744,7 +2832,7 @@ impl Endpoint for DeferEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("defer"))
                     .summary("Mark the item deferred.")
                     .input(item_arg("The item to defer."))
                     .input(
@@ -2758,7 +2846,7 @@ impl Endpoint for DeferEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
-                    .input(ledger_arg())
+                    .input(ledger_arg("defer"))
                     .summary("Undefer: the item becomes eligible for the ready set again.")
                     .input(item_arg("The item to resume."))
                     .input(
@@ -2867,7 +2955,7 @@ impl Endpoint for LinkEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("link"))
                     .summary("Add the edge.")
                     .input(item_arg("The subject item."))
                     .input(
@@ -2886,7 +2974,7 @@ impl Endpoint for LinkEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
-                    .input(ledger_arg())
+                    .input(ledger_arg("link"))
                     .summary("Remove the edge — how a block cycle is broken.")
                     .input(item_arg("The subject item."))
                     .input(
@@ -2966,7 +3054,7 @@ impl Endpoint for LabelEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("label"))
                     .summary("Add the label.")
                     .input(item_arg("The item to tag."))
                     .input(
@@ -2982,7 +3070,7 @@ impl Endpoint for LabelEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
-                    .input(ledger_arg())
+                    .input(ledger_arg("label"))
                     .summary("Remove the label.")
                     .input(item_arg("The item to untag."))
                     .input(
@@ -2990,6 +3078,108 @@ impl Endpoint for LabelEndpoint {
                             .summary("The label to remove.")
                             .class(v::ext::XSD_STRING),
                     )
+                    .output(PLAIN),
+                CAP_WRITE,
+            ))
+    }
+}
+
+// --------------------------------------------------------------------------- about
+
+/// `…:item:{id}:about`: the item's `ledger:about` targets, added and removed on their own
+/// (ledger #398).
+///
+/// ★ **Why a resource and not only the item Sink's `about=`.** `about` is how an item names
+/// the resources it is filed against — a file, a PR, the session that delivered it — and the
+/// convention of recording the session IRI at delivery lands on an item being CLOSED, never
+/// one being filed. An additive edit should not have to touch the title and body at all, and
+/// a removal had no door anywhere (the README listed it as an omission). The value is
+/// `content`, so it is where the engine routes a pipe or a trailing word:
+/// `sink urn:iki:ledger:item:12:about urn:agents:session:…`.
+///
+/// ⚠ An item PART, not a `…:{ledger}:about` action beside `label` and `link`: a ledger may be
+/// named anything not in [`crate::ledger::RESERVED`], so a new top-level action word would
+/// have to be reserved first — a change to that public constant, and a ledger already called
+/// `about` would stop parsing. `item` is reserved already, so a part costs nothing.
+#[derive(Clone)]
+struct AboutEndpoint;
+
+#[async_trait]
+impl Endpoint for AboutEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let said = match inv.request.verb {
+            Verb::Sink => "about",
+            Verb::Delete => "no longer about",
+            other => return Err(unsupported("ledger-item-about", other)),
+        };
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let now = now_ms(inv)?;
+        let item = require_item(&client, flight::part_id(inv)?).await?;
+        let targets: Vec<&str> = inv.inline_str("content")?.split_whitespace().collect();
+        if targets.is_empty() {
+            return Err(Error::InvalidArgument {
+                name: "content".to_string(),
+                detail: "name at least one resource IRI".to_string(),
+            });
+        }
+        let mut updates = Vec::new();
+        for target in &targets {
+            let triple = format!(
+                "<{}> <{}> {} .",
+                item.iri,
+                v::ABOUT,
+                sparql::iri(target, "content")?
+            );
+            updates.push(match inv.request.verb {
+                Verb::Sink => format!("INSERT DATA {{ {} }}", client.in_graph(&triple)),
+                _ => format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
+            });
+        }
+        updates.push(touch(&client, &item.iri, now));
+        client.update(&batch(&updates)).await?;
+        Ok(plain(format!(
+            "{} {said} {}\n",
+            item.short(),
+            targets.join(" ")
+        )))
+    }
+
+    fn name(&self) -> &str {
+        "ledger-item-about"
+    }
+
+    fn describe(&self) -> Description {
+        let content = |summary: &str| {
+            ArgSpec::new("content")
+                .summary(format!(
+                    "{summary} Whitespace-separated resource IRIs — where a pipe's value or a \
+                     trailing word lands."
+                ))
+                .class(v::ext::XSD_STRING)
+        };
+        Description::new("ledger-item-about")
+            .title("What an item is about")
+            .summary(
+                "The resources an item is filed against (`ledger:about`) — a file, a PR, the \
+                 session that delivered it — added or removed without touching the item's \
+                 title or body. `urn:iki:ledger:items about=` finds items by them.",
+            )
+            .verb(Verb::Meta)
+            .action(write_scopes(
+                ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg("item:{id}:about"))
+                    .summary("Add the targets. Adding one already there is not an error.")
+                    .input(flight::item_id_input())
+                    .input(content("The targets to add."))
+                    .output(PLAIN),
+                CAP_WRITE,
+            ))
+            .action(write_scopes(
+                ikigai_core::ActionSpec::new(Verb::Delete)
+                    .input(ledger_arg("item:{id}:about"))
+                    .summary("Remove the targets. Removing one not there is not an error.")
+                    .input(flight::item_id_input())
+                    .input(content("The targets to remove."))
                     .output(PLAIN),
                 CAP_WRITE,
             ))
@@ -3089,7 +3279,7 @@ impl Endpoint for PurgeEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
-                    .input(ledger_arg())
+                    .input(ledger_arg("purge"))
                     .summary(
                         "Destroy the item's content, leaving only its tombstone — whether \
                          the item is live or was deleted earlier (then it is found by its \
@@ -3219,7 +3409,7 @@ impl Endpoint for NextEndpoint {
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)
-                .input(ledger_arg())
+                .input(ledger_arg("next"))
                 .input(
                     ArgSpec::new("policy")
                         .summary(format!(

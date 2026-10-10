@@ -132,6 +132,18 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .binding("holder", "none"),
         )
         .fixture(Fixture::new("ledger-item-closed", Verb::Exists).binding("id", b))
+        // `about` (ledger #398) points at B too: adding and removing a target leaves the
+        // title, body and state the other parts read untouched.
+        .fixture(
+            Fixture::new("ledger-item-about", Verb::Sink)
+                .binding("id", b)
+                .arg("content", "urn:agents:session:conformance"),
+        )
+        .fixture(
+            Fixture::new("ledger-item-about", Verb::Delete)
+                .binding("id", b)
+                .arg("content", "urn:agents:session:conformance"),
+        )
         // `urn:iki:ledger:lifecycle:{name}` — the built-in.
         .fixture(Fixture::new("ledger-lifecycle", Verb::Source).binding("name", "kata-flight"))
         .fixture(Fixture::new("ledger-lifecycle", Verb::Exists).binding("name", "kata-flight"))
@@ -217,7 +229,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
     // The store's seven are in the walk too (they are bound in this kernel); this test is
-    // about the twenty THIS crate binds.
+    // about the twenty-one THIS crate binds.
     let mut walked: Vec<&str> = report
         .walked
         .iter()
@@ -235,6 +247,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-defer",
             "ledger-doctor",
             "ledger-item",
+            "ledger-item-about",
             "ledger-item-closed",
             "ledger-item-holder-is",
             "ledger-item-state",

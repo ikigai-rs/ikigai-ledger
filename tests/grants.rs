@@ -202,6 +202,18 @@ fn script() -> Vec<Step> {
             &[("item", "#1"), ("content", "rust")],
         ),
         step(
+            "ledger-item-about",
+            Verb::Sink,
+            at("item:1:about"),
+            &[("content", "urn:agents:session:grants")],
+        ),
+        step(
+            "ledger-item-about",
+            Verb::Delete,
+            at("item:1:about"),
+            &[("content", "urn:agents:session:grants")],
+        ),
+        step(
             "ledger-link",
             Verb::Sink,
             at("link"),

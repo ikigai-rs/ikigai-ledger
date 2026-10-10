@@ -314,10 +314,13 @@ fn the_json_items_document_is_schema_1() {
             "urn:iki:ledger:items",
             &json_args(&[("status", "all"), ("limit", "2")])
         )),
+        // `count` is the page and `total` the set (ledger #419): `limit=2` over four items.
         r##"{
   "schema": 1,
   "ledger": "default",
   "count": 2,
+  "total": 4,
+  "offset": 0,
   "items": [
     {
       "number": 4,
