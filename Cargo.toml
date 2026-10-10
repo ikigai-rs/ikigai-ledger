@@ -34,15 +34,21 @@ ikigai-core = "0.1.89"
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's
 # capability unchanged), and a copied constant would drift from the endpoint that
-# enforces it. **0.2.2 is the true minimum**: it is the version carrying both narrow
-# doors — `urn:iki:store:graph-update` (0.2.1) and `urn:iki:store:graph-{select,ask}`
-# with `CAP_READ_GRAPH` (0.2.2) — and this crate resolves nothing through the broad
-# ones except the one root-only listing query documented in `endpoints::LedgersEndpoint`.
-# `ikigai_store::sparql` (0.2.1) is where the term constructors come from. Default features
-# only: the RocksDB backend is the HOST's choice, taken in the host's manifest, and
-# nothing in this library needs it. ⚠ `"0.2"` is a range `>=0.2.0, <0.3.0`; when the
-# store reaches 0.3 this line must move or this crate freezes out of it.
-ikigai-store = { version = "0.2.2", default-features = false }
+# enforces it. The narrow doors — `urn:iki:store:graph-update` (0.2.1) and
+# `urn:iki:store:graph-{select,ask}` with `CAP_READ_GRAPH` (0.2.2) — are what this crate
+# resolves; it touches the broad ones only in the one root-only listing query documented in
+# `endpoints::LedgersEndpoint`. `ikigai_store::sparql` (0.2.1) is where the term constructors
+# come from. ★ **But 0.2.10 is the floor, and it is a SECURITY floor** (ledger #1085, #1083):
+# every ledger caller must also hold this ledger's store graph grants, and with them can
+# resolve those doors directly. Up to 0.2.9, in any host where `oxigraph/http-client` is
+# unified on (`ikigai-cli`, through rudof), a `SERVICE <http://…>` or `LOAD <url> INTO GRAPH`
+# sent there was an outbound request — so a ledger's published grant list was a grant to make
+# network requests. 0.2.10 refuses both at every door. `tests/service_egress.rs` is the
+# reproduction. Default features only: the RocksDB backend is the HOST's choice, taken in the
+# host's manifest, and nothing in this library needs it. ⚠ `"0.2.10"` is a range
+# `>=0.2.10, <0.3.0`; when the store reaches 0.3 this line must move or this crate freezes
+# out of it.
+ikigai-store = { version = "0.2.10", default-features = false }
 
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
@@ -76,8 +82,21 @@ sha2 = "0.10"
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
 
+# ⚠ A test GATE, never a `cfg` on a code path: this crate builds no SPARQL evaluator and has
+# no network code. It turns on `oxigraph/http-client` (through the store) so a build can be
+# made the way `ikigai-cli` is made by unification, where oxigraph installs an HTTP service
+# handler on every evaluator that does not refuse one. `tests/service_egress.rs` cfg's only its
+# CONTROL on this (raw oxigraph really reaches a local stub, so the refusals are not vacuous);
+# the refusals run in every build. CI runs it through `features: "http-client"` (§9c).
+[features]
+http-client = ["ikigai-store/http-client"]
+
 [dev-dependencies]
 futures = "0.3"
+# The control in `tests/service_egress.rs` only: a raw `SparqlEvaluator` the store did NOT
+# build, to show the `http-client` build really does fetch. The same oxigraph the store
+# resolves (it pins 0.5.1 as its floor); default features off so this adds no backend.
+oxigraph = { version = "0.5.1", default-features = false }
 # The module recipe as one test. 0.6.0 is the floor: SPACE-NAME, which holds `space()` to
 # the name it claims and `space_with*` to claiming none (ledger #987). ⚠ `"0.6.0"` is a
 # range `>=0.6.0, <0.7.0`: the previous `"0.3"` was a CEILING that froze this crate out of
@@ -88,7 +107,7 @@ ikigai-conformance = "0.6.0"
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
 # `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
 # costs an `oxrocksdb-sys` compile once per cache.
-ikigai-store = { version = "0.2.2", features = ["persistent"] }
+ikigai-store = { version = "0.2.10", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.

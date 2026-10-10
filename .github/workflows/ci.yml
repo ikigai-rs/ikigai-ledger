@@ -17,11 +17,15 @@ jobs:
       # was two node loads of a wasm-bindgen build filing one item under one frozen clock
       # (same IRI on 0.6.0, different on 0.6.1); it is in the PR that added this line.
       wasm-lib: true
-    # Every other input is absent, and each absence is a decision rather than an oversight:
-    #
-    # `features:` — this crate declares none. The durable backend it is tested against
-    # is `ikigai-store`'s `persistent`, enabled on the DEV-dependency in Cargo.toml, so
-    # `cargo test` already builds and runs `tests/durable.rs` over real RocksDB with no
-    # input here. (It costs an `oxrocksdb-sys` build on a cache miss. That is the price
-    # of testing the composition this module exists for rather than only its in-memory
-    # twin.)
+      # `http-client` is a TEST GATE, not a code path (ledger #1085): it builds the crate
+      # with `oxigraph/http-client` on, the way `ikigai-cli` is built by unification, so
+      # `tests/service_egress.rs`'s control runs and proves its refusals are not vacuous.
+      # The refusals themselves run in the default job too. Unconditional, per §9c.
+      #
+      # The durable backend is NOT a feature here: it is `ikigai-store`'s `persistent`,
+      # enabled on the DEV-dependency in Cargo.toml, so `cargo test` already builds and
+      # runs `tests/durable.rs` over real RocksDB with no input. (It costs an
+      # `oxrocksdb-sys` build on a cache miss. That is the price of testing the
+      # composition this module exists for rather than only its in-memory twin.)
+      features: "http-client"
+    # Every other input is absent, and each absence is a decision rather than an oversight.
