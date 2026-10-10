@@ -128,7 +128,8 @@ pub mod sparql;
 pub mod vocabulary;
 
 pub use endpoints::{
-    space, space_with, space_with_policies, SpaceConfig, CAP_DELETE, CAP_PURGE, CAP_READ, CAP_WRITE,
+    space, space_with, space_with_policies, SpaceConfig, CAP_DELETE, CAP_PURGE, CAP_READ,
+    CAP_WRITE, SPACE_ID,
 };
 pub use ledger::Ledger;
 pub use lifecycle::{Lifecycle, Lifecycles};

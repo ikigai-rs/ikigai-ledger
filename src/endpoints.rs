@@ -100,7 +100,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, ReprType,
+    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, ReprType,
     Representation, Result, UriTemplate, Verb,
 };
 use oxrdf::Graph;
@@ -203,10 +203,19 @@ const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 
 mod flight;
 
+/// The name [`space`] claims: `urn:iki:space:ledger`.
+pub const SPACE_ID: &str = "urn:iki:space:ledger";
+
 /// Bind the ledger with the built-in ordering policies (`priority-recency`, then
 /// `leverage`) and the built-in lifecycle (`kata-flight`).
+///
+/// ★ **The one constructor here that names itself** ([`SPACE_ID`]): it takes no
+/// configuration and reads nothing while it is built, so every call holds the same doors.
+/// [`space_with`] and [`space_with_policies`] stay anonymous — a host's policies, lifecycles
+/// and claim stamper are different doors behind the same IRIs, so only the host that chose
+/// them can name what it built. The name goes on LAST: binding a door after it drops it.
 pub fn space() -> EndpointSpace {
-    space_with(SpaceConfig::default())
+    space_with(SpaceConfig::default()).named(space_iri("ledger"))
 }
 
 /// What a host configures when it binds the ledger: the ordering policies `next` offers and

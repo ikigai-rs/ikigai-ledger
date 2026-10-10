@@ -24,11 +24,12 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 # and where", states exactly which half is which.
 
 [dependencies]
-# 0.1.80 is the true minimum: it is where `Error::Conflict` arrives, and a claim held by
-# someone else is a conflict (the state does not permit it, and no retry changes that), not
-# the transient `Unavailable` it was reported as until 0.2.1 — which `ikigai-throttle`'s
-# circuit breaker counted toward tripping. ⚠ `"0.1.80"` is a range `>=0.1.80, <0.2.0`.
-ikigai-core = "0.1.80"
+# 0.1.89 is the true minimum: it is where `space_iri` arrives (`space()` names itself
+# `urn:iki:space:ledger`, ledger #987), and where binding a door drops a space's name, so a
+# host that extends `space()` does not carry the claim over different doors. (0.1.80 was the
+# floor before: `Error::Conflict`, which a claim held by someone else is.) ⚠ `"0.1.89"` is a
+# range `>=0.1.89, <0.2.0`.
+ikigai-core = "0.1.89"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's
@@ -68,11 +69,11 @@ sha2 = "0.10"
 
 [dev-dependencies]
 futures = "0.3"
-# The module recipe as one test. 0.3 is the floor: AUTHORITY — a mutating action that
-# declares no capability and mutates anyway, so authority over the write cannot be
-# withheld from anyone who can reach it — is exactly the check a module that just made
-# its capabilities per-partition should be running.
-ikigai-conformance = "0.3"
+# The module recipe as one test. 0.6.0 is the floor: SPACE-NAME, which holds `space()` to
+# the name it claims and `space_with*` to claiming none (ledger #987). ⚠ `"0.6.0"` is a
+# range `>=0.6.0, <0.7.0`: the previous `"0.3"` was a CEILING that froze this crate out of
+# 0.4 through 0.6 while it still reported green against the old definition of "done".
+ikigai-conformance = "0.6.0"
 # The store this ledger is written against, with the durable backend ON — so
 # `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables

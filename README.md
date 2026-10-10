@@ -90,6 +90,9 @@ let space = Fallback::new(vec![
 let kernel = Kernel::new(Arc::new(space)).with_clock(Arc::new(SystemClock));
 ```
 
+`space()` names itself `urn:iki:space:ledger` (`ikigai_ledger::SPACE_ID`); `space_with(…)` and
+`space_with_policies(…)` claim no name, because the host chose their doors and names them.
+
 Three things a host must know, each of which is a real failure otherwise:
 
 - **The ledger is inert without a store space in the same kernel.** Resolving a ledger IRI
