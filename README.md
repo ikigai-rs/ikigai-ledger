@@ -77,9 +77,10 @@ than a column: partitioning by graph costs nothing when you want the whole pictu
 Every read here is a SPARQL query issued at `urn:iki:store:graph-select`, and every write is
 a SPARQL UPDATE at `urn:iki:store:graph-update` — the **narrow** doors, each naming one
 ledger's graph and gated by a grant for that graph.
-[`ikigai-store`](https://crates.io/crates/ikigai-store) (**0.2.2 or later**, which is where
-those doors arrive) owns the dataset, the write lock and the golden threads; this module owns
-the **domain**.
+[`ikigai-store`](https://crates.io/crates/ikigai-store) (**0.2.10 or later**: the doors
+arrived in 0.2.2, and 0.2.10 is where they stopped being network egress; see "SPARQL never
+leaves the process" below) owns the dataset, the write lock and the golden threads; this
+module owns the **domain**.
 
 ```rust
 let store = DurableStore::open(&StoreConfig::load(Some("gonk"))?.path)?;  // owned
@@ -829,6 +830,28 @@ Two consequences worth stating plainly:
   what every caller holds, and a host that binds the store's broad doors on a served
   transport has made a different decision about a different resource. That is the store's
   surface to reason about, not this one's.
+
+### SPARQL never leaves the process: `SERVICE` and `LOAD` are refused
+
+⚠ **The table above is also a grant to evaluate SPARQL**, and that was a network hole until
+`ikigai-store` 0.2.10 (ledger #1085, #1083). A caller holding exactly this table can resolve
+`urn:iki:store:graph-select`, `graph-ask` and `graph-update` on its own ledger's graph
+directly, not only through this module. In any host where `oxigraph/http-client` is unified
+on (`ikigai-cli` has it, through rudof), oxigraph installs an HTTP handler on every evaluator
+that does not refuse one, so a `SERVICE <http://…>` sent there, or a `LOAD <url> INTO GRAPH`,
+was an outbound request with no `urn:cap:net:*` anywhere near it. Reproduced against 0.2.9:
+three `POST`s from the read doors and a `POST` plus two `GET`s from the update door, to a
+local stub, under these grants and nothing else.
+
+This crate itself never evaluates SPARQL (no `SparqlEvaluator`, no oxigraph dependency) and
+never puts caller text into a query except as a term the store builds, so no ledger input can
+spell a `SERVICE`. The fix is the store's, and this crate's part is its **floor, 0.2.10**, so
+a host composing this ledger cannot resolve a store that still fetches.
+`tests/service_egress.rs` holds both halves under the published grants: the store doors
+refuse `SERVICE` and `LOAD` as a typed `InvalidArgument` and nothing reaches the stub, and
+ledger content that spells them is stored and read back as text. Run it with
+`--features http-client` (CI does) to build the crate the way those hosts are built; its
+control, cfg'd on that feature, shows raw oxigraph really fetching in that build.
 
 ## The vocabulary
 
