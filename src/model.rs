@@ -46,6 +46,11 @@ pub struct Filter {
     /// AFTER ranking, never before (kata's `ready --limit N` truncates by recency and
     /// then ranks, so "highest priority" silently means "best of the N most recent").
     pub limit: usize,
+    /// How many matching items to skip before the page starts, in the listing's order — the
+    /// other half of a page (ledger #419). Counted in ITEMS, never in result rows: an item a
+    /// hand edit gave two values of one property is two rows, and a row offset would split it
+    /// across two pages.
+    pub offset: usize,
 }
 
 /// The status half of a [`Filter`].
@@ -787,9 +792,90 @@ pub async fn defects_of(client: &StoreClient<'_, '_>, iri: &str) -> Result<Vec<S
 /// until 0.2.1, so with more than 500 open items the oldest fell out — an older p0 was never
 /// offered, and an item whose blocker fell out was offered as ready. That reads
 /// [`load_open_items`], which has no bound.
+///
+/// The page is `filter.offset` items in, `limit` long. **This is a page, not the set**: say
+/// so beside it with [`count_items`], which is what `urn:iki:ledger:items` does — until 0.6.1
+/// its footer said `50 item(s)` over a ledger of 385, and a reader took it for the total
+/// (ledger #419).
 pub async fn load_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Vec<Item>> {
-    let limit = if filter.limit == 0 { 500 } else { filter.limit };
-    load(client, filter, Some(limit)).await
+    let limit = page_limit(filter);
+    let page = page_iris(client, filter, limit).await?;
+    if page.is_empty() {
+        return Ok(Vec::new());
+    }
+    load(client, filter, Some(&page)).await
+}
+
+/// The page length a listing uses for `filter.limit`: the limit, or 500 for `0`.
+pub fn page_limit(filter: &Filter) -> usize {
+    if filter.limit == 0 {
+        500
+    } else {
+        filter.limit
+    }
+}
+
+/// How many items a filter admits — the whole set, whatever page [`load_items`] returns.
+///
+/// ★ **A COUNT, not the length of a page.** The two are different numbers, and reporting the
+/// second as the first is the defect ledger #419 records. Counted over the pattern a listing
+/// pages through, so an item present but unreadable is counted here and reported, not
+/// listed, by the listing's ⚠ footer ([`defects`]).
+pub async fn count_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<usize> {
+    let query = format!(
+        "SELECT (COUNT(DISTINCT ?item) AS ?n) WHERE {{ {} }}",
+        client.in_graph(&format!("{}{}", listed_pattern(), filter_clauses(filter)?))
+    );
+    Ok(client
+        .select(&query)
+        .await?
+        .first()
+        .and_then(|row| row.get("n"))
+        .and_then(|n| n.as_i64())
+        .map(|n| n.max(0) as usize)
+        .unwrap_or(0))
+}
+
+/// The triple patterns every listed item matches, before the filter's own clauses.
+fn listed_pattern() -> String {
+    format!(
+        "?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
+         <{status}> ?status .\n",
+        type_ = v::ext::TYPE,
+        item_class = v::ITEM_CLASS,
+        number = v::NUMBER,
+        title = v::ext::TITLE,
+        status = v::STATUS,
+    )
+}
+
+/// The IRIs of one page, in the listing's order: grouped by subject BEFORE the `LIMIT` and
+/// `OFFSET`, so both count items. A row bound (what 0.6.0 applied) cut an item a hand edit
+/// had given two rows, and an offset over rows would put the halves on different pages.
+async fn page_iris(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let query = format!(
+        "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {} }} \
+         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) LIMIT {limit} OFFSET {offset}",
+        client.in_graph(&format!(
+            "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
+             OPTIONAL {{ ?item <{modified}> ?modified }}\n{filters}",
+            listed_pattern(),
+            created = v::ext::CREATED,
+            modified = v::ext::MODIFIED,
+            filters = filter_clauses(filter)?,
+        )),
+        offset = filter.offset,
+    );
+    Ok(client
+        .select(&query)
+        .await?
+        .iter()
+        .filter_map(|row| row.get("item").map(|b| b.value.clone()))
+        .collect())
 }
 
 /// **Every** open item in the ledger, unfiltered and unbounded — the pool a computation
@@ -826,18 +912,28 @@ pub async fn matching_iris(
         .collect())
 }
 
+/// Every item the filter admits, or only those of `page` when one is given.
 async fn load(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
-    limit: Option<usize>,
+    page: Option<&[String]>,
 ) -> Result<Vec<Item>> {
-    let limit = limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
+    let values = match page {
+        Some(iris) => format!(
+            "VALUES ?item {{ {} }}\n",
+            iris.iter()
+                .map(|iri| sparql::iri(iri, "item"))
+                .collect::<Result<Vec<_>>>()?
+                .join(" ")
+        ),
+        None => String::new(),
+    };
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires WHERE {{ {} }} \
-         ORDER BY DESC({RECENCY}) DESC(?number){limit}",
+         ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
-            "?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
+            "{values}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
              <{status}> ?status .\n\
              OPTIONAL {{ ?item <{created}> ?created }}\n\
              OPTIONAL {{ ?item <{modified}> ?modified }}\n\

@@ -26,14 +26,16 @@
 //! urn:iki:ledger:lifecycle:{name}    Source              the legal states, in order read
 //! ```
 //!
-//! An item also has PARTS, named under its own IRI — its lifecycle state, and the assertions
-//! a loop checks after each step (see [`lifecycle`] and `README.md`, "Lifecycle state"):
+//! An item also has PARTS, named under its own IRI — its lifecycle state, the assertions a
+//! loop checks after each step (see [`lifecycle`] and `README.md`, "Lifecycle state"), and
+//! what it is about:
 //!
 //! ```text
 //! …:{ledger}:item:{id}:state              Source Sink   one state; a compare-and-set     read/write
 //! …:{ledger}:item:{id}:state:{value}      Exists        is it in that state?             read
 //! …:{ledger}:item:{id}:holder:{holder}    Exists        is it held by that holder?       read
 //! …:{ledger}:item:{id}:closed             Exists        is it closed?                    read
+//! …:{ledger}:item:{id}:about              Sink Delete   add / remove what it is about    write
 //! ```
 //!
 //! # Composition: this crate owns no bytes

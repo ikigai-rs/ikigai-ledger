@@ -47,7 +47,7 @@ use crate::sparql::iso8601;
 const STATE_FACES: [&str; 2] = [PLAIN, JSON];
 
 /// The `id` binding every item part declares.
-fn item_id_input() -> ArgSpec {
+pub(super) fn item_id_input() -> ArgSpec {
     ArgSpec::new("id")
         .summary(
             "The item's number (`12`) or its opaque id. Not `key:{key}`: a key may contain `:`, \
@@ -59,7 +59,7 @@ fn item_id_input() -> ArgSpec {
 }
 
 /// The item an item part names, from the grammar's `id` capture.
-fn part_id<'a>(inv: &'a Invocation<'_>) -> Result<&'a str> {
+pub(super) fn part_id<'a>(inv: &'a Invocation<'_>) -> Result<&'a str> {
     inv.bindings.get("id").ok_or_else(|| {
         Error::Endpoint(
             "no `id` captured: this endpoint is bound to `urn:iki:ledger:{ledger}:item:{id}:…` \
@@ -407,7 +407,7 @@ impl Endpoint for StateEndpoint {
             .verb(Verb::Meta)
             .action(read_action(
                 ikigai_core::ActionSpec::new(Verb::Source)
-                    .input(ledger_arg())
+                    .input(ledger_arg("item:{id}:state"))
                     .summary(
                         "The state's name in text; in JSON, also the lifecycle, whether the \
                          state is in flight, its drain, and when the item entered it.",
@@ -419,7 +419,7 @@ impl Endpoint for StateEndpoint {
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg())
+                    .input(ledger_arg("item:{id}:state"))
                     .summary(
                         "Move the item from `from` to `to` — only if it is in `from` now. A \
                          mismatch is a Conflict naming the state it is in; a `to` outside the \
@@ -474,6 +474,16 @@ impl Assertion {
             Assertion::State => "ledger-item-state-is",
             Assertion::Holder => "ledger-item-holder-is",
             Assertion::Closed => "ledger-item-closed",
+        }
+    }
+
+    /// The tail of this assertion's IRI after the ledger segment — what its `ledger`
+    /// summary names, so the summary is true of this resource and not a sibling's.
+    fn path(self) -> &'static str {
+        match self {
+            Assertion::State => "item:{id}:state:{value}",
+            Assertion::Holder => "item:{id}:holder:{holder}",
+            Assertion::Closed => "item:{id}:closed",
         }
     }
 }
@@ -585,7 +595,7 @@ impl Endpoint for AssertionEndpoint {
             ),
         };
         let mut spec = ikigai_core::ActionSpec::new(Verb::Exists)
-            .input(ledger_arg())
+            .input(ledger_arg(self.assertion.path()))
             .summary(summary)
             .input(item_id_input());
         if let Some(value) = value {
@@ -948,7 +958,7 @@ impl Endpoint for DoctorEndpoint {
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)
-                .input(ledger_arg())
+                .input(ledger_arg("doctor"))
                 .input(as_arg(&STATE_FACES))
                 .output(PLAIN)
                 .output(JSON),

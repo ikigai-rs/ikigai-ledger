@@ -134,6 +134,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}:state:{value}` | Exists | is it in that state? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:holder:{holder}` | Exists | is it held by that holder? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:closed` | Exists | is it closed? | `read:{ledger}` |
+| `…:{ledger}:item:{id}:about` | Sink · Delete | add / remove what it is about, title and body untouched | `write:{ledger}` |
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
 | `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
 | `urn:iki:ledger:lifecycle:{name}` | Source · Exists | the legal states, in order | any `read:*` |
@@ -337,7 +338,7 @@ first".
 | resource | document |
 | --- | --- |
 | `item:{id}` | `{schema, ledger, item}` |
-| `items` | `{schema, ledger, count, items: [item…], unreadable: [{iri, defects}]}` — `unreadable` is the plain face's ⚠ footer, as data: the items NOT in `items`. An item listed with a stand-in timestamp carries its own `defects` instead |
+| `items` | `{schema, ledger, count, total, offset, items: [item…], unreadable: [{iri, defects}]}` — `count` is the PAGE (`items`' length), `total` how many items the filter admits, `offset` how many the page skipped; `count < total` says the page is not the set. `unreadable` is the plain face's ⚠ footer, as data: the items NOT in `items`. An item listed with a stand-in timestamp carries its own `defects` instead |
 | `next` | `{schema, ledger, policy, weighs, generated_at, ready, ranking: [{rank, score, because, item}], excluded: [{why, reason, holder, expires, blocked_by, item}]}` — `why` is `claimed`, `lease-expired`, `deferred` or `blocked` |
 | `doctor` | `{schema, ledger, lifecycle, checked_at, checks, problems: [{check, item: {number, display, iri}, detail, remedy, holder, states, expires}]}` |
 | `append`, `comment`, `close`, `link` | `{schema, ledger, outcome, item: {number, display, iri}, …}` — `outcome` is `filed`, `existing`, `commented`, `closed`, `linked` or `unlinked`, and only that outcome's own fields follow: `status` and `key` (append), `comment` (comment, and close with a note), `reason` (close), `type` and `target` (link) |
@@ -860,22 +861,51 @@ one graph.
 - **No key on an existing item.** A key is given at filing and never changed, so an item
   filed before keys existed cannot gain one through a resource here — that is one SPARQL
   UPDATE over the graph, and a migration's job rather than an endpoint's.
-- **No `about` removal, no comment editing.** Comments are append-only by design; `about`
-  removal is an omission, not a principle.
+- **No comment editing.** Comments are append-only by design.
 - **No `deferred-until` date.** Readiness that turns on the wall clock would go stale in the
   cache with no golden thread to cut it, so resuming is an act rather than the passage of
   time.
 
 ## Status
 
-All twenty resources are bound, tested, and walked clean by `ikigai-conformance`
+All twenty-one resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces).
 
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### 0.6.1 (2026-10-10): a real id nonce in the browser (ledger #797)
+### 0.6.1 (2026-10-10): a real id nonce in the browser (ledger #797); a page says it is one, `about` on its own, true `ledger` summaries (ledger #419, #398, #425)
+
+A patch, by the JSON face's rule: fields and a resource ADDED, nothing renamed, removed or
+retyped (`model::Filter` and `json::ItemsDocument` are `#[non_exhaustive]`).
+
+- **`items` states the page and the total** (ledger #419). It said `50 item(s)` — a page's
+  length worded as a count — over a ledger of 385, and a reader reported it seven times
+  smaller than it was. A page smaller than the set now ends `1–50 of 385 item(s) — pass
+  offset=50 for the next page, or a larger limit=`; the whole set on one page keeps the
+  `N item(s)` line. The total is a COUNT query (`model::count_items`), never the page's
+  length. New `offset=` (refused when not a count), counted in ITEMS: the page's IRIs are
+  grouped by subject before `LIMIT`/`OFFSET`, so an item a hand edit gave two rows takes one
+  slot on one page. JSON gains `total` and `offset` (`#[serde(default)]`, so a 0.6.0 document
+  still deserializes, with `total: None`). The Turtle face is still the page's items alone:
+  it has no count, because carrying one needs a vocabulary term. `next` already stated its
+  ready count beside the ranking and is unchanged.
+- **`about` without resending the body** (ledger #398). The engine's `sink` always sends
+  `content`, empty when nothing is piped, so `sink …:item:12 priority=3` arrived with
+  `content=""` and was refused as a blank title: no scalar edit was possible from the command
+  line without retransmitting the title and body. A blank `content` now changes neither, so
+  `priority=`, `about=` and `revision=` can each be set alone; a blank `content` with nothing
+  else is still refused. And **`…:item:{id}:about`** (Sink, Delete) adds and removes targets
+  as a resource of their own — `sink urn:iki:ledger:item:12:about urn:agents:session:…` —
+  closing the "no `about` removal" omission. An item PART, so no new word is reserved.
+- **Every `ledger` summary names its own resource** (ledger #425). One shared summary named
+  `urn:iki:ledger:append` as the default-ledger form on every endpoint, and an agent that
+  believed it on `comment` filed a junk item instead of a comment. `item=`'s summary now names
+  the item IRI in its named form too. `tests/contract_and_paging.rs` holds every binding's
+  summary to that binding's own pattern.
+
+**The id nonce (ledger #797).**
 
 On `wasm32-unknown-unknown` the id nonce now comes from `getrandom` over the JS `crypto`
 object. `std` has no entropy source there, so `RandomState` was seeded identically in every

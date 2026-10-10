@@ -234,8 +234,17 @@ pub struct ItemsDocument {
     pub schema: u32,
     /// The ledger's name.
     pub ledger: String,
-    /// How many items are in `items` (after `limit`).
+    /// How many items are in `items` — the PAGE, after `offset` and `limit`. Not the total.
     pub count: usize,
+    /// How many items the filter admits, whatever the page — a COUNT, so `count < total`
+    /// says the page is not the set (ledger #419). Added in 0.6.1; `None` only when reading
+    /// a document written before it, never in one this crate writes.
+    #[serde(default)]
+    pub total: Option<usize>,
+    /// How many matching items the page skipped (`offset=`). Added in 0.6.1; `0` in a
+    /// document written before it, which is what those pages were.
+    #[serde(default)]
+    pub offset: usize,
     /// The items, most recently updated first — the plain face's order.
     pub items: Vec<Item>,
     /// Items in the graph that could not be read and are therefore not in `items` — the
