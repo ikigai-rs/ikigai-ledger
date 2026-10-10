@@ -871,6 +871,15 @@ All twenty resources are bound, tested, and walked clean by `ikigai-conformance`
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.6.0 (2026-10-09): `space()` names itself `urn:iki:space:ledger` (ledger #987)
+
+No resource, face or byte changes. `space()` now claims `urn:iki:space:ledger`
+(`ikigai_ledger::SPACE_ID`), so `urn:kernel:topology`, the space diagrams and
+`Resolved::answered_by` name it instead of a skolem, and the cache partitions on that name.
+**A minor release** because every host that binds `space()` sees that change; a host that
+binds `space_with(…)` or `space_with_policies(…)` sees none, since those claim no name. Floors:
+`ikigai-core` 0.1.89, where a later `bind` drops a space's name.
+
 ### 0.5.0 (2026-10-09): lifecycle state, assertions, leases and the doctor (ledger #775)
 
 kata-flight's ledger seams, steps 1 and 2. Additive in behavior — every request 0.4.2 accepted
