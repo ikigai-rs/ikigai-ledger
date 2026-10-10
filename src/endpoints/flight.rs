@@ -339,7 +339,7 @@ impl Endpoint for StateEndpoint {
                     // Nothing to move: answered without a write, for the reason above.
                     "unchanged"
                 } else {
-                    let token = mint_id(now);
+                    let token = mint_id(now)?;
                     client
                         .update(&cas(&client, &item.iri, from, to, &token, now))
                         .await?;

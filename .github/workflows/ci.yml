@@ -8,7 +8,16 @@ concurrency:
 jobs:
   ci:
     uses: ikigai-rs/.github/.github/workflows/rust.yml@main
-    # No inputs, and each absence is a decision rather than an oversight:
+    with:
+      # The lib has wasm-only code since 0.6.1: the id nonce draws from `getrandom` on
+      # wasm32-unknown-unknown, because `std`'s `RandomState` is seeded identically in
+      # every browser instance (ledger #797). Code under a target cfg that no job builds is
+      # code nothing checks, so this lints it. ⚠ It is COMPILE-ONLY: it cannot see the
+      # defect it guards, which only shows at run time, across two loads. The reproduction
+      # was two node loads of a wasm-bindgen build filing one item under one frozen clock
+      # (same IRI on 0.6.0, different on 0.6.1); it is in the PR that added this line.
+      wasm-lib: true
+    # Every other input is absent, and each absence is a decision rather than an oversight:
     #
     # `features:` — this crate declares none. The durable backend it is tested against
     # is `ikigai-store`'s `persistent`, enabled on the DEV-dependency in Cargo.toml, so
@@ -16,8 +25,3 @@ jobs:
     # input here. (It costs an `oxrocksdb-sys` build on a cache miss. That is the price
     # of testing the composition this module exists for rather than only its in-memory
     # twin.)
-    #
-    # `wasm-lib:` — deliberately NOT claimed. Nothing here is wasm-hostile, but a gate
-    # that has never run is not evidence, and this module's whole job is to talk to a
-    # durable store that has no wasm face. When a browser host wants the ledger, the
-    # line goes in with the work that makes it true.
