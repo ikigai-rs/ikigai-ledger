@@ -213,7 +213,11 @@ unique by construction: a process-wide sequence every mint increments, offset by
 per-process random nonce. The clock half makes a raw IRI listing readable; the sequence
 means two ids minted by one process can never collide, and the nonce keeps two processes
 (two ledgers merged later, a restart under a fixed clock) apart with 64 bits of chance.
-Comments are minted the same way.
+Comments are minted the same way. The nonce comes from the operating system through `std`
+natively and under WASI, and from `getrandom` over the JS `crypto` object in the browser
+(`wasm32-unknown-unknown`), where `std` has no entropy source: before 0.6.1 every browser
+load of the same module drew the same nonce, so two loads filing under one clock reading
+minted the same IRI.
 
 ⚠ **Until 0.2.1 the second half was 6 characters of SHA-256 over the title and author**, on
 the premise that one writer meant one write per millisecond. It does not: eight concurrent

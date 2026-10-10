@@ -67,6 +67,15 @@ serde_json = "1"
 # ikigai-log took, so the three join in a query instead of colliding.
 sha2 = "0.10"
 
+# The id nonce's entropy in the BROWSER only (ledger #797). On `wasm32-unknown-unknown`
+# `std` has no entropy source, so `RandomState` — what native and WASI mint from — is
+# seeded the same way in every instance, and every wasm load would mint the same ids.
+# `wasm_js` selects the JS `crypto` backend with no rustflags from 0.3.4, the floor core
+# takes for the same reason; oxigraph's `js` face already puts 0.3.x in this graph, so it
+# costs nothing new. ⚠ `"0.3.4"` is a range `>=0.3.4, <0.4.0`.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
+
 [dev-dependencies]
 futures = "0.3"
 # The module recipe as one test. 0.6.0 is the floor: SPACE-NAME, which holds `space()` to

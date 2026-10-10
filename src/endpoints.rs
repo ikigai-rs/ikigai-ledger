@@ -479,10 +479,12 @@ const CROCKFORD: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
 ///
 /// Ids minted before 0.3 keep the 16-character shape and stay valid: nothing parses an id,
 /// it is only ever compared whole.
-fn mint_id(now: u64) -> String {
+///
+/// Fallible only because the nonce is: see [`process_nonce`].
+fn mint_id(now: u64) -> Result<String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let suffix = process_nonce().wrapping_add(SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let suffix = process_nonce()?.wrapping_add(SEQUENCE.fetch_add(1, Ordering::Relaxed));
     let mut id = String::with_capacity(23);
     for shift in (0..10).rev() {
         id.push(CROCKFORD[((now >> (shift * 5)) & 31) as usize] as char);
@@ -492,22 +494,50 @@ fn mint_id(now: u64) -> String {
     for shift in (0..13).rev() {
         id.push(CROCKFORD[((suffix >> (shift * 5)) & 31) as usize] as char);
     }
-    id
+    Ok(id)
 }
 
-/// A random number fixed for the life of the process.
+/// A random number fixed for the life of the process (or of the wasm instance).
 ///
-/// `RandomState` is the one source of randomness in `std` that needs no dependency and no
-/// filesystem: its keys are seeded from the operating system once per thread. Hashing a
-/// constant through it once, here, yields a per-process nonce.
-fn process_nonce() -> u64 {
-    use std::hash::{BuildHasher, Hasher};
+/// Drawn once, on the first mint. If two first mints race, both draw and one value wins;
+/// every mint after that sees the winner, which is all "fixed for the life of the
+/// process" has to mean.
+fn process_nonce() -> Result<u64> {
     static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *NONCE.get_or_init(|| {
-        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-        // What is hashed does not matter; the keys are the randomness.
-        hasher.write_u8(0);
-        hasher.finish()
+    if let Some(nonce) = NONCE.get() {
+        return Ok(*nonce);
+    }
+    let drawn = entropy()?;
+    Ok(*NONCE.get_or_init(|| drawn))
+}
+
+/// Native (and WASI): `RandomState`, the one source of randomness in `std` that needs no
+/// dependency and no filesystem. Its keys are seeded from the operating system once per
+/// thread, so hashing a constant through it yields a per-process nonce.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn entropy() -> Result<u64> {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    // What is hashed does not matter; the keys are the randomness.
+    hasher.write_u8(0);
+    Ok(hasher.finish())
+}
+
+/// The browser (`wasm32-unknown-unknown`): `getrandom`, over the JS `crypto` object.
+///
+/// ⚠ **Not `RandomState` here: on this target its keys are not random.** `std` has no
+/// entropy source on `wasm32-unknown-unknown`, so `RandomState` is seeded from values that
+/// are the same in every instance of the same module. Before 0.6.1 this function did not
+/// exist and every wasm load drew the SAME nonce: two loads filing one item under one
+/// clock reading minted the same IRI (ledger #797, reproduced under node). A failed draw is
+/// refused rather than papered over, because a constant fallback is exactly that defect.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn entropy() -> Result<u64> {
+    getrandom::u64().map_err(|e| {
+        Error::Endpoint(format!(
+            "this host has no entropy source, so a ledger id cannot be minted safely: \
+             getrandom failed ({e}). In a browser or node this is the JS `crypto` object"
+        ))
     })
 }
 
@@ -646,7 +676,7 @@ async fn write_comment(
     author: Option<&str>,
     now: u64,
 ) -> Result<String> {
-    let id = mint_id(now);
+    let id = mint_id(now)?;
     let comment = client.ledger().comment(&id);
     let mut triples = format!(
         "<{comment}> <{type_}> <{class}> ; <{on}> <{item}> ; <{body}> {text} ; <{created}> {when} .",
@@ -1677,7 +1707,7 @@ impl Endpoint for AppendEndpoint {
         let now = now_ms(inv)?;
         let (title, body) = split_content(inv.inline_str("content")?)?;
         let author = inv.inline_str("author").ok();
-        let id = mint_id(now);
+        let id = mint_id(now)?;
         let iri = client.ledger().item(&id);
 
         let mut triples = format!(
@@ -3591,15 +3621,16 @@ mod tests {
 
     #[test]
     fn an_id_is_time_ordered_and_unique_per_millisecond() {
-        let earlier = mint_id(1_757_700_000_000);
-        let later = mint_id(1_757_700_000_001);
+        let earlier = mint_id(1_757_700_000_000).unwrap();
+        let later = mint_id(1_757_700_000_001).unwrap();
         assert!(earlier < later, "{earlier} should sort before {later}");
         assert_eq!(earlier.len(), 23);
         // ★ The same millisecond, minted twice: distinct by construction, with no content
         // to tell them apart. Until 0.2.1 the second half was a digest of the content, so
         // two identical filings in one millisecond were one item.
-        let ids: std::collections::BTreeSet<String> =
-            (0..10_000).map(|_| mint_id(1_757_700_000_000)).collect();
+        let ids: std::collections::BTreeSet<String> = (0..10_000)
+            .map(|_| mint_id(1_757_700_000_000).unwrap())
+            .collect();
         assert_eq!(ids.len(), 10_000);
         // Every character is Crockford, so an id is safe in an IRI segment as it stands.
         assert!(earlier.bytes().all(|b| CROCKFORD.contains(&b)), "{earlier}");
