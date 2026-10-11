@@ -1085,6 +1085,23 @@ All twenty-two resources are bound, tested, and walked clean by `ikigai-conforma
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.9.0 (2026-10-10): `count`, the total without the corpus check (ledger #1128)
+
+A minor, because it adds a resource and reserves a ledger name (`count`; `ledger::RESERVED` is
+now 21 words). Additive otherwise: every existing face is byte for byte what 0.8.0 served.
+⚠ Neither 0.7.0 nor 0.8.0 was published to crates.io (the latest there is 0.6.2), so 0.9.0
+carries both of them as well.
+
+- **`urn:iki:ledger:{ledger}:count`** (read grants): how many items a filter admits, and
+  nothing else. The same filter arguments as `items`, parsed by the same function and counted
+  by the same query, so the number is `items`' `total` exactly; plain face the bare number,
+  JSON face `{schema, ledger, total}` (`json::CountDocument`), no Turtle. Reading the total
+  through `items limit=1` ran the corpus check behind `unreadable`, two scans of the whole
+  graph and ~60% of the read; `count` costs the COUNT alone, ~16x less at 3000 items. See
+  "The JSON face".
+- **`tests/listing_cost.rs`**, an ignored harness that times each listing face and its parts
+  over a kernel that caches nothing.
+
 ### 0.8.0 (2026-10-10): a hand-back is a state, and the holder is the caller's principal (ledger #1199)
 
 A minor, because behavior changes: `next` no longer offers an item awaiting its dispatcher, a
