@@ -1070,6 +1070,25 @@ All twenty-one resources are bound, tested, and walked clean by `ikigai-conforma
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.8.0 (2026-10-10): a hand-back is a state, and the holder is the caller's principal (ledger #1199)
+
+A minor, because behavior changes: `next` no longer offers an item awaiting its dispatcher, a
+dispatcher's comment clears a hand-back, and a claim taken as a principal is no longer released
+by any claim-grant holder. Additive otherwise: two arguments on `comment`, two terms, three JSON
+fields, a doctor check. `ikigai-core` 0.1.93 is the floor (`Capability::principal`).
+
+- **`comment handback=true`** (comment grant) marks the item `ledger:awaiting
+  <urn:iki:ledger:awaiting:dispatcher>` in the same update as the comment; `next` excludes it
+  (`why: "awaiting-dispatcher"`). Close, reopen, `rejects=true`, or any comment from a caller
+  holding the close grant clears it. On every face; the doctor no longer calls a handed-back
+  in-flight item `abandoned`, and reports `awaiting-closed`. See "Handing back".
+- **Holder = principal**: a claim under a capability carrying a principal records
+  `ledger:claimPrincipal`; releasing it needs a capability acting as that principal, or the
+  dispatcher's override (`close:{ledger}` or `write:{ledger}`), with or without `from=`. Another
+  principal under the same holder name cannot claim or renew it. A host without principals is
+  unchanged. See "Claims".
+- **American spelling** in output: the label answer says `labeled`/`unlabeled`.
+
 ### 0.7.0 (2026-10-10): per-verb grants for claim, comment and close; keyed comments; a close releases the claim (ledger #1178, #1143, #1147)
 
 A minor, because behavior changes: a close now releases the claim it finds (recorded as a
