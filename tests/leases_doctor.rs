@@ -136,7 +136,7 @@ fn a_lease_records_its_expiry_from_the_kernel_clock() {
         claim,
         &serde_json::json!({
             "holder": "kata-ship/0abc", "purpose": null, "kind": "machine",
-            "expires": "2026-09-15T00:30:00.000Z", "lease": "PT30M"
+            "expires": "2026-09-15T00:30:00.000Z", "lease": "PT30M", "principal": null
         })
     );
     let detail = source(&kernel, "urn:iki:ledger:item:1", &[]);
@@ -543,7 +543,8 @@ fn a_clean_ledger_has_a_clean_bill() {
             "abandoned",
             "lease-expired",
             "unknown-state",
-            "two-states"
+            "two-states",
+            "awaiting-closed"
         ])
     );
     let plain = source(&kernel, "urn:iki:ledger:doctor", &[]);

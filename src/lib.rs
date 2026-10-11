@@ -89,6 +89,11 @@
 //! `close`, `reopen`) declare [`CAP_ANY`], the one family both grants satisfy. `README.md`,
 //! "What is enforced, and where", publishes the worker grant line by line.
 //!
+//! Since 0.8.0 (ledger #1199) a worker hands an item back with `comment handback=true`, under
+//! its comment grant, and `next` stops offering it until the dispatcher (the close grant)
+//! answers; and when the capability carries a principal, a claim records it and only that
+//! principal, or the dispatcher, releases it. `README.md`, "Handing back" and "Claims".
+//!
 //! A sub-request issued from inside an endpoint carries **the caller's** capability
 //! unchanged — `Invocation::issue` has no attenuating or elevating form — so whatever this
 //! crate asks the store for, the caller must hold. It asks only the narrow doors, so what

@@ -116,6 +116,13 @@ pub struct Claim {
     /// Added in 0.5.0.
     #[serde(default)]
     pub lease: Option<String>,
+    /// The principal the claim was taken AS — the IRI the claimant's capability carried
+    /// (`urn:iki:gonk:client:<fingerprint>` from gonk's QUIC door) — and what a release
+    /// checks: only a capability acting as it, or a dispatcher, releases this claim. `null`
+    /// when the claimant carried none, and then `holder` is free text as before. Added in
+    /// 0.8.0 (ledger #1199).
+    #[serde(default)]
+    pub principal: Option<String>,
 }
 
 /// One outbound edge from an item.
@@ -202,6 +209,12 @@ pub struct Item {
     /// `#[serde(default)]`, so an earlier document reads with `null` here.
     #[serde(default)]
     pub state: Option<String>,
+    /// Who it waits on after a hand-back: `dispatcher` once a worker commented with
+    /// `handback=true`, until a close, a reopen, a rejecting comment or the dispatcher's own
+    /// comment clears it; `null` otherwise. `next` does not offer it while it is set. Added in
+    /// 0.8.0 (ledger #1199); `#[serde(default)]`, so an earlier document reads with `null`.
+    #[serde(default)]
+    pub awaiting: Option<String>,
 }
 
 /// `item:{id}`.
@@ -272,7 +285,8 @@ pub struct Ranking {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Exclusion {
-    /// `claimed`, `lease-expired`, `deferred` or `blocked`.
+    /// `claimed`, `lease-expired`, `awaiting-dispatcher` (since 0.8.0), `deferred` or
+    /// `blocked`.
     pub why: String,
     /// The plain face's sentence (`blocked by #3`).
     pub reason: String,
@@ -319,7 +333,7 @@ pub struct NextDocument {
 /// | `filed` | `status` (`open`), and `key` when the append carried one |
 /// | `existing` (an append) | `status` (`open`, `closed` or `deleted`), `key` |
 /// | `existing` (a keyed comment) | `comment` (the one the key names), `key` |
-/// | `commented` | `comment`, and `key` when the comment carried one |
+/// | `commented` | `comment`; `key` when the comment carried one; `handback` when it set or cleared a hand-back |
 /// | `closed` | `reason`; `comment` when a note was given; `released` when it was claimed |
 /// | `linked`, `unlinked` | `type`, `target` |
 ///
@@ -361,6 +375,12 @@ pub struct Answer {
     /// claimed). Since 0.7.0 a close releases the claim it finds (ledger #1147).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released: Option<String>,
+    /// What a comment did to the item's hand-back (`commented` only, and only when it did
+    /// something): `set` for `handback=true`, `cleared` when it took an item off
+    /// `awaiting` — a `rejects=true` comment, or any comment from a caller holding the close
+    /// grant. Added in 0.8.0 (ledger #1199).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handback: Option<String>,
 }
 
 /// `…:item:{id}:state` — read, or the answer of a transition.
@@ -408,7 +428,7 @@ pub struct DoctorDocument {
     /// The moment the lease check judged expiry at (the kernel's clock).
     pub checked_at: String,
     /// The checks that ran, in order: `orphaned`, `abandoned`, `lease-expired`,
-    /// `unknown-state`, `two-states`.
+    /// `unknown-state`, `two-states`, `awaiting-closed` (since 0.8.0).
     pub checks: Vec<String>,
     /// What they found, check by check; empty is a clean bill.
     pub problems: Vec<Problem>,
@@ -515,6 +535,7 @@ pub(crate) fn item(
             kind: item.claim_kind.clone(),
             expires: item.lease_expires.map(sparql::iso8601),
             lease: item.lease.clone(),
+            principal: item.claim_principal.clone(),
         }),
         created: sparql::iso8601(item.created),
         modified: sparql::iso8601(item.modified),
@@ -522,6 +543,10 @@ pub(crate) fn item(
         comments: comments.iter().map(self::comment).collect(),
         defects: item.defects.clone(),
         state: item.state().map(str::to_string),
+        awaiting: item
+            .awaiting
+            .as_deref()
+            .map(|a| model::awaiting_name(a).to_string()),
     }
 }
 
@@ -586,6 +611,7 @@ pub(crate) async fn next(
                     Vec::new(),
                     Some(sparql::iso8601(*expires)),
                 ),
+                Excluded::AwaitingDispatcher => ("awaiting-dispatcher", None, Vec::new(), None),
                 Excluded::Deferred => ("deferred", None, Vec::new(), None),
                 Excluded::Blocked(numbers) => ("blocked", None, numbers.clone(), None),
             };
@@ -627,5 +653,6 @@ pub(crate) fn answer(ledger: &Ledger, outcome: &str, item: ItemRef) -> Answer {
         target: None,
         comment: None,
         released: None,
+        handback: None,
     }
 }

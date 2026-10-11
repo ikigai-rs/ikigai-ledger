@@ -156,7 +156,7 @@ below. An `as=` this module cannot answer in is **refused**, never substituted.
 ## Ledgers: a name, not a tag and not an argument
 
 A label is *data*; a capability binds to a *resource name*. There is nothing for
-`urn:cap:…` to attach to in "items labelled acme", so enforcement would have to live
+`urn:cap:…` to attach to in "items labeled acme", so enforcement would have to live
 inside the endpoint — declared-but-not-enforced, which this ecosystem refuses everywhere
 else. A tag partition is a **view**; only a name can be a **boundary**. A `ledger=`
 *argument* has the same defect: an argument is a value, the manifold still offers one
@@ -332,6 +332,46 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) existing
   comments, keys and all, to the graveyard; a replay naming the deleted item is refused as not
   found, but one naming a different live item would write. Comments have no tombstones.
 
+### Handing back: an item awaiting its dispatcher
+
+A worker that finishes hands the item back with its evidence, and from then on the item waits
+for whoever dispatched it to check the evidence and close it. `comment handback=true` (since
+0.8.0, ledger #1199) makes that a STATE of the item rather than a convention in a comment's
+text:
+
+```text
+$ sink urn:iki:ledger:comment item=12 handback=true <<< "https://github.com/x/y/pull/41 — CI green"
+commented on #12 (urn:iki:ledger:default:comment:01m4…) awaiting-dispatcher
+$ source urn:iki:ledger:next
+…
+  not #12: handed back, awaiting the dispatcher
+$ sink urn:iki:ledger:comment item=12 rejects=true <<< "CI is red on main; see the run"
+commented on #12 (urn:iki:ledger:default:comment:01m4…) cleared-awaiting
+```
+
+- **Under the comment grant, in the same update as the comment.** A worker cannot label (that
+  needs `write:{ledger}`), so the hand-back rides on the one write it has: the comment and
+  `ledger:awaiting <urn:iki:ledger:awaiting:dispatcher>` land together or not at all. A keyed
+  hand-back replayed writes neither, so a replay cannot re-set a state the dispatcher has since
+  cleared.
+- **`next` does not offer it**: `why: "awaiting-dispatcher"` in JSON, `handed back, awaiting the
+  dispatcher` in text. Before this, the worker released the item and `next` offered it to the
+  next worker as if nothing had happened (`tests/awaiting.rs` is the reproduction).
+- **What clears it**: close (closed work awaits nobody), reopen, a comment with `rejects=true`
+  (the evidence did not hold; the item is ready again), and **any comment from a caller holding
+  the close grant** (`close:{ledger}` or `write:{ledger}`, which root holds): the dispatcher
+  speaking on a handed-back item is the answer to it. A worker's ordinary comment leaves it
+  standing; a worker clears it only by saying `rejects=true`. `handback=true` and
+  `rejects=true` together are refused.
+- **On every face**: `awaiting: dispatcher` in the item's text (and `awaiting-dispatcher` at the
+  end of its line in a listing), `"awaiting": "dispatcher"` in JSON (`null` otherwise), the
+  triple in Turtle, and `"handback": "set"` or `"cleared"` on the comment's JSON answer. The
+  doctor does not call a handed-back in-flight item `abandoned`, and reports a closed item
+  still awaiting (`awaiting-closed`), which only a write around the ledger leaves.
+- ⚠ **A claim is untouched by either**: the worker releases its claim as before. An item
+  awaiting its dispatcher can still be claimed (the dispatcher may, to review it); `next` simply
+  does not offer it.
+
 ## The JSON face
 
 `as=application/json` is the machine contract; the plain face is for people and is not a
@@ -351,11 +391,13 @@ object is the same wherever it appears:
   "links":[{"type":"blocks","target":{"number":13,"display":"#13","iri":"urn:iki:ledger:default:item:01m5…"}}],
   "comments":[{"id":"urn:iki:ledger:default:comment:01m6…","author":"chris",
                "time":"2026-09-15T00:00:00.000Z","text":"looked at it"}],
-  "defects":[],"state":"filed"}}
+  "defects":[],"state":"filed","awaiting":null}}
 ```
 
 `state` is the item's lifecycle state: `filed` when it holds none, and `null` only when an
-out-of-band write left it holding several (see "Lifecycle state").
+out-of-band write left it holding several (see "Lifecycle state"). `awaiting` is `dispatcher`
+while the item is handed back (see "Handing back"), and a claim also carries `kind`, `expires`,
+`lease` and, since 0.8.0, `principal`: the principal it was taken as, or `null`.
 
 `defects` is empty for every item written through a ledger Sink. When an out-of-band write
 left one of its timestamps unreadable or missing, it names that value
@@ -367,9 +409,9 @@ first".
 | --- | --- |
 | `item:{id}` | `{schema, ledger, item}` |
 | `items` | `{schema, ledger, count, total, offset, items: [item…], unreadable: [{iri, defects}]}` — `count` is the PAGE (`items`' length), `total` how many items the filter admits, `offset` how many the page skipped; `count < total` says the page is not the set. `unreadable` is the plain face's ⚠ footer, as data: the items NOT in `items`. An item listed with a stand-in timestamp carries its own `defects` instead |
-| `next` | `{schema, ledger, policy, weighs, generated_at, ready, ranking: [{rank, score, because, item}], excluded: [{why, reason, holder, expires, blocked_by, item}]}` — `why` is `claimed`, `lease-expired`, `deferred` or `blocked` |
+| `next` | `{schema, ledger, policy, weighs, generated_at, ready, ranking: [{rank, score, because, item}], excluded: [{why, reason, holder, expires, blocked_by, item}]}` — `why` is `claimed`, `lease-expired`, `awaiting-dispatcher`, `deferred` or `blocked` |
 | `doctor` | `{schema, ledger, lifecycle, checked_at, checks, problems: [{check, item: {number, display, iri}, detail, remedy, holder, states, expires}]}` |
-| `append`, `comment`, `close`, `link` | `{schema, ledger, outcome, item: {number, display, iri}, …}` — `outcome` is `filed`, `existing`, `commented`, `closed`, `linked` or `unlinked`, and only that outcome's own fields follow: `status` and `key` (append), `comment` (comment, and close with a note), `reason` (close), `type` and `target` (link) |
+| `append`, `comment`, `close`, `link` | `{schema, ledger, outcome, item: {number, display, iri}, …}` — `outcome` is `filed`, `existing`, `commented`, `closed`, `linked` or `unlinked`, and only that outcome's own fields follow: `status` and `key` (append), `comment` (comment, and close with a note), `handback` (`set` or `cleared`, a comment that changed a hand-back), `reason` (close), `type` and `target` (link) |
 
 `links` are the item's **outbound** edges — `blocks`, then `parent`, then `related` — and a
 target that is not a live item in the ledger has a `null` number. The documents are Rust
@@ -505,7 +547,7 @@ Two stages, kept apart:
 Each policy is a **resource** — `urn:iki:ledger:policy:{name}` — so the manifold advertises
 which orderings exist and `Meta` says what each one weighs. Two ship:
 
-- **`priority-recency`** (the default) is **kata's own rule**, reimplemented so behaviour can
+- **`priority-recency`** (the default) is **kata's own rule**, reimplemented so behavior can
   be *diffed* against the tool being replaced: any priority beats none, lower wins, ties go
   to the most recently updated.
 - **`leverage`** is the one kata cannot express: 10 points per open item unblocked
@@ -655,22 +697,35 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   <holder>; the claim is released.` (attributed to the closer's `author`), `released <holder>`
   at the end of the plain answer, and `"released": "<holder>"` in JSON. Reopening does not
   restore it; whoever picks the work up again claims it.
-- ⚠ **A release needs only the claim grant, whoever holds the claim.** `delete …:claim` takes
-  `urn:cap:ledger:claim:{ledger}` (or `write:{ledger}`) and releases any holder's claim, a
-  worker's included. Decided 2026-10-10, for two reasons: a holder is FREE TEXT, so whether the
-  caller is the holder cannot be checked, and a rule that could not be checked would only read
-  as protection; and the collaboration layer's mirror, which holds claim and comment and never
-  close, must release a claim it took in a collaborator's name when that collaborator says
-  `Release`. Requiring `close` for someone else's claim would give the mirror the close it is
-  designed never to hold. The fix for "a worker can drop another worker's claim" is the holder
-  being the caller's principal, which is not built (see "What is enforced, and where").
+- ★ **The holder is the caller's PRINCIPAL when there is one** (since 0.8.0, ledger #1199). When
+  the claimant's capability carries a principal (`urn:cap:principal:<iri>`, minted by the host's
+  door: gonk's QUIC door names every client `urn:iki:gonk:client:<fingerprint>`, its HTTP door
+  the signed-in passkey), the claim records it as `ledger:claimPrincipal` beside the holder's
+  name, which stays the free-text label every answer prints. From then on the claim is that
+  principal's:
+  - **a release of it needs a capability that ACTS AS that principal**, with `from=` or
+    without it, or the dispatcher's override (`close:{ledger}` or `write:{ledger}`, which root
+    holds). Anyone else is `Denied`, so **one worker cannot release another's claim by spelling
+    its name**, nor by leaving `from=` off. Until 0.8.0 a holder was only free text and the
+    claim grant released anyone's claim (`tests/holder_principal.rs` is the reproduction);
+  - **another principal claiming or renewing under the same name is a `Conflict`**: "the same
+    holder" means the same name AND the same principal;
+  - **a takeover of an expired lease is unchanged** (`from=` names the holder it takes from) and
+    records the taker's principal.
+
+  **A host without principals behaves exactly as 0.7.0 did**: no principal is recorded, a holder
+  is free text, and the claim grant releases any claim. The same goes for a claim taken without
+  one (root, or before 0.8.0): any claim-grant holder may release it, and a principal renewing
+  it under its name adopts it. ⚠ The collaboration layer's mirror, which holds claim and comment
+  and never close, releases the claims IT took (they carry its principal) and no longer a
+  claim a worker took directly as itself; that one is the worker's, or the dispatcher's.
 - ★ **`from=<holder>` makes a release a compare-and-set** (since 0.7.0, ledger #1178): it
   releases only while that holder still holds the claim, in one guarded update, and otherwise
   is a `Conflict` that releases nothing. A worker releasing "its" claim after a takeover no
-  longer drops the new holder's. **A release without `from=` keeps working** and drops
-  whoever holds the claim: it is the dispatcher's override, and the mirror's when it applies a
-  `Release` for a taker. `from=` is a guard against a race, not an authorization (a holder is
-  free text), so it is opt-in rather than required. A worker should always send it.
+  longer drops the new holder's. Since 0.8.0 `from=` may name the holder by its label or by the
+  principal it was taken as. **A release without `from=` keeps working** for the claim's own
+  principal (and for any caller on a claim taken without one); for someone else's claim it is
+  the dispatcher's override. A worker should always send `from=`.
 - ★ **`renew=true` renews and never takes** (since 0.7.0, ledger #1178). A plain claim by the
   same holder takes a FREE item, so a worker whose claim was released, or taken over and then
   released, silently re-acquired the item on its next heartbeat. With `renew=true` the claim
@@ -721,16 +776,17 @@ doctor: default (lifecycle kata-flight): 2 problem(s)
                  remedy: take it over (`sink urn:iki:ledger:claim item=7 takeover=true from=kata-ship/9fff`), …
 ```
 
-Five checks, each a **stored SPARQL query** (`src/doctor/*.rq`) over the ledger's graph, with the
+Six checks, each a **stored SPARQL query** (`src/doctor/*.rq`) over the ledger's graph, with the
 ledger's lifecycle filled in as terms:
 
 | check | what it finds |
 | --- | --- |
 | `orphaned` | a machine claim (or one with no recorded kind) on an item whose state is not in flight |
-| `abandoned` | an item in an in-flight state that nobody holds |
+| `abandoned` | an item in an in-flight state that nobody holds and that is not awaiting its dispatcher (a hand-back is waiting, not abandoned) |
 | `lease-expired` | a claim whose lease ran out, judged on the kernel's clock |
 | `unknown-state` | a `ledger:state` the ledger's lifecycle does not declare (a hand edit, an import, a ledger whose lifecycle changed) |
 | `two-states` | an item holding more than one state, which only a raw store write can produce |
+| `awaiting-closed` | a closed item still marked `ledger:awaiting` (since 0.8.0): a close clears a hand-back, so only a raw store write leaves one |
 
 It is a read under the ledger's read grant, it reports every problem in one answer with a
 remedy for each, and it **never repairs**: what to do about an orphan is a judgment, and a
@@ -822,7 +878,10 @@ urn:cap:store:write:graph:urn:iki:ledger:graph:acme
 ```
 
 The dispatcher who checks the evidence and closes adds `urn:cap:ledger:close:acme` (or holds
-`write:acme`). `tests/worker_grant.rs` runs exactly the worker lines above: claim, renew,
+`write:acme`). The worker hands an item back with `comment handback=true` under its comment
+grant, and the close grant is also what makes the dispatcher's own comment answer a hand-back
+(see "Handing back"). When the host's door mints a principal for each worker, a worker's claim
+is its own: another worker holding the same lines cannot release it (see "Claims"). `tests/worker_grant.rs` runs exactly the worker lines above: claim, renew,
 comment and release succeed; close, reopen, label, edit, append, defer and delete are each a
 typed `Denied` naming the grant that would do.
 

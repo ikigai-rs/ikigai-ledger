@@ -1,0 +1,10 @@
+# AWAITING-CLOSED: a closed item still marked as awaiting someone (ledger:awaiting).
+# A close answers a hand-back and clears it in the same update, so only a write around the
+# ledger leaves one; reopening would carry the stale hand-back back into `next`'s exclusions.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT ?item ?number ?whom WHERE {
+  GRAPH $GRAPH {
+    ?item a ledger:Item ; ledger:number ?number ;
+          ledger:status ledger:closed ; ledger:awaiting ?whom .
+  }
+} ORDER BY ?number

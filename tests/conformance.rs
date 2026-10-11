@@ -7,7 +7,7 @@
 //! a fresh in-memory store with three items already filed:
 //!
 //! - **A** is what most fixtures point at — it gets commented on, closed, reopened,
-//!   claimed, released, deferred, resumed, labelled, linked and edited by the walk.
+//!   claimed, released, deferred, resumed, labeled, linked and edited by the walk.
 //! - **B** exists so `ledger-link` has something to link TO.
 //! - **C** exists so `ledger-purge` has something to destroy that nothing else needs.
 //!

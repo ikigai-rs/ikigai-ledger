@@ -738,7 +738,54 @@ async fn write_comment(
     author: Option<&str>,
     now: u64,
 ) -> Result<String> {
-    write_keyed_comment(client, item, text, author, now, None).await
+    write_keyed_comment(client, item, text, author, now, None, Handback::Unchanged).await
+}
+
+/// What a comment does to its item's hand-back state (`ledger:awaiting`, ledger #1199).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handback {
+    /// Nothing: an ordinary comment from a worker.
+    Unchanged,
+    /// `handback=true`: the item now awaits its dispatcher.
+    Set,
+    /// `rejects=true`, or any comment from a caller holding the close grant: the item no
+    /// longer awaits anyone.
+    Clear,
+}
+
+/// Whether this caller is the ledger's DISPATCHER: holds `close:{ledger}` or
+/// `write:{ledger}` (root holds both). The one who checks a hand-back's evidence, so any
+/// comment of theirs clears it, and whose override releases any claim.
+fn is_dispatcher(inv: &Invocation<'_>, ledger: &Ledger) -> bool {
+    inv.capability.allows(&ledger.cap_close()) || inv.capability.allows(&ledger.cap_write())
+}
+
+/// The update that applies a [`Handback`] to `item`, carrying `guard` (a keyed comment's
+/// "the key is free" clause) so it lands exactly when the comment does. Empty for
+/// [`Handback::Unchanged`].
+fn handback_update(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    handback: Handback,
+    guard: &str,
+) -> String {
+    let was = client.in_graph(&format!("<{item}> <{}> ?awaiting", v::AWAITING));
+    match handback {
+        Handback::Unchanged => String::new(),
+        Handback::Set => format!(
+            "DELETE {{ {was} }} INSERT {{ {} }} WHERE {{ {} {guard} }}",
+            client.in_graph(&format!(
+                "<{item}> <{}> <{}>",
+                v::AWAITING,
+                v::iri::AWAITING_DISPATCHER
+            )),
+            client.in_graph(&format!(
+                "OPTIONAL {{ <{item}> <{}> ?awaiting }}",
+                v::AWAITING
+            )),
+        ),
+        Handback::Clear => format!("DELETE {{ {was} }} WHERE {{ {was} {guard} }}"),
+    }
 }
 
 /// [`write_comment`] with an optional key (ledger #1178): with one, the comment is written
@@ -757,6 +804,7 @@ async fn write_keyed_comment(
     author: Option<&str>,
     now: u64,
     key: Option<&str>,
+    handback: Handback,
 ) -> Result<String> {
     let id = mint_id(now)?;
     let comment = client.ledger().comment(&id);
@@ -777,11 +825,14 @@ async fn write_keyed_comment(
             literal(author)
         ));
     }
+    // ★ The hand-back is in the SAME update as the comment (ledger #1199), so the evidence
+    // and the state it puts the item in land together or not at all.
     let Some(key) = key else {
         client
             .update(&batch(&[
                 format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
                 touch(client, item, now),
+                handback_update(client, item, handback, ""),
             ]))
             .await?;
         return Ok(comment);
@@ -795,7 +846,8 @@ async fn write_keyed_comment(
         "FILTER NOT EXISTS {{ {} }}",
         client.in_graph(&format!("?taken <{}> {}", v::COMMENT_KEY, literal(key)))
     );
-    // The stamp first: once the comment is in, the key is taken and the guard is false.
+    // The stamp and the hand-back first: once the comment is in, the key is taken and the
+    // guard is false, so a replay changes neither.
     client
         .update(&batch(&[
             format!(
@@ -811,6 +863,7 @@ async fn write_keyed_comment(
                     v::ext::MODIFIED
                 )),
             ),
+            handback_update(client, item, handback, &free),
             format!(
                 "INSERT {{ {} }} WHERE {{ {free} }}",
                 client.in_graph(&triples)
@@ -2250,6 +2303,17 @@ impl Endpoint for CommentEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Comment)?);
         // Every argument is checked before anything is written, the keyed append's rule.
         let want = wanted_face(inv, &WRITE_FACES)?;
+        let handback = parse_flag(inv, "handback")?;
+        let rejects = parse_flag(inv, "rejects")?;
+        if handback && rejects {
+            return Err(Error::InvalidArgument {
+                name: "rejects".to_string(),
+                detail: "`handback=true` hands the item back to its dispatcher and \
+                         `rejects=true` takes a hand-back off it; a comment is one or the \
+                         other"
+                    .to_string(),
+            });
+        }
         let key = inv
             .inline_str("key")
             .ok()
@@ -2274,9 +2338,26 @@ impl Endpoint for CommentEndpoint {
                 return existing_comment(&client, want, &found, key).await;
             }
         }
-        let comment =
-            write_keyed_comment(&client, &item.iri, text.trim(), author, now, key.as_deref())
-                .await?;
+        // ★ The dispatcher (the close grant) speaking on a handed-back item is the answer to
+        // it, whatever the words: any comment of theirs clears it. A worker clears it only by
+        // saying so (`rejects=true`); its ordinary comment leaves the hand-back standing.
+        let change = if handback {
+            Handback::Set
+        } else if rejects || is_dispatcher(inv, client.ledger()) {
+            Handback::Clear
+        } else {
+            Handback::Unchanged
+        };
+        let comment = write_keyed_comment(
+            &client,
+            &item.iri,
+            text.trim(),
+            author,
+            now,
+            key.as_deref(),
+            change,
+        )
+        .await?;
         if let Some(key) = &key {
             let found = model::find_comment_by_key(&client, key)
                 .await?
@@ -2300,10 +2381,22 @@ impl Endpoint for CommentEndpoint {
             );
             answer.comment = Some(written(&comment, &item.iri, text.trim(), author, now));
             answer.key = key;
+            answer.handback = match change {
+                Handback::Set => Some("set".to_string()),
+                Handback::Clear if item.awaiting.is_some() => Some("cleared".to_string()),
+                _ => None,
+            };
             return Ok(json_repr(json::render(&answer)?));
         }
+        // The suffix in the shape `existing` set: a word after the IRI, so a reader matching
+        // `commented on #N (<iri>)` still matches.
+        let suffix = match change {
+            Handback::Set => " awaiting-dispatcher",
+            Handback::Clear if item.awaiting.is_some() => " cleared-awaiting",
+            _ => "",
+        };
         Ok(plain(format!(
-            "commented on {} ({comment})\n",
+            "commented on {} ({comment}){suffix}\n",
             item.short()
         )))
     }
@@ -2318,7 +2411,8 @@ impl Endpoint for CommentEndpoint {
             .summary(
                 "Append a comment. Comments are append-only — there is no edit and no \
                  delete short of deleting the item, because a record that can be quietly \
-                 revised is not a record.",
+                 revised is not a record. A worker hands an item back with \
+                 `handback=true`, which `next` honors until the dispatcher answers.",
             )
             .verb(Verb::Meta)
             .action(write_scopes(
@@ -2352,6 +2446,38 @@ impl Endpoint for CommentEndpoint {
                                  are separate names.",
                             )
                             .class(v::ext::XSD_STRING)
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("handback")
+                            .summary(
+                                "`true` to hand the item back to its dispatcher with this \
+                                 comment as the evidence: in the same store update, the item \
+                                 is marked `ledger:awaiting <urn:iki:ledger:awaiting:dispatcher>` \
+                                 and `next` stops offering it (`why: awaiting-dispatcher`). \
+                                 Needs only the comment grant. Cleared by close, reopen, a \
+                                 comment with `rejects=true`, or any comment from a caller \
+                                 holding the close grant. The answer ends ` awaiting-dispatcher` \
+                                 (`\"handback\": \"set\"` in JSON).",
+                            )
+                            .class(v::ext::XSD_BOOLEAN)
+                            .one_of(["true", "false"])
+                            .default_value("false")
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("rejects")
+                            .summary(
+                                "`true` when this comment says a hand-back's evidence did not \
+                                 hold: the item stops awaiting its dispatcher and `next` offers \
+                                 it again. A comment from a caller holding the close grant \
+                                 does this without being asked. The answer ends \
+                                 ` cleared-awaiting` when it cleared one (`\"handback\": \
+                                 \"cleared\"` in JSON). Not with `handback=true`.",
+                            )
+                            .class(v::ext::XSD_BOOLEAN)
+                            .one_of(["true", "false"])
+                            .default_value("false")
                             .optional(),
                     )
                     .input(as_arg(&WRITE_FACES))
@@ -2439,11 +2565,16 @@ impl Endpoint for CloseEndpoint {
                 .iter()
                 .map(|field| retract(&client, &item.iri, field)),
         );
+        // And a hand-back is answered: closed work awaits nobody (ledger #1199).
+        ops.push(retract(&client, &item.iri, v::AWAITING));
         client.update(&batch(&ops)).await?;
         let author = inv.inline_str("author").ok();
         let released = item.claimed_by.clone();
-        if let Some(holder) = &released {
-            let record = format!("Closed while claimed by {holder}; the claim is released.");
+        if released.is_some() {
+            let record = format!(
+                "Closed while claimed by {}; the claim is released.",
+                holder_display(&item)
+            );
             write_comment(&client, &item.iri, &record, author, now).await?;
         }
         let mut note_written = None;
@@ -2481,7 +2612,8 @@ impl Endpoint for CloseEndpoint {
             .summary(
                 "Close with a reason. Closing is NOT deleting: the item stays in the graph, \
                  stays queryable, and stops blocking whatever it blocked. A claim on it is \
-                 released, and the release recorded as a comment naming the holder.",
+                 released, and the release recorded as a comment naming the holder; a \
+                 hand-back awaiting the dispatcher is answered.",
             )
             .verb(Verb::Meta)
             .action(write_scopes(
@@ -2543,6 +2675,9 @@ impl Endpoint for ReopenEndpoint {
             .update(&batch(&[
                 replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::OPEN)),
                 retract(&client, &item.iri, v::CLOSED_REASON),
+                // A reopened item starts from "not awaiting": whatever hand-back preceded
+                // the close was answered by it (ledger #1199).
+                retract(&client, &item.iri, v::AWAITING),
                 touch(&client, &item.iri, now),
             ]))
             .await?;
@@ -2568,7 +2703,10 @@ impl Endpoint for ReopenEndpoint {
     fn describe(&self) -> Description {
         Description::new("ledger-reopen")
             .title("Reopen a ledger item")
-            .summary("Undo a close: the status goes back to open and the reason is dropped.")
+            .summary(
+                "Undo a close: the status goes back to open, and the reason and any hand-back \
+                 are dropped.",
+            )
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
@@ -2621,18 +2759,11 @@ enum Guard<'a> {
     Mine(&'a str),
 }
 
-/// A release as ONE update: every claim field out and `modified` stamped — and with
-/// `from`, only while that holder still holds the claim, so a release racing a takeover
-/// drops nothing it did not mean to (ledger #1178).
-fn release_update(
-    client: &StoreClient<'_, '_>,
-    item: &str,
-    from: Option<&str>,
-    now: u64,
-) -> String {
-    let guard = from
-        .map(|from| format!("<{item}> <{}> {} .\n", v::CLAIMED_BY, literal(from)))
-        .unwrap_or_default();
+/// A release as ONE update: every claim field out and `modified` stamped — and only while
+/// `guard` holds (the `from` holder, by label or principal, still holds the claim; the caller
+/// is still the claimant), so a release racing a takeover drops nothing it did not mean to
+/// (ledger #1178, #1199).
+fn release_update(client: &StoreClient<'_, '_>, item: &str, guard: &str, now: u64) -> String {
     let mut owned: Vec<&str> = CLAIM_FIELDS.to_vec();
     owned.push(v::ext::MODIFIED);
     let delete: String = owned
@@ -2654,7 +2785,7 @@ fn release_update(
             datetime(now)
         )),
         client.in_graph(&format!(
-            "<{item}> <{}> <{}> .\n{guard}{optional}",
+            "<{item}> <{}> <{}> .\n{guard}\n{optional}",
             v::ext::TYPE,
             v::ITEM_CLASS
         )),
@@ -2663,14 +2794,53 @@ fn release_update(
 
 /// Every field a claim writes on its item — what a release retracts, and what a close
 /// retracts too (ledger #1147).
-const CLAIM_FIELDS: [&str; 6] = [
+const CLAIM_FIELDS: [&str; 7] = [
     v::CLAIMED_BY,
     v::CLAIMED_AT,
     v::PURPOSE,
     v::CLAIM_KIND,
     v::LEASE,
     v::LEASE_EXPIRES,
+    v::CLAIM_PRINCIPAL,
 ];
+
+/// Whether a caller acting as `caller` (its capability's one principal, if any) may treat a
+/// claim recorded with `recorded` as its own — renew it, re-take it under the same label.
+///
+/// ★ A claim recorded WITHOUT a principal is anyone's to adopt under its label, exactly as
+/// every claim was before 0.8.0 (a host without principals, root, an older claim); one
+/// recorded WITH a principal is only that principal's.
+fn same_claimant(recorded: Option<&str>, caller: Option<&str>) -> bool {
+    match (recorded, caller) {
+        (None, _) => true,
+        (Some(recorded), Some(caller)) => recorded == caller,
+        (Some(_), None) => false,
+    }
+}
+
+/// [`same_claimant`] as a clause of a guarded update, so a claim that changed principals
+/// between the read and the write is not touched. `caller` is the principal as a SPARQL term.
+fn same_claimant_clause(item: &str, caller: Option<&str>) -> String {
+    match caller {
+        Some(term) => format!(
+            "FILTER NOT EXISTS {{ <{item}> <{p}> ?heldAs . FILTER(?heldAs != {term}) }}",
+            p = v::CLAIM_PRINCIPAL
+        ),
+        None => format!(
+            "FILTER NOT EXISTS {{ <{item}> <{p}> ?heldAs }}",
+            p = v::CLAIM_PRINCIPAL
+        ),
+    }
+}
+
+/// The holder as the plain faces name it: the label, and the principal when there is one.
+fn holder_display(item: &Item) -> String {
+    match (&item.claimed_by, &item.claim_principal) {
+        (Some(holder), Some(principal)) => format!("{holder} (as {principal})"),
+        (Some(holder), None) => holder.clone(),
+        (None, _) => "nobody".to_string(),
+    }
+}
 
 /// The claim as ONE update: the old claim's every field out, the new one in, `modified`
 /// stamped — all under the guard, so a lost race changes nothing at all.
@@ -2680,21 +2850,27 @@ fn claim_update(
     item: &str,
     guard: Guard<'_>,
     holder: &str,
+    principal: Option<&str>,
     purpose: Option<&str>,
     kind: crate::claim::ClaimKind,
     lease: Option<&crate::claim::Lease>,
     now: u64,
 ) -> String {
     let takeover = matches!(guard, Guard::ExpiredFrom(..));
+    // ★ "Mine" is the label AND the principal (ledger #1199): another principal spelling this
+    // holder's label neither renews nor re-takes its claim.
+    let claimant = same_claimant_clause(item, principal);
     let guard = match guard {
         Guard::Mine(holder) => format!(
             "<{item}> <{by}> {mine} .\n\
-             FILTER NOT EXISTS {{ <{item}> <{by}> ?other . FILTER(?other != {mine}) }}",
+             FILTER NOT EXISTS {{ <{item}> <{by}> ?other . FILTER(?other != {mine}) }}\n\
+             {claimant}",
             by = v::CLAIMED_BY,
             mine = literal(holder),
         ),
         Guard::FreeOrMine(holder) => format!(
-            "FILTER NOT EXISTS {{ <{item}> <{by}> ?other . FILTER(?other != {mine}) }}",
+            "FILTER NOT EXISTS {{ <{item}> <{by}> ?other . FILTER(?other != {mine}) }}\n\
+             {claimant}",
             by = v::CLAIMED_BY,
             mine = literal(holder),
         ),
@@ -2716,6 +2892,7 @@ fn claim_update(
         v::CLAIM_KIND,
         v::LEASE,
         v::LEASE_EXPIRES,
+        v::CLAIM_PRINCIPAL,
         v::ext::MODIFIED,
     ];
     if purpose.is_some() || takeover {
@@ -2746,6 +2923,12 @@ fn claim_update(
             "\n<{item}> <{}> {} .",
             v::PURPOSE,
             literal(purpose)
+        ));
+    }
+    if let Some(principal) = principal {
+        insert.push_str(&format!(
+            "\n<{item}> <{}> {principal} .",
+            v::CLAIM_PRINCIPAL
         ));
     }
     if let Some(lease) = lease {
@@ -2855,6 +3038,21 @@ impl Endpoint for ClaimEndpoint {
                 let item = require_item(&client, inv.inline_str("item")?).await?;
                 let resource = client.ledger().resource("claim");
                 let expired = item.lease_expires.is_some_and(|ends| ends <= now);
+                // ★ The claimant's principal, from the capability its door minted — never an
+                // argument (ledger #1199). `None` on a host without principals and for root.
+                let caller = inv.capability.principal();
+                let caller_term = caller.map(|p| sparql::iri(p, "principal")).transpose()?;
+                let recorded = item.claim_principal.as_deref();
+                let another_principal = || {
+                    Error::Conflict(format!(
+                        "{} is held by {} — the same holder name under another principal \
+                         than this capability's ({}). A claim taken as a principal is that \
+                         principal's: spelling its holder's name does not make it yours",
+                        item.short(),
+                        holder_display(&item),
+                        caller.unwrap_or("none")
+                    ))
+                };
 
                 // The cheap half first, so a refusal writes nothing (a no-op update still cuts
                 // every cached read). It proves nothing about the update, whose own guard is
@@ -2903,7 +3101,10 @@ impl Endpoint for ClaimEndpoint {
                     // item, not silently take it back on its next heartbeat (ledger #1178).
                     // An expired lease still held is still held, and renews.
                     match &item.claimed_by {
-                        Some(held) if held == &holder => Guard::Mine(&holder),
+                        Some(held) if held == &holder && same_claimant(recorded, caller) => {
+                            Guard::Mine(&holder)
+                        }
+                        Some(held) if held == &holder => return Err(another_principal()),
                         Some(held) => {
                             return Err(Error::Conflict(format!(
                                 "{} is held by {held}, not {holder}: a renewal extends a claim \
@@ -2945,6 +3146,9 @@ impl Endpoint for ClaimEndpoint {
                                 )
                             }));
                         }
+                        Some(_) if !same_claimant(recorded, caller) => {
+                            return Err(another_principal())
+                        }
                         _ => Guard::FreeOrMine(&holder),
                     }
                 };
@@ -2955,6 +3159,7 @@ impl Endpoint for ClaimEndpoint {
                         &item.iri,
                         guard,
                         &holder,
+                        caller_term.as_deref(),
                         purpose,
                         kind,
                         lease.as_ref(),
@@ -2964,6 +3169,17 @@ impl Endpoint for ClaimEndpoint {
                 let after = model::load_item(&client, &item.iri)
                     .await?
                     .ok_or_else(|| Error::NotFound(format!("no ledger item at `{}`", item.iri)))?;
+                if after.claimed_by.as_deref() == Some(holder.as_str())
+                    && after.claim_principal.as_deref() != caller
+                {
+                    // The label is ours and the principal is not: another principal took
+                    // the claim under this name between the read and the write.
+                    return Err(Error::Conflict(format!(
+                        "{} is held by {}: the claim changed principals before this one landed",
+                        item.short(),
+                        holder_display(&after)
+                    )));
+                }
                 if after.claimed_by.as_deref() != Some(holder.as_str()) {
                     if renew {
                         return Err(Error::Conflict(format!(
@@ -3012,11 +3228,51 @@ impl Endpoint for ClaimEndpoint {
                 let now = now_ms(inv)?;
                 let item = require_item(&client, inv.inline_str("item")?).await?;
                 let resource = client.ledger().resource("claim");
+                let ledger = client.ledger();
+                let caller = inv.capability.principal();
+                let dispatcher = is_dispatcher(inv, ledger);
+                // ★ HOLDER = PRINCIPAL (ledger #1199). A claim taken as a principal is released
+                // by a capability acting as it, or by the dispatcher's override — never by
+                // another worker spelling the holder's name, with `from=` or without it.
+                if let Some(recorded) = item.claim_principal.as_deref() {
+                    if !dispatcher && !inv.capability.acts_as(recorded) {
+                        return Err(Error::Denied(format!(
+                            "{} is held by {}, and this capability acts as {}: a claim taken \
+                             as a principal is released by that principal, or by a dispatcher \
+                             holding `{}` or `{}` (the override). Naming the holder does not \
+                             make the claim yours",
+                            item.short(),
+                            holder_display(&item),
+                            caller.map_or("no principal".to_string(), |p| format!("`{p}`")),
+                            ledger.cap_close(),
+                            ledger.cap_write()
+                        )));
+                    }
+                }
+                // What the update must still find, so a release racing a takeover drops
+                // nothing it did not mean to.
+                let mut guard = String::new();
                 if let Some(from) = from {
                     // The cheap half first, so a refusal writes nothing; the update's own
-                    // guard is what holds against a racer.
+                    // guard is what holds against a racer. `from` names the holder by its
+                    // label or by the principal it was taken as.
                     match &item.claimed_by {
-                        Some(held) if held == from => {}
+                        Some(held) if held == from => {
+                            guard.push_str(&format!(
+                                "<{}> <{}> {} .\n",
+                                item.iri,
+                                v::CLAIMED_BY,
+                                literal(from)
+                            ));
+                        }
+                        Some(_) if item.claim_principal.as_deref() == Some(from) => {
+                            guard.push_str(&format!(
+                                "<{}> <{}> {} .\n",
+                                item.iri,
+                                v::CLAIM_PRINCIPAL,
+                                sparql::iri(from, "from")?
+                            ));
+                        }
                         Some(held) => {
                             return Err(Error::Conflict(format!(
                                 "{} is held by {held}, not {from}: a release with `from` is a \
@@ -3033,19 +3289,31 @@ impl Endpoint for ClaimEndpoint {
                         }
                     }
                 }
+                // A claimant that is not the dispatcher releases only a claim that is still
+                // its own (or no principal's): the check above, as a clause of the write.
+                if !dispatcher {
+                    if let Some(caller) = caller {
+                        guard.push_str(&same_claimant_clause(
+                            &item.iri,
+                            Some(&sparql::iri(caller, "principal")?),
+                        ));
+                    }
+                }
                 client
-                    .update(&release_update(&client, &item.iri, from, now))
+                    .update(&release_update(&client, &item.iri, &guard, now))
                     .await?;
-                if let Some(from) = from {
+                if !guard.is_empty() {
                     let after = model::load_item(&client, &item.iri).await?.ok_or_else(|| {
                         Error::NotFound(format!("no ledger item at `{}`", item.iri))
                     })?;
-                    if let Some(held) = after.claimed_by {
+                    if after.claimed_by.is_some() {
                         return Err(Error::Conflict(format!(
-                            "{} is held by {held}: the claim changed hands before the release \
-                             from {from} landed, and nothing was released. Release it \
+                            "{} is held by {}: the claim changed hands before the release{} \
+                             landed, and nothing was released. Release it \
                              (`delete {resource} item={}`) only if that is meant",
                             item.short(),
+                            holder_display(&after),
+                            from.map(|f| format!(" from {f}")).unwrap_or_default(),
                             item.number
                         )));
                     }
@@ -3083,7 +3351,10 @@ impl Endpoint for ClaimEndpoint {
                     .summary(
                         "Claim the item for a holder, in one guarded store update; refuses \
                          (Conflict) if someone else holds it. The same holder claiming again \
-                         renews the claim and its lease.",
+                         renews the claim and its lease. When the capability carries a \
+                         principal, the claim records it (`ledger:claimPrincipal`) beside the \
+                         holder's name, and \"the same holder\" means the same name AND the \
+                         same principal.",
                     )
                     .input(item_arg("The item to claim."))
                     .input(
@@ -3149,19 +3420,24 @@ impl Endpoint for ClaimEndpoint {
                 ikigai_core::ActionSpec::new(Verb::Delete)
                     .input(ledger_arg("claim"))
                     .summary(
-                        "Release the claim, whoever holds it, lease and all. Needs \
-                         `urn:cap:ledger:claim:{ledger}` (or `write:{ledger}`) and nothing \
-                         more, whoever the holder: a holder is free text, so whether the \
-                         caller IS the holder cannot be checked.",
+                        "Release the claim, lease and all. Needs \
+                         `urn:cap:ledger:claim:{ledger}` (or `write:{ledger}`). A claim taken \
+                         AS A PRINCIPAL (the capability carried one, minted by the host's \
+                         door) is released only by a capability acting as that principal, \
+                         or by a dispatcher holding `close:{ledger}` or `write:{ledger}`: \
+                         Denied otherwise, so one worker cannot release another's claim by \
+                         naming it. A claim taken without a principal is free text, released \
+                         by any claim-grant holder.",
                     )
                     .input(item_arg("The item to release."))
                     .input(
                         ArgSpec::new("from")
                             .summary(
-                                "Release only if THIS holder still holds the claim — a \
-                                 compare-and-set, refused (Conflict) and nothing released when \
-                                 the claim changed hands. Without it the release drops whoever \
-                                 holds the claim, which stays the dispatcher's override.",
+                                "Release only if THIS holder still holds the claim — its \
+                                 name, or the principal it was taken as; a compare-and-set, \
+                                 refused (Conflict) and nothing released when the claim changed \
+                                 hands. Without it the release drops the claim, which for a \
+                                 claim taken as another principal is the dispatcher's override.",
                             )
                             .class(v::ext::XSD_STRING)
                             .optional(),
@@ -3217,7 +3493,7 @@ impl Endpoint for DeferEndpoint {
             .title("Defer a ledger item, or resume it")
             .summary(
                 "Not now: open, unblocked, unclaimed, and deliberately not offered by the \
-                 ready set. A modelled property rather than kata's `someday` flag inside a \
+                 ready set. A modeled property rather than kata's `someday` flag inside a \
                  metadata blob that one query understands — and a boolean rather than a \
                  date, because readiness that turns on the wall clock goes stale in the \
                  cache with no thread to cut it.",
@@ -3418,11 +3694,11 @@ impl Endpoint for LabelEndpoint {
         let (update, said) = match inv.request.verb {
             Verb::Sink => (
                 format!("INSERT DATA {{ {} }}", client.in_graph(&triple)),
-                "labelled",
+                "labeled",
             ),
             Verb::Delete => (
                 format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
-                "unlabelled",
+                "unlabeled",
             ),
             other => return Err(unsupported("ledger-label", other)),
         };

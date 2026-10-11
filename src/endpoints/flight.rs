@@ -698,12 +698,16 @@ impl Endpoint for LifecycleEndpoint {
 
 /// The doctor's stored queries, in the order they run and report. Each is a SELECT over one
 /// ledger's graph with `$GRAPH`, `$IN_FLIGHT`, `$STATES` and `$NOW` filled in as RDF terms.
-const CHECKS: [(&str, &str); 5] = [
+const CHECKS: [(&str, &str); 6] = [
     ("orphaned", include_str!("../doctor/orphaned.rq")),
     ("abandoned", include_str!("../doctor/abandoned.rq")),
     ("lease-expired", include_str!("../doctor/lease_expired.rq")),
     ("unknown-state", include_str!("../doctor/unknown_state.rq")),
     ("two-states", include_str!("../doctor/two_states.rq")),
+    (
+        "awaiting-closed",
+        include_str!("../doctor/awaiting_closed.rq"),
+    ),
 ];
 
 /// When the doctor's answer next changes with nothing written.
@@ -853,6 +857,22 @@ impl Endpoint for DoctorEndpoint {
                             ledger.graph()
                         ),
                     ),
+                    "awaiting-closed" => (
+                        format!(
+                            "{short} is closed and still awaiting {}; a close answers a \
+                             hand-back, so a write around the ledger did this",
+                            rows[0]
+                                .get("whom")
+                                .map(|b| model::awaiting_name(&b.value).to_string())
+                                .unwrap_or_else(|| "?".to_string())
+                        ),
+                        format!(
+                            "reopen it (`sink {} item={number}`), which clears it, and close it \
+                             again; or remove `ledger:awaiting` with one SPARQL UPDATE over `{}`",
+                            ledger.resource("reopen"),
+                            ledger.graph()
+                        ),
+                    ),
                     _ => (
                         format!(
                             "{short} holds {} states ({}); a transition is one compare-and-set, \
@@ -951,10 +971,11 @@ impl Endpoint for DoctorEndpoint {
                 .title("What is structurally wrong with a ledger")
                 .summary(
                     "Read-only, and it never repairs: every item with a machine claim and no \
-                     in-flight state (orphaned), an in-flight state and no claim (abandoned), an \
-                     expired lease, a state the ledger's lifecycle does not declare, or two \
-                     states — all at once, each with a remedy. Each check is a stored SPARQL \
-                     query over the ledger's graph.",
+                     in-flight state (orphaned), an in-flight state, no claim and no hand-back \
+                     awaiting its dispatcher (abandoned), an expired lease, a state the \
+                     ledger's lifecycle does not declare, two states, or a closed item still \
+                     awaiting someone (awaiting-closed) — all at once, each with a remedy. Each \
+                     check is a stored SPARQL query over the ledger's graph.",
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)

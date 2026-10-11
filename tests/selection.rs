@@ -89,7 +89,7 @@ fn a_block_cycle_is_refused_with_the_cycle_named() {
     assert!(next.contains("#1"), "{next}");
 }
 
-/// The default is kata's rule, so behaviour is diffable against the tool being replaced.
+/// The default is kata's rule, so behavior is diffable against the tool being replaced.
 #[test]
 fn the_default_policy_is_katas_priority_then_recency() {
     let kernel = kernel();
