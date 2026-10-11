@@ -1011,6 +1011,27 @@ All twenty-one resources are bound, tested, and walked clean by `ikigai-conforma
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.7.0 (2026-10-10): per-verb grants for claim, comment and close; keyed comments; a close releases the claim (ledger #1178, #1143, #1147)
+
+A minor, because behavior changes: a close now releases the claim it finds (recorded as a
+comment), and `claim`, `comment`, `close` and `reopen` declare a different floor. Additive
+otherwise: three grants, a `key` on `comment`, a `released` field on the close answer, a term.
+
+- **`urn:cap:ledger:{claim,comment,close}:{ledger}`**, so a worker can claim, renew, release and
+  comment without being able to close, relabel, edit or file; `write:{ledger}` still covers all
+  three, so no grant changes meaning. The worker grant is published line by line in "What is
+  enforced, and where". ⚠ Those four actions now DECLARE `urn:cap:ledger:*` (core has no
+  one-of `requires`), which over-offers them to read and delete holders; enforcement is exact.
+- **`comment key=<k>`**: a replay writes nothing and answers `existing`, in one guarded update
+  (`ledger:commentKey`, a name apart from an item's `ledger:key`).
+- **A close releases the claim** in the same update; `released <holder>` in the plain answer,
+  `released` in JSON, and a comment naming who held it. A release needs only the claim grant,
+  whoever holds the claim (a holder is free text).
+- **Claim compare-and-sets**: `delete …:claim from=<holder>` releases only while that holder
+  still holds the claim, and `claim renew=true` extends only a claim the holder holds now, so a
+  worker that lost its claim cannot drop the new holder's or silently re-take the item. Both
+  opt-in; a release without `from=` still drops whoever holds the claim.
+
 ### 0.6.2 (2026-10-10): `ikigai-store` 0.2.10 is the floor, so a ledger's grants are no network egress (ledger #1085)
 
 A patch: no resource, face, argument or byte changes, and no `src/` change. The `ikigai-store`
