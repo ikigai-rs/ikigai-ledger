@@ -189,6 +189,7 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .fixture(Fixture::new("ledger-purge", Verb::Delete).arg("content", &purge_target))
         // What the reads promise.
         .cacheable("ledger-items")
+        .cacheable("ledger-count")
         .cacheable("ledger-item")
         .cacheable("ledger-next")
         .cacheable("ledger-item-state")
@@ -229,7 +230,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
     // The store's seven are in the walk too (they are bound in this kernel); this test is
-    // about the twenty-one THIS crate binds.
+    // about the twenty-two THIS crate binds.
     let mut walked: Vec<&str> = report
         .walked
         .iter()
@@ -244,6 +245,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-claim",
             "ledger-close",
             "ledger-comment",
+            "ledger-count",
             "ledger-defer",
             "ledger-doctor",
             "ledger-item",

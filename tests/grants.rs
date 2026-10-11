@@ -175,6 +175,7 @@ fn script() -> Vec<Step> {
             &[("content", "The second item")],
         ),
         step("ledger-items", Verb::Source, at("items"), &[]),
+        step("ledger-count", Verb::Source, at("count"), &[]),
         step("ledger-item", Verb::Source, at("item:1"), &[]),
         step("ledger-item", Verb::Exists, at("item:1"), &[]),
         step(

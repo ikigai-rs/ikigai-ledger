@@ -370,6 +370,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             },
         )
         .bind(LedgerGrammar::action("items"), ItemsEndpoint)
+        .bind(LedgerGrammar::action("count"), CountEndpoint)
         // ⚠ The item PARTS go ahead of `item:{id}`, whose `{id}` takes the rest of the IRI:
         // bound after it, `item:12:state` would be read as an item whose id is `12:state`.
         .bind(
@@ -1020,49 +1021,9 @@ impl Endpoint for ItemsEndpoint {
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv, &READ_FACES)?;
-        let filter = Filter {
-            status: match inv.inline_str("status").unwrap_or("open") {
-                "closed" => Status::Closed,
-                "all" => Status::All,
-                "open" => Status::Open,
-                other => {
-                    return Err(Error::InvalidArgument {
-                        name: "status".to_string(),
-                        detail: format!("`{other}` is not one of open, closed, all"),
-                    })
-                }
-            },
-            kind: inv.inline_str("kind").ok().map(str::to_string),
-            labels: split_labels(inv.inline_str("labels").ok()),
-            without: split_labels(inv.inline_str("without").ok()),
-            about: inv.inline_str("about").ok().map(str::to_string),
-            key: inv
-                .inline_str("key")
-                .ok()
-                .map(model::parse_key)
-                .transpose()?,
-            holder: match inv.inline_str("holder").ok() {
-                None | Some("any") => Holder::Any,
-                Some("none") => Holder::None,
-                Some(name) => Holder::Named(name.to_string()),
-            },
-            deferred: match inv.inline_str("deferred").unwrap_or("include") {
-                "include" => Deferred::Include,
-                "exclude" => Deferred::Exclude,
-                "only" => Deferred::Only,
-                // Refused, never substituted: a typo (`exlude`) read as `include` answered
-                // a different question, with exactly the items the caller asked to leave out.
-                other => {
-                    return Err(Error::InvalidArgument {
-                        name: "deferred".to_string(),
-                        detail: format!("`{other}` is not one of include, exclude, only"),
-                    })
-                }
-            },
-            text: inv.inline_str("text").ok().map(str::to_string),
-            limit: parse_limit(inv, 50)?,
-            offset: parse_count(inv, "offset", 0)?,
-        };
+        let mut filter = listing_filter(inv)?;
+        filter.limit = parse_limit(inv, 50)?;
+        filter.offset = parse_count(inv, "offset", 0)?;
         let items = model::load_items(&client, &filter).await?;
         if want == TURTLE {
             let mut graph = Graph::new();
@@ -1171,119 +1132,247 @@ impl Endpoint for ItemsEndpoint {
 
     fn describe(&self) -> Description {
         read_scopes(
-            Description::new("ledger-items")
-                .title("The ledger, filtered")
-                .summary(
-                    "Every item matching the filter, most recently updated first. The \
-                     filters are evaluated in the query, which is why the ordering policy \
-                     behind `urn:iki:ledger:next` can stay small.",
-                )
-                .verb(Verb::Source)
-                .verb(Verb::Meta)
-                .input(ledger_arg("items"))
-                .input(
-                    ArgSpec::new("status")
-                        .summary("Which items: open (the default), closed, or all.")
-                        .class(v::ext::XSD_STRING)
-                        .one_of(["open", "closed", "all"])
-                        .default_value("open")
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("kind")
-                        .summary(
-                            "An item class IRI — the LEVEL. Items of every level assert \
-                             the base class, so omitting this asks the whole ledger and \
-                             naming one scopes to that level.",
-                        )
-                        .class(v::ext::XSD_ANY_URI)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("labels")
-                        .summary("Comma-separated; an item must carry ALL of them.")
-                        .class(v::ext::XSD_STRING)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("without")
-                        .summary("Comma-separated; an item must carry NONE of them.")
-                        .class(v::ext::XSD_STRING)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("about")
-                        .summary(
-                            "A resource IRI: what is filed against this file, commit, PR \
-                             or brief. The join the ledger exists to make cheap.",
-                        )
-                        .class(v::ext::XSD_ANY_URI)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("key")
-                        .summary(
-                            "The caller's own name for an item (`append key=`). At most one \
-                             item in a ledger carries a key, so this finds it — subject to \
-                             `status` like every filter here (`status=all` to include a \
-                             closed one). `urn:iki:ledger:item:key:{key}` is the same lookup \
-                             as a resource.",
-                        )
-                        .class(v::ext::XSD_STRING)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("holder")
-                        .summary("`any` (default), `none` for unclaimed, or a holder's name.")
-                        .class(v::ext::XSD_STRING)
-                        .default_value("any")
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("deferred")
-                        .summary("include (default), exclude, or only.")
-                        .class(v::ext::XSD_STRING)
-                        .one_of(["include", "exclude", "only"])
-                        .default_value("include")
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("text")
-                        .summary("A case-insensitive substring of the title.")
-                        .class(v::ext::XSD_STRING)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("limit")
-                        .summary(
-                            "At most this many items on the page (default 50; `0` means 500). \
-                             A page is not the set: the plain face's footer and the JSON \
-                             face's `total` give how many items match, and `offset=` reaches \
-                             the rest. The Turtle face is the page's items alone.",
-                        )
-                        .class(v::ext::XSD_INTEGER)
-                        .default_value("50")
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("offset")
-                        .summary(
-                            "How many matching items to skip, in the listing's order (default \
-                             0); the next page is at `offset` plus `limit`. ⚠ The order is \
-                             most recently updated first, so an item updated between two page \
-                             reads moves to the front and is missed or repeated: when the \
-                             whole set matters, read it as one page.",
-                        )
-                        .class(v::ext::XSD_INTEGER)
-                        .default_value("0")
-                        .optional(),
-                )
-                .input(as_arg(&READ_FACES))
-                .output(PLAIN)
-                .output(TURTLE)
-                .output(JSON),
+            filter_inputs(
+                Description::new("ledger-items")
+                    .title("The ledger, filtered")
+                    .summary(
+                        "Every item matching the filter, most recently updated first. The \
+                         filters are evaluated in the query, which is why the ordering policy \
+                         behind `urn:iki:ledger:next` can stay small.",
+                    )
+                    .verb(Verb::Source)
+                    .verb(Verb::Meta)
+                    .input(ledger_arg("items")),
+            )
+            .input(
+                ArgSpec::new("limit")
+                    .summary(
+                        "At most this many items on the page (default 50; `0` means 500). \
+                         A page is not the set: the plain face's footer and the JSON \
+                         face's `total` give how many items match, and `offset=` reaches \
+                         the rest. The Turtle face is the page's items alone. For the total \
+                         alone, read `urn:iki:ledger:count` with the same filter: it skips \
+                         the page and the corpus check.",
+                    )
+                    .class(v::ext::XSD_INTEGER)
+                    .default_value("50")
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("offset")
+                    .summary(
+                        "How many matching items to skip, in the listing's order (default \
+                         0); the next page is at `offset` plus `limit`. ⚠ The order is \
+                         most recently updated first, so an item updated between two page \
+                         reads moves to the front and is missed or repeated: when the \
+                         whole set matters, read it as one page.",
+                    )
+                    .class(v::ext::XSD_INTEGER)
+                    .default_value("0")
+                    .optional(),
+            )
+            .input(as_arg(&READ_FACES))
+            .output(PLAIN)
+            .output(TURTLE)
+            .output(JSON),
         )
     }
+}
+
+// --------------------------------------------------------------------------- count
+
+/// The faces of `count`: the number, and the number as a [`json::CountDocument`]. No Turtle —
+/// a count is not a graph, and the vocabulary has no term for it.
+const COUNT_FACES: [&str; 2] = [PLAIN, JSON];
+
+/// `urn:iki:ledger:{ledger}:count` — how many items a filter admits, and nothing else
+/// (ledger #1128).
+///
+/// ★ **The total has its own name because reading it through `items` paid for everything
+/// else.** gonk's ledger page read `items limit=1 as=application/json` for its `total`, and
+/// that face always ran the corpus check ([`model::defects`]): two scans of the whole graph,
+/// returning a row per item per timestamp and number, to fill an `unreadable` list the caller
+/// never read. Measured over an uncached kernel at 3000 items, the check was ~60% of the read
+/// and the COUNT ~6% (`tests/listing_cost.rs`). The listing faces keep the check, unchanged:
+/// they show what it finds. This is the door for a caller that wants only the number.
+///
+/// The same filter, parsed by the same function ([`listing_filter`]), counted by the same
+/// query ([`model::count_items`]) — so this is `items`' `total` for the same arguments, an
+/// item a hand edit made unreadable included (counted there too, reported only by the
+/// listing's footer). `tests/count.rs` holds the two equal over every filter.
+#[derive(Clone)]
+struct CountEndpoint;
+
+#[async_trait]
+impl Endpoint for CountEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(unsupported("ledger-count", inv.request.verb));
+        }
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
+        let want = wanted_face(inv, &COUNT_FACES)?;
+        let filter = listing_filter(inv)?;
+        let total = model::count_items(&client, &filter).await?;
+        if want == JSON {
+            return Ok(json_face(json::render(&json::CountDocument {
+                schema: json::SCHEMA,
+                ledger: client.ledger().name().to_string(),
+                total,
+            })?));
+        }
+        face(format!("{total}\n"), None, want)
+    }
+
+    fn name(&self) -> &str {
+        "ledger-count"
+    }
+
+    fn describe(&self) -> Description {
+        read_scopes(
+            filter_inputs(
+                Description::new("ledger-count")
+                    .title("How many items match")
+                    .summary(
+                        "How many items the filter admits: `items`' total for the same \
+                         arguments, without the page and without the corpus check, so it \
+                         costs one COUNT query. The plain face is the bare number.",
+                    )
+                    .verb(Verb::Source)
+                    .verb(Verb::Meta)
+                    .input(ledger_arg("count")),
+            )
+            .input(as_arg(&COUNT_FACES))
+            .output(PLAIN)
+            .output(JSON),
+        )
+    }
+}
+
+/// The filter's inputs, in the order `items` has always declared them: `status`, `kind`,
+/// `labels`, `without`, `about`, `key`, `holder`, `deferred`, `text` — what
+/// [`listing_filter`] parses, declared once for `items` and `count`.
+fn filter_inputs(desc: Description) -> Description {
+    desc.input(
+        ArgSpec::new("status")
+            .summary("Which items: open (the default), closed, or all.")
+            .class(v::ext::XSD_STRING)
+            .one_of(["open", "closed", "all"])
+            .default_value("open")
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("kind")
+            .summary(
+                "An item class IRI — the LEVEL. Items of every level assert \
+                 the base class, so omitting this asks the whole ledger and \
+                 naming one scopes to that level.",
+            )
+            .class(v::ext::XSD_ANY_URI)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("labels")
+            .summary("Comma-separated; an item must carry ALL of them.")
+            .class(v::ext::XSD_STRING)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("without")
+            .summary("Comma-separated; an item must carry NONE of them.")
+            .class(v::ext::XSD_STRING)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("about")
+            .summary(
+                "A resource IRI: what is filed against this file, commit, PR \
+                 or brief. The join the ledger exists to make cheap.",
+            )
+            .class(v::ext::XSD_ANY_URI)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("key")
+            .summary(
+                "The caller's own name for an item (`append key=`). At most one \
+                 item in a ledger carries a key, so this finds it — subject to \
+                 `status` like every filter here (`status=all` to include a \
+                 closed one). `urn:iki:ledger:item:key:{key}` is the same lookup \
+                 as a resource.",
+            )
+            .class(v::ext::XSD_STRING)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("holder")
+            .summary("`any` (default), `none` for unclaimed, or a holder's name.")
+            .class(v::ext::XSD_STRING)
+            .default_value("any")
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("deferred")
+            .summary("include (default), exclude, or only.")
+            .class(v::ext::XSD_STRING)
+            .one_of(["include", "exclude", "only"])
+            .default_value("include")
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("text")
+            .summary("A case-insensitive substring of the title.")
+            .class(v::ext::XSD_STRING)
+            .optional(),
+    )
+}
+
+/// The filter `items` and `count` share — every argument but the page (`limit`, `offset`),
+/// which only a listing has. One parser, so `count`'s number is the listing's `total` for the
+/// same arguments, refusals included.
+fn listing_filter(inv: &Invocation<'_>) -> Result<Filter> {
+    Ok(Filter {
+        status: match inv.inline_str("status").unwrap_or("open") {
+            "closed" => Status::Closed,
+            "all" => Status::All,
+            "open" => Status::Open,
+            other => {
+                return Err(Error::InvalidArgument {
+                    name: "status".to_string(),
+                    detail: format!("`{other}` is not one of open, closed, all"),
+                })
+            }
+        },
+        kind: inv.inline_str("kind").ok().map(str::to_string),
+        labels: split_labels(inv.inline_str("labels").ok()),
+        without: split_labels(inv.inline_str("without").ok()),
+        about: inv.inline_str("about").ok().map(str::to_string),
+        key: inv
+            .inline_str("key")
+            .ok()
+            .map(model::parse_key)
+            .transpose()?,
+        holder: match inv.inline_str("holder").ok() {
+            None | Some("any") => Holder::Any,
+            Some("none") => Holder::None,
+            Some(name) => Holder::Named(name.to_string()),
+        },
+        deferred: match inv.inline_str("deferred").unwrap_or("include") {
+            "include" => Deferred::Include,
+            "exclude" => Deferred::Exclude,
+            "only" => Deferred::Only,
+            // Refused, never substituted: a typo (`exlude`) read as `include` answered
+            // a different question, with exactly the items the caller asked to leave out.
+            other => {
+                return Err(Error::InvalidArgument {
+                    name: "deferred".to_string(),
+                    detail: format!("`{other}` is not one of include, exclude, only"),
+                })
+            }
+        },
+        text: inv.inline_str("text").ok().map(str::to_string),
+        limit: 0,
+        offset: 0,
+    })
 }
 
 /// `limit=`, or `default` when absent — and **refused** when present but not a count,
