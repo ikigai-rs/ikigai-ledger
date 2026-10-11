@@ -276,7 +276,8 @@ fn the_json_item_document_is_schema_1() {
       "purpose": "brief-x",
       "kind": "machine",
       "expires": null,
-      "lease": null
+      "lease": null,
+      "principal": null
     },
     "created": "2026-09-15T00:00:00.000Z",
     "modified": "2026-09-15T00:00:00.000Z",
@@ -299,7 +300,8 @@ fn the_json_item_document_is_schema_1() {
       }
     ],
     "defects": [],
-    "state": "filed"
+    "state": "filed",
+    "awaiting": null
   }
 }"##
     );
@@ -344,7 +346,8 @@ fn the_json_items_document_is_schema_1() {
       "links": [],
       "comments": [],
       "defects": [],
-      "state": "filed"
+      "state": "filed",
+      "awaiting": null
     },
     {
       "number": 3,
@@ -375,7 +378,8 @@ fn the_json_items_document_is_schema_1() {
         }
       ],
       "defects": [],
-      "state": "filed"
+      "state": "filed",
+      "awaiting": null
     }
   ],
   "unreadable": []
@@ -429,7 +433,8 @@ fn the_json_next_document_is_schema_1() {
         "links": [],
         "comments": [],
         "defects": [],
-        "state": "filed"
+        "state": "filed",
+        "awaiting": null
       }
     }
   ],
@@ -464,7 +469,8 @@ fn the_json_next_document_is_schema_1() {
         "links": [],
         "comments": [],
         "defects": [],
-        "state": "filed"
+        "state": "filed",
+        "awaiting": null
       }
     },
     {
@@ -499,7 +505,8 @@ fn the_json_next_document_is_schema_1() {
           "purpose": "brief-x",
           "kind": "machine",
           "expires": null,
-          "lease": null
+          "lease": null,
+          "principal": null
         },
         "created": "2026-09-15T00:00:00.000Z",
         "modified": "2026-09-15T00:00:00.000Z",
@@ -522,7 +529,8 @@ fn the_json_next_document_is_schema_1() {
           }
         ],
         "defects": [],
-        "state": "filed"
+        "state": "filed",
+        "awaiting": null
       }
     }
   ]

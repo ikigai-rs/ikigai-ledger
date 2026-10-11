@@ -10,8 +10,8 @@
 //! 3. Compute leverage — how many open items each one transitively unblocks.
 //! 4. Narrow to the caller's filters (level, labels, `about`), evaluated **in the query**
 //!    by the same clauses `urn:iki:ledger:items` uses.
-//! 5. Partition what is left: ready (unclaimed, not deferred, no open blocker) versus
-//!    excluded, and keep the exclusion reasons.
+//! 5. Partition what is left: ready (unclaimed, not awaiting its dispatcher, not deferred,
+//!    no open blocker) versus excluded, and keep the exclusion reasons.
 //! 6. Hand the ready set to the [`OrderingPolicy`].
 //!
 //! ⚠ **Steps 2 and 3 run over the whole ledger and step 4 comes after them, and that
@@ -67,6 +67,9 @@ pub enum Excluded {
         /// When the lease ran out (ms since the epoch).
         expires: u64,
     },
+    /// Handed back by its worker (`comment handback=true`) and waiting for the dispatcher to
+    /// check the evidence and close it, or reject it (ledger #1199). Added in 0.8.0.
+    AwaitingDispatcher,
     /// Deliberately not now.
     Deferred,
     /// One or more open items block it.
@@ -92,6 +95,7 @@ impl Excluded {
                 "lease expired: claimed by {holder} until {}",
                 sparql::iso8601(*expires)
             ),
+            Excluded::AwaitingDispatcher => "handed back, awaiting the dispatcher".to_string(),
             Excluded::Deferred => "deferred".to_string(),
             Excluded::Blocked(numbers) => format!(
                 "blocked by {}",
@@ -254,6 +258,10 @@ async fn ready_inner(
                 }
                 _ => Some(Excluded::Claimed(holder)),
             }
+        } else if item.awaiting.is_some() {
+            // ★ Any `ledger:awaiting` value, not only the dispatcher's: an item waiting on
+            // someone is not ready for a worker, whoever the out-of-band write named.
+            Some(Excluded::AwaitingDispatcher)
         } else if item.deferred {
             Some(Excluded::Deferred)
         } else {

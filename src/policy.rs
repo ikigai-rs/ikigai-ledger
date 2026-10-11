@@ -137,7 +137,7 @@ pub trait OrderingPolicy: Send + Sync {
     }
 }
 
-/// kata's own rule, reimplemented so our behaviour can be **diffed against the tool we
+/// kata's own rule, reimplemented so our behavior can be **diffed against the tool we
 /// are replacing** rather than merely claimed to be better.
 ///
 /// From `cmd/kata/ready_client.go:153` (`selectNextReadyIssue`), a single linear pass:
@@ -158,7 +158,7 @@ impl OrderingPolicy for PriorityRecency {
 
     fn summary(&self) -> &str {
         "kata's rule: any priority beats none, lower priority wins, ties go to the most \
-         recently updated. The default, so behaviour can be diffed against the tool this \
+         recently updated. The default, so behavior can be diffed against the tool this \
          replaces."
     }
 

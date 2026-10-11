@@ -138,6 +138,15 @@ pub struct Item {
     /// When the lease runs out (ms since the epoch). Expired is `lease_expires <= now` on the
     /// kernel's clock, and an expired lease is still a claim: never silently free.
     pub lease_expires: Option<u64>,
+    /// The principal the claim was taken AS (`ledger:claimPrincipal`): the one principal the
+    /// claimant's capability carried, beside [`claimed_by`](Item::claimed_by), the holder's
+    /// free-text label. `None` for a claim taken without one (a host without principals, root,
+    /// or a claim from before 0.8.0), which any claim-grant holder may release as before.
+    pub claim_principal: Option<String>,
+    /// Who the item waits on after a hand-back (`ledger:awaiting`), as stored:
+    /// [`AWAITING_DISPATCHER`](crate::vocabulary::iri::AWAITING_DISPATCHER) after
+    /// `comment handback=true`. `next` does not offer an item that has one (ledger #1199).
+    pub awaiting: Option<String>,
     /// Milliseconds since the epoch.
     ///
     /// ⚠ **A stand-in when [`defects`](Item::defects) names `dcterms:created`**: the item's
@@ -233,6 +242,9 @@ impl Item {
         if self.deferred {
             line.push_str("  deferred");
         }
+        if let Some(awaiting) = &self.awaiting {
+            line.push_str(&format!("  awaiting-{}", awaiting_name(awaiting)));
+        }
         if let Some(reason) = &self.closed_reason {
             line.push_str(&format!("  ({reason})"));
         }
@@ -289,6 +301,13 @@ impl Item {
         }
         if let Some(purpose) = &self.purpose {
             out.push_str(&format!("  purpose:  {purpose}\n"));
+        }
+        // Each only when there is one, so every item without renders exactly as in 0.7.0.
+        if let Some(principal) = &self.claim_principal {
+            out.push_str(&format!("  principal: {principal}\n"));
+        }
+        if let Some(awaiting) = &self.awaiting {
+            out.push_str(&format!("  awaiting: {}\n", awaiting_name(awaiting)));
         }
         // Only for a leased claim, so every claim taken without one renders as before.
         if let (Some(lease), Some(expires)) = (&self.lease, self.lease_expires) {
@@ -385,6 +404,14 @@ impl Item {
                 typed(&sparql::iso8601(expires), v::ext::XSD_DATETIME),
             );
         }
+        for (predicate, value) in [
+            (v::CLAIM_PRINCIPAL, &self.claim_principal),
+            (v::AWAITING, &self.awaiting),
+        ] {
+            if let Some(node) = value.as_deref().and_then(|iri| NamedNode::new(iri).ok()) {
+                push(predicate, node.into());
+            }
+        }
         // ⚠ A stand-in is never asserted: the graph face says what the store holds, so an
         // unreadable value goes out AS STORED and a missing one goes out as nothing.
         if self.read.0 {
@@ -426,6 +453,17 @@ impl Item {
                 }
             }
         }
+    }
+}
+
+/// The word for an `ledger:awaiting` value: `dispatcher` for
+/// [`AWAITING_DISPATCHER`](crate::vocabulary::iri::AWAITING_DISPATCHER), the value as stored
+/// for anything else (an out-of-band write).
+pub fn awaiting_name(value: &str) -> &str {
+    if value == v::iri::AWAITING_DISPATCHER {
+        "dispatcher"
+    } else {
+        value
     }
 }
 
@@ -562,7 +600,7 @@ pub fn turtle(graph: &Graph) -> Result<Vec<u8>> {
 /// **`FILTER NOT EXISTS` is unreachable by binding.** Measured against `ikigai-store` 0.2.2
 /// on 2026-09-13: a variable occurring only inside `FILTER NOT EXISTS { … }` is not in the
 /// projection *even under `SELECT *`*, and the endpoint **refuses** the binding rather than
-/// ignoring it. The refusal is the right behaviour — a filter you thought was applied can
+/// ignoring it. The refusal is the right behavior — a filter you thought was applied can
 /// never silently not be — but it means the `without` filter here (`FILTER NOT EXISTS
 /// { ?item ledger:label "x" }`) cannot take that door at all.
 ///
@@ -575,7 +613,7 @@ pub fn turtle(graph: &Graph) -> Result<Vec<u8>> {
 /// test in `crate::sparql` pins the composition.
 ///
 /// What would change the answer: a way to bind into a `NOT EXISTS` subpattern (upstream, in
-/// oxigraph), or dropping `without` in favour of a shape this crate writes differently —
+/// oxigraph), or dropping `without` in favor of a shape this crate writes differently —
 /// `MINUS`, which has the same scoping problem, or a client-side exclusion, which moves work
 /// out of the store for no gain.
 fn filter_clauses(filter: &Filter) -> Result<String> {
@@ -930,7 +968,8 @@ async fn load(
     };
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires WHERE {{ {} }} \
+         ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
+         ?principal ?awaiting WHERE {{ {} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
             "{values}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -950,7 +989,9 @@ async fn load(
              OPTIONAL {{ ?item <{state}> ?state }}\n\
              OPTIONAL {{ ?item <{claim_kind}> ?claimKind }}\n\
              OPTIONAL {{ ?item <{lease}> ?lease }}\n\
-             OPTIONAL {{ ?item <{expires}> ?expires }}\n{filters}",
+             OPTIONAL {{ ?item <{expires}> ?expires }}\n\
+             OPTIONAL {{ ?item <{principal}> ?principal }}\n\
+             OPTIONAL {{ ?item <{awaiting}> ?awaiting }}\n{filters}",
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
             number = v::NUMBER,
@@ -971,6 +1012,8 @@ async fn load(
             claim_kind = v::CLAIM_KIND,
             lease = v::LEASE,
             expires = v::LEASE_EXPIRES,
+            principal = v::CLAIM_PRINCIPAL,
+            awaiting = v::AWAITING,
             filters = filter_clauses(filter)?,
         ))
     );
@@ -984,7 +1027,8 @@ async fn load(
 pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option<Item>> {
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires WHERE {{ {} }} \
+         ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
+         ?principal ?awaiting WHERE {{ {} }} \
          ORDER BY DESC({RECENCY})",
         client.in_graph(&format!(
             "BIND({subject} AS ?item)\n\
@@ -1005,7 +1049,9 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{state}> ?state }}\n\
              OPTIONAL {{ ?item <{claim_kind}> ?claimKind }}\n\
              OPTIONAL {{ ?item <{lease}> ?lease }}\n\
-             OPTIONAL {{ ?item <{expires}> ?expires }}",
+             OPTIONAL {{ ?item <{expires}> ?expires }}\n\
+             OPTIONAL {{ ?item <{principal}> ?principal }}\n\
+             OPTIONAL {{ ?item <{awaiting}> ?awaiting }}",
             subject = sparql::iri(iri, "item")?,
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
@@ -1027,6 +1073,8 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
             claim_kind = v::CLAIM_KIND,
             lease = v::LEASE,
             expires = v::LEASE_EXPIRES,
+            principal = v::CLAIM_PRINCIPAL,
+            awaiting = v::AWAITING,
         ))
     );
     let rows = client.select(&query).await?;
@@ -1668,6 +1716,8 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
             .filter_map(|row| row.get("expires"))
             .filter_map(|b| millis(&b.value))
             .max(),
+        claim_principal: row.get("principal").map(|b| b.value.clone()),
+        awaiting: row.get("awaiting").map(|b| b.value.clone()),
         // Each stands in for the other: created ≤ modified, so a missing `created` is at
         // most the `modified`, and a missing `modified` is at least the `created`. Neither
         // is invented, and with neither readable there is no true time to show.
@@ -1776,6 +1826,8 @@ mod tests {
             claim_kind: None,
             lease: None,
             lease_expires: None,
+            claim_principal: None,
+            awaiting: None,
             created: 1_757_700_000_000,
             modified: 1_757_700_000_000,
             labels: vec!["module".to_string()],

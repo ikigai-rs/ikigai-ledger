@@ -4,7 +4,7 @@
 //! # ★ Why a name and not a tag
 //!
 //! A label is *data*; a capability binds to a *resource name*. There is nothing for
-//! `urn:cap:…` to attach to in "items labelled acme", so enforcement would have to live
+//! `urn:cap:…` to attach to in "items labeled acme", so enforcement would have to live
 //! inside the endpoint — declared-but-not-enforced, which this ecosystem refuses
 //! everywhere else. A tag partition is a **view**; only a name can be a **boundary**.
 //!

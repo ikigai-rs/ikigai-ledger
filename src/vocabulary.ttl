@@ -146,13 +146,13 @@ ledger:priority a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range xsd:integer ;
     rdfs:label "priority" ;
-    rdfs:comment "0 highest … 4 lowest, kata's convention kept deliberately so behaviour can be diffed against the tool being replaced. ABSENT means unset, and absent is not 4: the default policy ranks any item with a priority above every item without one, which is only meaningful if \"unset\" is a distinct state." .
+    rdfs:comment "0 highest … 4 lowest, kata's convention kept deliberately so behavior can be diffed against the tool being replaced. ABSENT means unset, and absent is not 4: the default policy ranks any item with a priority above every item without one, which is only meaningful if \"unset\" is a distinct state." .
 
 ledger:deferred a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range xsd:boolean ;
     rdfs:label "deferred" ;
-    rdfs:comment "Not now — open, not blocked by anything, not claimed, and still deliberately not offered. Modelled as a property because kata's equivalent (`someday`) is a flag inside a metadata JSON blob that exactly one query understands, which is a real concept wearing a hiding place. ⚠ Deliberately a BOOLEAN and not a deferred-until date: readiness that turns on the wall clock would go stale in the cache with no golden thread to cut it, so resuming is an act (Delete urn:iki:ledger:defer) rather than the passage of time." .
+    rdfs:comment "Not now — open, not blocked by anything, not claimed, and still deliberately not offered. Modeled as a property because kata's equivalent (`someday`) is a flag inside a metadata JSON blob that exactly one query understands, which is a real concept wearing a hiding place. ⚠ Deliberately a BOOLEAN and not a deferred-until date: readiness that turns on the wall clock would go stale in the cache with no golden thread to cut it, so resuming is an act (Delete urn:iki:ledger:defer) rather than the passage of time." .
 
 ledger:about a rdf:Property ;
     rdfs:domain ledger:Item ;
@@ -455,3 +455,19 @@ ledger:leaseExpires a rdf:Property ;
     rdfs:range xsd:dateTime ;
     rdfs:label "leaseExpires" ;
     rdfs:comment "When the claim's lease runs out, from the kernel's clock. ⚠ An expired lease is NOT a free item: the claim stays, `next` excludes the item as lease-expired naming the holder and this time, and only `claim takeover=true from=<holder>` takes it — a compare-and-set against that holder. A lease that expired silently would make \"owned\" mean \"owned as of an unspecified time\"." .
+
+ledger:claimPrincipal a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "claimPrincipal" ;
+    rdfs:comment "The principal the claim was taken AS: the one `urn:cap:principal:<iri>` the claimant's capability carried, minted by the host's door (gonk's QUIC door names each client `urn:iki:gonk:client:<fingerprint>`). Recorded beside ledger:claimedBy, which stays the holder's free-text label. ★ This, not the label, is what a release checks: a claim recorded with a principal is released only by a capability that acts as it, or by a dispatcher holding the ledger's close or write grant, so one worker cannot release another's claim by spelling its name. Absent when the claimant carried no principal (a host without them, or root), and then a holder is free text as it always was." .
+
+ledger:awaiting a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "awaiting" ;
+    rdfs:comment "Who an open item waits on: <urn:iki:ledger:awaiting:dispatcher> after a worker hands it back (`comment handback=true`, under the comment grant, in the same update as the comment). `next` does not offer an awaiting item. Cleared by close, by reopen, by a later comment with `rejects=true`, and by any comment from a caller holding the ledger's close grant. A state rather than a comment-text convention, because a worker cannot label (that needs the write grant) and `next` cannot read prose." .
+
+<urn:iki:ledger:awaiting:dispatcher>
+    rdfs:label "dispatcher" ;
+    rdfs:comment "The value of ledger:awaiting for an item handed back to whoever dispatched it, to check the evidence and close it, or reject it." .

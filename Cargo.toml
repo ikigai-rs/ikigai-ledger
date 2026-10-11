@@ -24,12 +24,12 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 # and where", states exactly which half is which.
 
 [dependencies]
-# 0.1.89 is the true minimum: it is where `space_iri` arrives (`space()` names itself
-# `urn:iki:space:ledger`, ledger #987), and where binding a door drops a space's name, so a
-# host that extends `space()` does not carry the claim over different doors. (0.1.80 was the
-# floor before: `Error::Conflict`, which a claim held by someone else is.) ⚠ `"0.1.89"` is a
-# range `>=0.1.89, <0.2.0`.
-ikigai-core = "0.1.89"
+# 0.1.93 is the true minimum: it is where a principal becomes a capability scope
+# (`Capability::principal` and `acts_as`, ledger #1077), which a claim records as its holder's
+# principal and a release checks (ledger #1199). (0.1.89 was the floor before: `space_iri`,
+# so `space()` names itself `urn:iki:space:ledger`, ledger #987; and 0.1.80 before that:
+# `Error::Conflict`.) ⚠ `"0.1.93"` is a range `>=0.1.93, <0.2.0`.
+ikigai-core = "0.1.93"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's

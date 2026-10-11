@@ -33,6 +33,11 @@ pub mod iri {
     /// `urn:iki:ledger:lifecycle:{name}` — host configuration like a policy, and every state
     /// of one is `{that}:{state}`. See [`crate::lifecycle`].
     pub const LIFECYCLE: &str = crate::lifecycle::PREFIX;
+    /// `urn:iki:ledger:awaiting:dispatcher` — the one value `ledger:awaiting` takes: the item
+    /// was handed back (`comment handback=true`) and waits for whoever dispatched it to check
+    /// the evidence and close it. An IRI rather than a boolean so a later "awaiting whom" is
+    /// additive (ledger #1199).
+    pub const AWAITING_DISPATCHER: &str = "urn:iki:ledger:awaiting:dispatcher";
 }
 
 /// External terms, reused rather than reinvented.
@@ -237,6 +242,10 @@ term! {
     LEASE => "lease";
     /// `ledger:leaseExpires` — when the lease runs out, from the kernel's clock.
     LEASE_EXPIRES => "leaseExpires";
+    /// `ledger:claimPrincipal` — the principal the claim was taken AS (ledger #1199).
+    CLAIM_PRINCIPAL => "claimPrincipal";
+    /// `ledger:awaiting` — who the item waits on after a hand-back (ledger #1199).
+    AWAITING => "awaiting";
 }
 
 /// The `@prefix` header every Turtle face this module emits carries.
