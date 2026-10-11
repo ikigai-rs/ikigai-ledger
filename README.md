@@ -121,10 +121,10 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:items` | Source | the list, filtered | `read:{ledger}` |
 | `…:{ledger}:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` of `{ledger}` |
 | `…:{ledger}:append` | Sink | file a new item | `write:{ledger}` |
-| `…:{ledger}:comment` | Sink | append a comment | `write:{ledger}` |
-| `…:{ledger}:close` | Sink | close with a reason | `write:{ledger}` |
-| `…:{ledger}:reopen` | Sink | undo a close | `write:{ledger}` |
-| `…:{ledger}:claim` | Sink · Delete | take it (optionally on a lease) / hand it back / take over an expired lease | `write:{ledger}` |
+| `…:{ledger}:comment` | Sink | append a comment, optionally under your own key | `comment:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:close` | Sink | close with a reason, releasing any claim | `close:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:reopen` | Sink | undo a close | `close:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:claim` | Sink · Delete | take it (optionally on a lease) / hand it back / take over an expired lease | `claim:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:defer` | Sink · Delete | not now / now again | `write:{ledger}` |
 | `…:{ledger}:link` | Sink · Delete | blocks / parent / related | `write:{ledger}` |
 | `…:{ledger}:label` | Sink · Delete | tag / untag | `write:{ledger}` |
@@ -304,6 +304,33 @@ Finding an item by its key:
 | `urn:iki:ledger:{ledger}:item:key:{key}` | the item resource itself — Source, Exists, Sink, Delete |
 | `item=key:{key}` | every write that names an item (`comment`, `close`, `link`, `claim`, …) and `purge` |
 | `items key={key}` | a filter, composing with the others — `status=all` to include a closed item |
+
+### Keyed comments: comment once, however often the request arrives
+
+`comment key=<k>` is the same idea for a comment (since 0.7.0, ledger #1178): if a comment in
+the ledger already carries the key, **nothing is written** and the answer names that comment,
+marked `existing`. A hand-back relayed by a mirror, or a hook that reports and then re-runs,
+is exactly the request that arrives twice:
+
+```text
+$ sink urn:iki:ledger:comment item=12 key=urn:collab:bobby:msg:01m4… <<< "Handed back: PR 41 merged"
+commented on #12 (urn:iki:ledger:default:comment:01m4…)
+$ sink urn:iki:ledger:comment item=12 key=urn:collab:bobby:msg:01m4… <<< "Handed back: PR 41 merged"
+commented on #12 (urn:iki:ledger:default:comment:01m4…) existing
+```
+
+- **The check is a clause of the write**, as for the append: both halves of the comment's
+  update carry `FILTER NOT EXISTS` over the key, so of concurrent keyed comments exactly one
+  writes (`tests/worker_grant.rs`). A taken key is answered with no write at all, so a replay
+  invalidates nothing.
+- **The item in the answer is the one the existing comment is ON**, which a replay naming a
+  different item would otherwise hide. In JSON: `"outcome": "existing"`, `key`, and `comment`
+  as it was written (the replay's own text is not stored).
+- **A comment key is a different name from an item key** (`ledger:commentKey`, not
+  `ledger:key`): one string may name an item and a comment, and neither blocks the other.
+- ⚠ **Unlike an item's key, a comment's leaves with its item.** Deleting an item moves its
+  comments, keys and all, to the graveyard; a replay naming the deleted item is refused as not
+  found, but one naming a different live item would write. Comments have no tombstones.
 
 ## The JSON face
 
@@ -621,6 +648,22 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
 - **The claim's kind**, `machine` or `person`, is in the JSON face (`claim.kind`) and in the
   graph (`ledger:claimKind`). The doctor reports a machine claim on an item that is not in
   flight and leaves a person's hold alone.
+- ★ **A close releases the claim** (since 0.7.0, ledger #1147). Closed work is held by nobody;
+  until 0.7.0 a close left the claim in place, so a closed item went on showing under
+  `items holder=` and a machine's claim on it was the doctor's orphan. The release is in the
+  same store update as the close, and it is recorded: a comment `Closed while claimed by
+  <holder>; the claim is released.` (attributed to the closer's `author`), `released <holder>`
+  at the end of the plain answer, and `"released": "<holder>"` in JSON. Reopening does not
+  restore it; whoever picks the work up again claims it.
+- ⚠ **A release needs only the claim grant, whoever holds the claim.** `delete …:claim` takes
+  `urn:cap:ledger:claim:{ledger}` (or `write:{ledger}`) and releases any holder's claim, a
+  worker's included. Decided 2026-10-10, for two reasons: a holder is FREE TEXT, so whether the
+  caller is the holder cannot be checked, and a rule that could not be checked would only read
+  as protection; and the collaboration layer's mirror, which holds claim and comment and never
+  close, must release a claim it took in a collaborator's name when that collaborator says
+  `Release`. Requiring `close` for someone else's claim would give the mirror the close it is
+  designed never to hold. The fix for "a worker can drop another worker's claim" is the holder
+  being the caller's principal, which is not built (see "What is enforced, and where").
 
 ### ★ The kind is the HOST's to stamp, and a direct embedder owns that
 
@@ -734,6 +777,44 @@ ledger, matched exactly**. Delete and purge are separated from the everyday writ
 because they take work *out* of the record, and a ledger holds whatever anyone filed, so an
 unrestricted read is not free either.
 
+**Since 0.7.0 three verbs also have grants of their own** (ledger #1178, #1143), so that a
+worker can be handed the work without the verdict on it:
+
+| grant | reaches | and nothing else |
+| --- | --- | --- |
+| `urn:cap:ledger:claim:{ledger}` | `claim` Sink (take, renew, take over) and Delete (release) | |
+| `urn:cap:ledger:comment:{ledger}` | `comment`, keyed or not | |
+| `urn:cap:ledger:close:{ledger}` | `close` and `reopen` | |
+| `urn:cap:ledger:write:{ledger}` | **all three of the above**, and filing, linking, labeling, deferring, editing, `about`, state | unchanged: no grant issued before 0.7.0 changed meaning |
+
+A claim's or a close's note, and the release record a close writes, are part of that verb and
+need no comment grant.
+
+★ **The worker grant**, as an operator's config line (here for ledger `acme`): claim, renew,
+release, comment and read, and **no close, no relabel, no edit, no filing**:
+
+```text
+urn:cap:ledger:read:acme
+urn:cap:ledger:claim:acme
+urn:cap:ledger:comment:acme
+urn:cap:store:read:graph:urn:iki:ledger:graph:acme
+urn:cap:store:write:graph:urn:iki:ledger:graph:acme
+```
+
+The dispatcher who checks the evidence and closes adds `urn:cap:ledger:close:acme` (or holds
+`write:acme`). `tests/worker_grant.rs` runs exactly the worker lines above: claim, renew,
+comment and release succeed; close, reopen, label, edit, append, defer and delete are each a
+typed `Denied` naming the grant that would do.
+
+⚠ **What `claim`, `comment`, `close` and `reopen` DECLARE is `urn:cap:ledger:*`**, "holds some
+ledger grant", not their own family. They must admit both their own grant and `write:{ledger}`,
+and `ikigai-core` ANDs every `requires` and matches a family only as a trailing-`*` prefix, so
+the one family both satisfy is the common prefix. The exact either-or is enforced in the
+endpoint, and a refusal names both tokens. The cost is an over-offer: a caller holding only a
+read or delete grant (and a store graph write grant) sees those four actions in its manifold and
+is refused on invoking them. Declared stays a superset of enforced, never the reverse. A core
+`requires` that takes one of several scopes would let each declare exactly its own two.
+
 An action declares the **family** (`urn:cap:ledger:write:*`, "holds some ledger write
 grant") and enforces the exact scope for the ledger the IRI named. The two halves are the
 same scope; only the exactness differs, and the split exists because the kernel's
@@ -764,6 +845,7 @@ are these — **per ledger, and a grant for `acme` is worth nothing at `bosatsu`
 | --- | --- | --- |
 | read (`items`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
 | write (`append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, editing an item) | `urn:cap:ledger:write:L` | the read grant above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L` |
+| claim, comment, or close and reopen, alone | `urn:cap:ledger:claim:L`, `…:comment:L` or `…:close:L` | the same two as write |
 | delete (`Delete` on an item) | `urn:cap:ledger:delete:L` | both of the above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` |
 | purge | `urn:cap:ledger:purge:L` | the same three as delete **and** `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` |
 
@@ -820,6 +902,17 @@ is what makes that sentence checkable rather than merely written down), a host r
 manifold sees only the per-graph families, and issuing the broad one is a choice with no
 reason behind it. `a_host_that_hands_out_the_broad_store_grant_still_has_a_bypass` pins the
 other half in `tests/ledgers.rs`, because the two facts are only useful together.
+
+⚠ **And the per-verb grants are a boundary only where the store's door is closed to the
+caller.** A worker holds `urn:cap:store:write:graph:urn:iki:ledger:graph:L` because every ledger
+write goes to the store under the CALLER's capability; in a kernel where it can also resolve
+`urn:iki:store:graph-update` directly, that token is raw quad authority, and one SPARQL update
+closes an item without the close grant.
+`tests/worker_grant.rs::the_store_token_a_worker_holds_is_still_raw_authority_without_a_door_rule`
+pins it on a bare kernel. This crate cannot close it (a sub-request has no elevating form), and
+a host's door can: gonk's refuses a raw `graph-update` against a ledger graph unless the
+capability carries an explicit raw grant for it (ledger #878), so behind gonk's doors the worker
+grant is what it says.
 
 Two consequences worth stating plainly:
 

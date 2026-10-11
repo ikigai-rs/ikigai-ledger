@@ -171,6 +171,12 @@ ledger:key a rdf:Property ;
     rdfs:label "key" ;
     rdfs:comment "The CALLER'S name for an item: unique per ledger, chosen by whoever files it (`append key=`), and the thing a keyed append checks before it files. Its first use is idempotence (a hook re-run, two hooks racing) and its second is lookup by a foreign id (`urn:iki:ledger:item:key:{key}`, `items key=`) — a roborev finding, a kata issue — which is why it is called a key and not an idempotency key. A literal, not an IRI, so any caller's identifier fits; its shape is fixed (ASCII letters, digits, `-`, `.`, `_`, `~` and `:`, at most 256 characters) so it stays a legal IRI segment and survives a URL path. Compared exactly; never rewritten after filing. ⚠ No domain, for the ledger:number reason: an item AND the tombstone it leaves both carry it, so a deleted item's key stays TAKEN — a replayed request must not resurrect what someone deliberately deleted — and rdfs:domain ledger:Item would make every tombstone an inferred item to a reasoning consumer. ⚠ A key is a NAME, kept on the tombstone through a purge like the number is: it is not content, so do not put content in it." .
 
+ledger:commentKey a rdf:Property ;
+    rdfs:domain ledger:Comment ;
+    rdfs:range xsd:string ;
+    rdfs:label "comment key" ;
+    rdfs:comment "The CALLER'S name for a comment: unique per ledger, chosen by whoever writes it (`comment key=`), and checked in the same store update that writes the comment, so a replayed request (a hand-back seen twice, a hook re-run) comments once and answers the comment already there, marked existing. The same shape as ledger:key (ASCII letters, digits, `-`, `.`, `_`, `~` and `:`, at most 256 characters) and compared exactly. ⚠ A separate property from ledger:key on purpose: a keyed append refuses to file while ANY subject carries its ledger:key, so sharing the property would let a comment's key block an item's. ⚠ Unlike an item's key it is not kept on a tombstone: deleting an item moves its comments, keys and all, to the graveyard." .
+
 ledger:label a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range xsd:string ;

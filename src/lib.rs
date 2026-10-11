@@ -83,6 +83,12 @@
 //! for the ledger actually named is enforced inside. So **an agent's grants are the set
 //! of ledgers it may touch**, which is what naming them was for.
 //!
+//! Since 0.7.0 `urn:cap:ledger:{claim,comment,close}:{ledger}` split three verbs out of
+//! `write` as grants of their own, so a worker can claim and comment without being able to
+//! close; `write:{ledger}` still covers all three. Those four actions (`claim`, `comment`,
+//! `close`, `reopen`) declare [`CAP_ANY`], the one family both grants satisfy. `README.md`,
+//! "What is enforced, and where", publishes the worker grant line by line.
+//!
 //! A sub-request issued from inside an endpoint carries **the caller's** capability
 //! unchanged — `Invocation::issue` has no attenuating or elevating form — so whatever this
 //! crate asks the store for, the caller must hold. It asks only the narrow doors, so what
@@ -130,8 +136,8 @@ pub mod sparql;
 pub mod vocabulary;
 
 pub use endpoints::{
-    space, space_with, space_with_policies, SpaceConfig, CAP_DELETE, CAP_PURGE, CAP_READ,
-    CAP_WRITE, SPACE_ID,
+    space, space_with, space_with_policies, SpaceConfig, CAP_ANY, CAP_CLAIM, CAP_CLOSE,
+    CAP_COMMENT, CAP_DELETE, CAP_PURGE, CAP_READ, CAP_WRITE, SPACE_ID,
 };
 pub use ledger::Ledger;
 pub use lifecycle::{Lifecycle, Lifecycles};

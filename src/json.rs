@@ -317,13 +317,15 @@ pub struct NextDocument {
 /// | `outcome` | also carries |
 /// | --- | --- |
 /// | `filed` | `status` (`open`), and `key` when the append carried one |
-/// | `existing` | `status` (`open`, `closed` or `deleted`), `key` |
-/// | `commented` | `comment` |
-/// | `closed` | `reason`, and `comment` when a note was given |
+/// | `existing` (an append) | `status` (`open`, `closed` or `deleted`), `key` |
+/// | `existing` (a keyed comment) | `comment` (the one the key names), `key` |
+/// | `commented` | `comment`, and `key` when the comment carried one |
+/// | `closed` | `reason`; `comment` when a note was given; `released` when it was claimed |
 /// | `linked`, `unlinked` | `type`, `target` |
 ///
-/// `existing` is the keyed append's "nothing was filed": an item with that key was already
-/// in the ledger, and `item` names it. `status: deleted` means it was filed and then deleted
+/// `existing` is a keyed write's "nothing was written": an item (append) or a comment
+/// (comment) with that key was already in the ledger, and `item` names the item — for a
+/// comment, the item the existing comment is ON. `status: deleted` means it was filed and then deleted
 /// — the key stays taken, so a replayed request cannot resurrect it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -351,9 +353,14 @@ pub struct Answer {
     /// The link's object (`link` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ItemRef>,
-    /// The comment written (`comment`, and `close` with a note).
+    /// The comment written (`comment`, and `close` with a note), or for `existing` from a
+    /// keyed comment, the comment the key already names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<Comment>,
+    /// The holder whose claim a close released (`close` only, and only when the item was
+    /// claimed). Since 0.7.0 a close releases the claim it finds (ledger #1147).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released: Option<String>,
 }
 
 /// `…:item:{id}:state` — read, or the answer of a transition.
@@ -619,5 +626,6 @@ pub(crate) fn answer(ledger: &Ledger, outcome: &str, item: ItemRef) -> Answer {
         link_type: None,
         target: None,
         comment: None,
+        released: None,
     }
 }
