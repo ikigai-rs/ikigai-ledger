@@ -962,6 +962,14 @@ this prefix") and the store **enforces** the exact graph, because the kernel's c
 pre-check runs before an endpoint can read the ledger out of its own target. The same split
 the ledger's own grants use, for the same reason.
 
+⚠ **A family HELD is not a grant.** A capability that carries the literal
+`urn:cap:ledger:read:*` or `urn:cap:store:read:graph:*` (a script host's marker, say) names no
+ledger and no graph, so every read here refuses it: the kernel's floor when the store family is
+missing, the exact per-ledger check when it is not. A caller needs the exact tokens of the read
+row above, and those satisfy every read, `next` included. `tests/read_grants.rs` pins both
+(ledger #1220, where a root-run script on gonk carried only the ledger marker and read the
+refusal as `next` over-declaring).
+
 ### What this closes, and the one thing it does not
 
 ⚠ **First, the direction that is easy to forget: the table above has to be ENOUGH.** A
