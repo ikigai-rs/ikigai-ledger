@@ -1180,6 +1180,48 @@ pub async fn find_by_key(client: &StoreClient<'_, '_>, key: &str) -> Result<Opti
     }))
 }
 
+/// The comment carrying `key` in this client's ledger, if any — what a keyed comment
+/// checks before it writes, and what it answers when the key is taken (ledger #1178).
+///
+/// ★ **A comment's key is `ledger:commentKey`, never `ledger:key`.** The two namespaces are
+/// kept apart on purpose: the keyed append's guard refuses to file when ANY subject in the
+/// graph carries its `ledger:key`, so a comment carrying one would make an append under the
+/// same string file nothing and find nothing. One string may name an item and a comment.
+///
+/// ⚠ A comment's key leaves the live graph when its item is deleted (the comment moves to
+/// the graveyard with it), unlike an item's, which stays on the tombstone. A replay naming
+/// the deleted item is refused anyway (the item is not found); one naming a different live
+/// item would file. Comments have no tombstones, and adding one for a key was not worth it.
+pub async fn find_comment_by_key(
+    client: &StoreClient<'_, '_>,
+    key: &str,
+) -> Result<Option<Comment>> {
+    let query = format!(
+        "SELECT ?c ?item ?body ?author ?created WHERE {{ {} }} ORDER BY ?c LIMIT 1",
+        client.in_graph(&format!(
+            "?c <{key_p}> {key} ; <{type_}> <{class}> ; <{on}> ?item ; <{body}> ?body ; \
+             <{created}> ?created .\nOPTIONAL {{ ?c <{author}> ?author }}",
+            key_p = v::COMMENT_KEY,
+            key = literal(key),
+            type_ = v::ext::TYPE,
+            class = v::COMMENT_CLASS,
+            on = v::ON_ITEM,
+            body = v::BODY,
+            created = v::ext::CREATED,
+            author = v::AUTHOR,
+        ))
+    );
+    Ok(client.select(&query).await?.first().and_then(|row| {
+        Some(Comment {
+            iri: row.get("c")?.value.clone(),
+            on_item: row.get("item")?.value.clone(),
+            body: row.get("body")?.value.clone(),
+            author: row.get("author").map(|b| b.value.clone()),
+            created: millis(row.get("created")?.value.as_str())?,
+        })
+    }))
+}
+
 /// The numbers of whichever of `iris` are items in this client's ledger — how a link's
 /// target is named in the JSON face. An IRI that is not a live item is simply absent.
 pub async fn numbers_of(

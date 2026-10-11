@@ -143,6 +143,8 @@ term! {
     REVISION => "revision";
     /// `ledger:key` — the caller's own name for an item, unique per ledger.
     KEY => "key";
+    /// `ledger:commentKey` — the caller's own name for a comment, apart from `ledger:key`.
+    COMMENT_KEY => "commentKey";
     /// `ledger:label`
     LABEL => "label";
     /// `ledger:author`

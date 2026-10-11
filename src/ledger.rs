@@ -327,9 +327,37 @@ impl Ledger {
     }
 
     /// `urn:cap:ledger:write:{name}` — filing, commenting, closing, claiming, linking,
-    /// labelling, deferring, editing.
+    /// labeling, deferring, editing. It still means every one of those since 0.7.0, when
+    /// [`cap_claim`](Self::cap_claim), [`cap_comment`](Self::cap_comment) and
+    /// [`cap_close`](Self::cap_close) split three of them out as grants of their own.
     pub fn cap_write(&self) -> String {
         format!("{CAP_WRITE_PREFIX}{}", self.name)
+    }
+
+    /// `urn:cap:ledger:claim:{name}` — taking, renewing and releasing a claim, and nothing
+    /// else. Half of a worker's grant: claim without close (ledger #1143).
+    ///
+    /// ```
+    /// use ikigai_ledger::Ledger;
+    /// let acme = Ledger::parse("acme").unwrap();
+    /// assert_eq!(acme.cap_claim(), "urn:cap:ledger:claim:acme");
+    /// assert_eq!(acme.cap_comment(), "urn:cap:ledger:comment:acme");
+    /// assert_eq!(acme.cap_close(), "urn:cap:ledger:close:acme");
+    /// ```
+    pub fn cap_claim(&self) -> String {
+        format!("{CAP_CLAIM_PREFIX}{}", self.name)
+    }
+
+    /// `urn:cap:ledger:comment:{name}` — appending a comment, keyed or not, and nothing
+    /// else. The other half of a worker's grant.
+    pub fn cap_comment(&self) -> String {
+        format!("{CAP_COMMENT_PREFIX}{}", self.name)
+    }
+
+    /// `urn:cap:ledger:close:{name}` — closing and reopening, and nothing else: the
+    /// dispatcher's verdict on the work, held apart from the hands doing it.
+    pub fn cap_close(&self) -> String {
+        format!("{CAP_CLOSE_PREFIX}{}", self.name)
     }
 
     /// `urn:cap:ledger:delete:{name}` — moving an item out of view, recoverably.
@@ -348,6 +376,9 @@ pub(crate) const CAP_READ_PREFIX: &str = "urn:cap:ledger:read:";
 pub(crate) const CAP_WRITE_PREFIX: &str = "urn:cap:ledger:write:";
 pub(crate) const CAP_DELETE_PREFIX: &str = "urn:cap:ledger:delete:";
 pub(crate) const CAP_PURGE_PREFIX: &str = "urn:cap:ledger:purge:";
+pub(crate) const CAP_CLAIM_PREFIX: &str = "urn:cap:ledger:claim:";
+pub(crate) const CAP_COMMENT_PREFIX: &str = "urn:cap:ledger:comment:";
+pub(crate) const CAP_CLOSE_PREFIX: &str = "urn:cap:ledger:close:";
 
 /// A grammar matching **both** `urn:iki:ledger:{ledger}:{action}` and the bare
 /// `urn:iki:ledger:{action}`, capturing `ledger` either way.

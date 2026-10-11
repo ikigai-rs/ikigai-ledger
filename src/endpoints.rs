@@ -122,10 +122,39 @@ use crate::vocabulary as v;
 /// argument `ikigai-store` makes for gating its query face, now per partition.
 pub const CAP_READ: &str = "urn:cap:ledger:read:*";
 
-/// Every ordinary mutation — filing, commenting, closing, claiming, linking, labelling,
+/// Every ordinary mutation — filing, commenting, closing, claiming, linking, labeling,
 /// deferring, editing — as declared. A held grant names one ledger:
-/// [`Ledger::cap_write`].
+/// [`Ledger::cap_write`], and it still covers claiming, commenting and closing, which
+/// since 0.7.0 also have grants of their own ([`CAP_CLAIM`], [`CAP_COMMENT`],
+/// [`CAP_CLOSE`]).
 pub const CAP_WRITE: &str = "urn:cap:ledger:write:*";
+
+/// The family of the claim grant: taking, renewing and releasing claims, and nothing else.
+/// A held grant names one ledger: [`Ledger::cap_claim`].
+///
+/// ⚠ **This is the family an operator GRANTS from, not what `claim` declares.** `claim`
+/// must also admit a holder of `write:{ledger}` (no grant changes meaning), and
+/// `ikigai-core` ANDs every `requires` and matches a family only as a trailing-`*` prefix,
+/// so the one declaration both `claim:acme` and `write:acme` satisfy is their common
+/// prefix, [`CAP_ANY`]. The exact either-or is enforced in `ledger_for`. The same holds
+/// for [`CAP_COMMENT`] and [`CAP_CLOSE`].
+pub const CAP_CLAIM: &str = "urn:cap:ledger:claim:*";
+
+/// The family of the comment grant: appending a comment, and nothing else. A held grant
+/// names one ledger: [`Ledger::cap_comment`]. Declared as [`CAP_ANY`]; see [`CAP_CLAIM`].
+pub const CAP_COMMENT: &str = "urn:cap:ledger:comment:*";
+
+/// The family of the close grant: closing and reopening, and nothing else. A held grant
+/// names one ledger: [`Ledger::cap_close`]. Declared as [`CAP_ANY`]; see [`CAP_CLAIM`].
+pub const CAP_CLOSE: &str = "urn:cap:ledger:close:*";
+
+/// "Holds some ledger grant": the floor `claim`, `comment`, `close` and `reopen` DECLARE,
+/// because it is the only family both the narrow grant and `write:{ledger}` satisfy (see
+/// [`CAP_CLAIM`]). It over-offers: a caller holding only a read or a delete grant, and a
+/// store graph write grant, sees those four actions in its manifold and is refused at
+/// `invoke` with a `Denied` naming both tokens that would do. Declared stays a superset of
+/// enforced, never the reverse.
+pub const CAP_ANY: &str = "urn:cap:ledger:*";
 
 /// Removing an item from view. Separate from [`CAP_WRITE`] because a delete takes work
 /// OUT of the ledger, and the everyday grant should not carry it.
@@ -142,6 +171,12 @@ enum Need {
     Write,
     Delete,
     Purge,
+    /// Take, renew or release a claim: `claim:{ledger}`, or `write:{ledger}`.
+    Claim,
+    /// Append a comment: `comment:{ledger}`, or `write:{ledger}`.
+    Comment,
+    /// Close or reopen: `close:{ledger}`, or `write:{ledger}`.
+    Close,
 }
 
 impl Need {
@@ -152,7 +187,16 @@ impl Need {
             Need::Write => ledger.cap_write(),
             Need::Delete => ledger.cap_delete(),
             Need::Purge => ledger.cap_purge(),
+            Need::Claim => ledger.cap_claim(),
+            Need::Comment => ledger.cap_comment(),
+            Need::Close => ledger.cap_close(),
         }
+    }
+
+    /// Whether `write:{ledger}` also satisfies it: the three verbs split out of the write
+    /// grant in 0.7.0, which it still covers so that no grant issued before changed meaning.
+    fn write_covers(self) -> bool {
+        matches!(self, Need::Claim | Need::Comment | Need::Close)
     }
 
     /// The family this crate declares for it.
@@ -162,6 +206,7 @@ impl Need {
             Need::Write => CAP_WRITE,
             Need::Delete => CAP_DELETE,
             Need::Purge => CAP_PURGE,
+            Need::Claim | Need::Comment | Need::Close => CAP_ANY,
         }
     }
 }
@@ -173,18 +218,34 @@ impl Need {
 /// [`Need::declared`] — that the caller holds *some* grant under the family — because the
 /// ledger is in the IRI and the check runs before `invoke` can read it. Declared and
 /// enforced name the same scope; only the exactness differs, and the exact half is here.
+///
+/// ★ **Claim, comment and close take either of two grants**: their own (`claim:{ledger}`,
+/// `comment:{ledger}`, `close:{ledger}`) or `write:{ledger}`, which meant all three before
+/// 0.7.0 split them out and still does. A worker holding claim and comment is refused here
+/// at close, label, edit and every other write, by name.
 fn ledger_for(inv: &Invocation<'_>, need: Need) -> Result<Ledger> {
     let ledger = Ledger::from_bindings(inv.bindings)?;
     let scope = need.scope(&ledger);
-    if !inv.capability.allows(&scope) {
+    if inv.capability.allows(&scope) {
+        return Ok(ledger);
+    }
+    if need.write_covers() {
+        let write = ledger.cap_write();
+        if inv.capability.allows(&write) {
+            return Ok(ledger);
+        }
         return Err(Error::Denied(format!(
-            "this capability does not hold `{scope}`. A ledger grant names exactly one \
-             ledger — holding a grant over another ledger satisfies the declared family \
-             `{}` but not this resource, which is the point of naming them",
-            need.declared()
+            "this capability holds neither `{scope}` nor `{write}`, and this resource takes \
+             either. A ledger grant names exactly one ledger, and a grant for another verb \
+             (a worker's claim and comment, say) does not reach this one"
         )));
     }
-    Ok(ledger)
+    Err(Error::Denied(format!(
+        "this capability does not hold `{scope}`. A ledger grant names exactly one \
+         ledger — holding a grant over another ledger satisfies the declared family \
+         `{}` but not this resource, which is the point of naming them",
+        need.declared()
+    )))
 }
 
 /// `text/plain` — the default face, and what "view ASAP" actually needs.
@@ -677,6 +738,26 @@ async fn write_comment(
     author: Option<&str>,
     now: u64,
 ) -> Result<String> {
+    write_keyed_comment(client, item, text, author, now, None).await
+}
+
+/// [`write_comment`] with an optional key (ledger #1178): with one, the comment is written
+/// only while no comment in this ledger carries that key, and the modified stamp only with
+/// it.
+///
+/// ★ **The check is a clause of the write**, the keyed append's shape: both operations of
+/// the batch carry `FILTER NOT EXISTS` over the key, and the store holds its write lock
+/// across one update request, so of two writers racing with one key exactly one writes. The
+/// answer is the IRI minted here whether or not it was written; the caller reads the key
+/// back to learn which comment it names.
+async fn write_keyed_comment(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    text: &str,
+    author: Option<&str>,
+    now: u64,
+    key: Option<&str>,
+) -> Result<String> {
     let id = mint_id(now)?;
     let comment = client.ledger().comment(&id);
     let mut triples = format!(
@@ -696,10 +777,44 @@ async fn write_comment(
             literal(author)
         ));
     }
+    let Some(key) = key else {
+        client
+            .update(&batch(&[
+                format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
+                touch(client, item, now),
+            ]))
+            .await?;
+        return Ok(comment);
+    };
+    triples.push_str(&format!(
+        "\n<{comment}> <{}> {} .",
+        v::COMMENT_KEY,
+        literal(key)
+    ));
+    let free = format!(
+        "FILTER NOT EXISTS {{ {} }}",
+        client.in_graph(&format!("?taken <{}> {}", v::COMMENT_KEY, literal(key)))
+    );
+    // The stamp first: once the comment is in, the key is taken and the guard is false.
     client
         .update(&batch(&[
-            format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
-            touch(client, item, now),
+            format!(
+                "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} {free} }}",
+                client.in_graph(&format!("<{item}> <{}> ?was", v::ext::MODIFIED)),
+                client.in_graph(&format!(
+                    "<{item}> <{}> {}",
+                    v::ext::MODIFIED,
+                    datetime(now)
+                )),
+                client.in_graph(&format!(
+                    "OPTIONAL {{ <{item}> <{}> ?was }}",
+                    v::ext::MODIFIED
+                )),
+            ),
+            format!(
+                "INSERT {{ {} }} WHERE {{ {free} }}",
+                client.in_graph(&triples)
+            ),
         ]))
         .await?;
     Ok(comment)
@@ -2132,8 +2247,14 @@ impl Endpoint for CommentEndpoint {
         if inv.request.verb != Verb::Sink {
             return Err(unsupported("ledger-comment", inv.request.verb));
         }
-        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Comment)?);
+        // Every argument is checked before anything is written, the keyed append's rule.
         let want = wanted_face(inv, &WRITE_FACES)?;
+        let key = inv
+            .inline_str("key")
+            .ok()
+            .map(model::parse_key)
+            .transpose()?;
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let text = inv.inline_str("content")?;
@@ -2144,7 +2265,32 @@ impl Endpoint for CommentEndpoint {
             });
         }
         let author = inv.inline_str("author").ok();
-        let comment = write_comment(&client, &item.iri, text.trim(), author, now).await?;
+        // A taken key is answered without a write, for the reason the keyed append gives
+        // (ledger #822): even a no-op update cuts every cached read of the ledger. Sound only
+        // because a key, once on a live comment, stays there while its item lives; the
+        // write's own guard is what holds against a racer.
+        if let Some(key) = &key {
+            if let Some(found) = model::find_comment_by_key(&client, key).await? {
+                return existing_comment(&client, want, &found, key).await;
+            }
+        }
+        let comment =
+            write_keyed_comment(&client, &item.iri, text.trim(), author, now, key.as_deref())
+                .await?;
+        if let Some(key) = &key {
+            let found = model::find_comment_by_key(&client, key)
+                .await?
+                .ok_or_else(|| {
+                    Error::Endpoint(format!(
+                        "a keyed comment for `{key}` neither wrote a comment nor found one: the \
+                         store accepted an update that changed nothing, which should be \
+                         impossible"
+                    ))
+                })?;
+            if found.iri != comment {
+                return existing_comment(&client, want, &found, key).await;
+            }
+        }
         if want == JSON {
             let ledger = client.ledger();
             let mut answer = json::answer(
@@ -2153,6 +2299,7 @@ impl Endpoint for CommentEndpoint {
                 json::item_ref(ledger, item.number, &item.iri),
             );
             answer.comment = Some(written(&comment, &item.iri, text.trim(), author, now));
+            answer.key = key;
             return Ok(json_repr(json::render(&answer)?));
         }
         Ok(plain(format!(
@@ -2190,12 +2337,64 @@ impl Endpoint for CommentEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(
+                        ArgSpec::new("key")
+                            .summary(
+                                "Your own name for this comment — a message IRI, a hand-back \
+                                 id — unique among this ledger's comments. If a comment \
+                                 already carries it, NOTHING is written and the answer names \
+                                 that comment, marked `existing`: `commented on #12 (<iri>) \
+                                 existing` in text, `\"outcome\": \"existing\"` in JSON, \
+                                 and the item named is the one the comment is ON. The check \
+                                 and the write are one store update, so a replay comments \
+                                 once. The append key's shape: ASCII letters, digits, `-` \
+                                 `.` `_` `~` `:`, at most 256. Comment keys and item keys \
+                                 are separate names.",
+                            )
+                            .class(v::ext::XSD_STRING)
+                            .optional(),
+                    )
                     .input(as_arg(&WRITE_FACES))
                     .output(PLAIN)
                     .output(JSON),
-                CAP_WRITE,
+                CAP_ANY,
             ))
     }
+}
+
+/// A keyed comment's "nothing was written": the comment the key already names, and the
+/// item it is on — which is the answer's item even if the request named another.
+async fn existing_comment(
+    client: &StoreClient<'_, '_>,
+    want: &str,
+    found: &model::Comment,
+    key: &str,
+) -> Result<Representation> {
+    let item = model::load_item(client, &found.on_item)
+        .await?
+        .ok_or_else(|| {
+            Error::Endpoint(format!(
+                "the comment `{}` carrying the key `{key}` is on `{}`, which does not read as \
+                 an item",
+                found.iri, found.on_item
+            ))
+        })?;
+    if want == JSON {
+        let ledger = client.ledger();
+        let mut answer = json::answer(
+            ledger,
+            "existing",
+            json::item_ref(ledger, item.number, &item.iri),
+        );
+        answer.comment = Some(json::comment(found));
+        answer.key = Some(key.to_string());
+        return Ok(json_repr(json::render(&answer)?));
+    }
+    Ok(plain(format!(
+        "commented on {} ({}) existing\n",
+        item.short(),
+        found.iri
+    )))
 }
 
 // --------------------------------------------------------------------- close/reopen
@@ -2209,7 +2408,7 @@ impl Endpoint for CloseEndpoint {
         if inv.request.verb != Verb::Sink {
             return Err(unsupported("ledger-close", inv.request.verb));
         }
-        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
         let want = wanted_face(inv, &WRITE_FACES)?;
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
@@ -2225,17 +2424,31 @@ impl Endpoint for CloseEndpoint {
                     .join(", ")
             ),
         })?;
-        client
-            .update(&batch(&[
-                replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
-                replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
-                touch(&client, &item.iri, now),
-            ]))
-            .await?;
+        // ★ A CLOSE RELEASES THE CLAIM (ledger #1147, decided 2026-10-10). Closed work is
+        // held by nobody, and a claim left on a closed item was the doctor's orphaned
+        // machine claim and a holder `items holder=` went on listing. The release is in the
+        // same update as the close, so neither can land without the other, and it is
+        // recorded as a comment naming who held it, so the record does not lose that.
+        let mut ops = vec![
+            replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
+            replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
+            touch(&client, &item.iri, now),
+        ];
+        ops.extend(
+            CLAIM_FIELDS
+                .iter()
+                .map(|field| retract(&client, &item.iri, field)),
+        );
+        client.update(&batch(&ops)).await?;
+        let author = inv.inline_str("author").ok();
+        let released = item.claimed_by.clone();
+        if let Some(holder) = &released {
+            let record = format!("Closed while claimed by {holder}; the claim is released.");
+            write_comment(&client, &item.iri, &record, author, now).await?;
+        }
         let mut note_written = None;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
-                let author = inv.inline_str("author").ok();
                 let comment = write_comment(&client, &item.iri, note.trim(), author, now).await?;
                 note_written = Some(written(&comment, &item.iri, note.trim(), author, now));
             }
@@ -2249,9 +2462,13 @@ impl Endpoint for CloseEndpoint {
             );
             answer.reason = Some(name.to_string());
             answer.comment = note_written;
+            answer.released = released;
             return Ok(json_repr(json::render(&answer)?));
         }
-        Ok(plain(format!("closed {} ({name})\n", item.short())))
+        Ok(plain(match released {
+            Some(holder) => format!("closed {} ({name}), released {holder}\n", item.short()),
+            None => format!("closed {} ({name})\n", item.short()),
+        }))
     }
 
     fn name(&self) -> &str {
@@ -2263,13 +2480,17 @@ impl Endpoint for CloseEndpoint {
             .title("Close a ledger item")
             .summary(
                 "Close with a reason. Closing is NOT deleting: the item stays in the graph, \
-                 stays queryable, and stops blocking whatever it blocked.",
+                 stays queryable, and stops blocking whatever it blocked. A claim on it is \
+                 released, and the release recorded as a comment naming the holder.",
             )
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
                     .input(ledger_arg("close"))
-                    .summary("Set the status to closed and record why.")
+                    .summary(
+                        "Set the status to closed, record why, and release any claim. Needs \
+                         `urn:cap:ledger:close:{ledger}` or `urn:cap:ledger:write:{ledger}`.",
+                    )
                     .input(item_arg("The item to close."))
                     .input(
                         ArgSpec::new("reason")
@@ -2301,7 +2522,7 @@ impl Endpoint for CloseEndpoint {
                     .input(as_arg(&WRITE_FACES))
                     .output(PLAIN)
                     .output(JSON),
-                CAP_WRITE,
+                CAP_ANY,
             ))
     }
 }
@@ -2315,7 +2536,7 @@ impl Endpoint for ReopenEndpoint {
         if inv.request.verb != Verb::Sink {
             return Err(unsupported("ledger-reopen", inv.request.verb));
         }
-        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         client
@@ -2367,7 +2588,7 @@ impl Endpoint for ReopenEndpoint {
                             .optional(),
                     )
                     .output(PLAIN),
-                CAP_WRITE,
+                CAP_ANY,
             ))
     }
 }
@@ -2395,6 +2616,17 @@ enum Guard<'a> {
     /// Held by this holder on a lease that ran out at or before `now`.
     ExpiredFrom(&'a str, u64),
 }
+
+/// Every field a claim writes on its item — what a release retracts, and what a close
+/// retracts too (ledger #1147).
+const CLAIM_FIELDS: [&str; 6] = [
+    v::CLAIMED_BY,
+    v::CLAIMED_AT,
+    v::PURPOSE,
+    v::CLAIM_KIND,
+    v::LEASE,
+    v::LEASE_EXPIRES,
+];
 
 /// The claim as ONE update: the old claim's every field out, the new one in, `modified`
 /// stamped — all under the guard, so a lost race changes nothing at all.
@@ -2503,7 +2735,7 @@ fn parse_flag(inv: &Invocation<'_>, name: &str) -> Result<bool> {
 #[async_trait]
 impl Endpoint for ClaimEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Claim)?);
         match inv.request.verb {
             Verb::Sink => {
                 let holder = inv.inline_str("content")?.trim().to_string();
@@ -2676,17 +2908,12 @@ impl Endpoint for ClaimEndpoint {
             Verb::Delete => {
                 let now = now_ms(inv)?;
                 let item = require_item(&client, inv.inline_str("item")?).await?;
-                client
-                    .update(&batch(&[
-                        retract(&client, &item.iri, v::CLAIMED_BY),
-                        retract(&client, &item.iri, v::CLAIMED_AT),
-                        retract(&client, &item.iri, v::PURPOSE),
-                        retract(&client, &item.iri, v::CLAIM_KIND),
-                        retract(&client, &item.iri, v::LEASE),
-                        retract(&client, &item.iri, v::LEASE_EXPIRES),
-                        touch(&client, &item.iri, now),
-                    ]))
-                    .await?;
+                let mut ops: Vec<String> = CLAIM_FIELDS
+                    .iter()
+                    .map(|field| retract(&client, &item.iri, field))
+                    .collect();
+                ops.push(touch(&client, &item.iri, now));
+                client.update(&batch(&ops)).await?;
                 if let Ok(note) = inv.inline_str("content") {
                     if !note.trim().is_empty() {
                         write_comment(&client, &item.iri, note.trim(), None, now).await?;
@@ -2766,12 +2993,17 @@ impl Endpoint for ClaimEndpoint {
                             .optional(),
                     )
                     .output(PLAIN),
-                CAP_WRITE,
+                CAP_ANY,
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
                     .input(ledger_arg("claim"))
-                    .summary("Release the claim, whoever holds it, lease and all.")
+                    .summary(
+                        "Release the claim, whoever holds it, lease and all. Needs \
+                         `urn:cap:ledger:claim:{ledger}` (or `write:{ledger}`) and nothing \
+                         more, whoever the holder: a holder is free text, so whether the \
+                         caller IS the holder cannot be checked.",
+                    )
                     .input(item_arg("The item to release."))
                     .input(
                         ArgSpec::new("content")
@@ -2780,7 +3012,7 @@ impl Endpoint for ClaimEndpoint {
                             .optional(),
                     )
                     .output(PLAIN),
-                CAP_WRITE,
+                CAP_ANY,
             ))
     }
 }
