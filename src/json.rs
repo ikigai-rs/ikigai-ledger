@@ -1,5 +1,5 @@
-//! **The JSON face**: `as=application/json` on `items`, `item:{id}` and `next`, and on the
-//! answers of `append`, `comment`, `close` and `link`.
+//! **The JSON face**: `as=application/json` on `items`, `count`, `item:{id}` and `next`, and
+//! on the answers of `append`, `comment`, `close` and `link`.
 //!
 //! # ★ Why this exists
 //!
@@ -57,8 +57,8 @@
 //! assert!(serde_json::from_str::<ItemDocument>(&newer).is_ok());
 //! ```
 //!
-//! The other documents, field by field: [`ItemsDocument`] (`items`), [`NextDocument`]
-//! (`next`) and [`Answer`] (the four writes). `tests/faces.rs` pins each one as a literal.
+//! The other documents, field by field: [`ItemsDocument`] (`items`), [`CountDocument`]
+//! (`count`), [`NextDocument`] (`next`) and [`Answer`] (the four writes). `tests/faces.rs` pins each one as a literal.
 //!
 //! ⚠ **The types are `#[non_exhaustive]`**: read them and deserialize into them, but they
 //! cannot be built outside this crate — which is what lets schema 1 gain a field in a patch
@@ -265,6 +265,22 @@ pub struct ItemsDocument {
     /// unreadable or missing timestamp) is in `items` instead, carrying it in its own
     /// `defects`, and is not repeated here.
     pub unreadable: Vec<Unreadable>,
+}
+
+/// `count` (since 0.9.0): how many items a filter admits, and nothing else.
+///
+/// The same number as [`ItemsDocument::total`] for the same filter, without the page and
+/// without the corpus check behind [`ItemsDocument::unreadable`] — which is what made reading
+/// `items limit=1` for its total cost two whole-graph scans more than the count (ledger #1128).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CountDocument {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// How many items the filter admits.
+    pub total: usize,
 }
 
 /// One ranked candidate of `next`.

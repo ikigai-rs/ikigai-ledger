@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use common::*;
 use ikigai_core::{Clock, Fallback, Kernel, Space, Time};
-use ikigai_ledger::json::{Answer, ItemDocument, ItemsDocument, NextDocument};
+use ikigai_ledger::json::{Answer, CountDocument, ItemDocument, ItemsDocument, NextDocument};
 use ikigai_store::DurableStore;
 
 /// A clock that never moves: the literals below carry timestamps, and how many times a
@@ -384,6 +384,35 @@ fn the_json_items_document_is_schema_1() {
   ],
   "unreadable": []
 }"##
+    );
+}
+
+/// `count` (ledger #1128): the listing's `total` for the same filter, and nothing else.
+#[test]
+fn the_json_count_document_is_schema_1() {
+    let kernel = seeded_with_a_key();
+    assert_eq!(
+        typed::<CountDocument>(&source(
+            &kernel,
+            "urn:iki:ledger:count",
+            &json_args(&[("status", "all")])
+        )),
+        r##"{
+  "schema": 1,
+  "ledger": "default",
+  "total": 4
+}"##
+    );
+}
+
+/// The plain face of `count` is the bare number, so it pipes.
+#[test]
+fn the_plain_count_is_the_bare_number() {
+    let kernel = seeded_with_a_key();
+    assert_eq!(source(&kernel, "urn:iki:ledger:count", &[]), "3\n");
+    assert_eq!(
+        source(&kernel, "urn:iki:ledger:count", &[("status", "closed")]),
+        "1\n"
     );
 }
 

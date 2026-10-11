@@ -119,6 +119,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | resource | verbs | what it does | capability |
 | --- | --- | --- | --- |
 | `…:{ledger}:items` | Source | the list, filtered | `read:{ledger}` |
+| `…:{ledger}:count` | Source | how many items the same filter admits, and nothing else | `read:{ledger}` |
 | `…:{ledger}:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` of `{ledger}` |
 | `…:{ledger}:append` | Sink | file a new item | `write:{ledger}` |
 | `…:{ledger}:comment` | Sink | append a comment, optionally under your own key | `comment:{ledger}` or `write:{ledger}` |
@@ -151,7 +152,9 @@ about it is in the graph.
 Every read serves `text/plain` (the default — a line per item, greppable) and
 `text/turtle` (the graph); `items`, `item:{id}` and `next` also serve `application/json`,
 and so do the answers of `append`, `comment`, `close` and `link` — see "The JSON face"
-below. An `as=` this module cannot answer in is **refused**, never substituted.
+below. `count` is the exception: a number is not a graph, so it serves `text/plain` (the bare
+number, which pipes) and `application/json`, and no Turtle. An `as=` this module cannot
+answer in is **refused**, never substituted.
 
 ## Ledgers: a name, not a tag and not an argument
 
@@ -188,7 +191,7 @@ because the data has to say which ledger it is in even when the request did not.
 
 ⚠ **The sugar costs a reserved-word list.** `urn:iki:ledger:items` has to mean *the
 default ledger's listing* rather than *a ledger called `items`*, and only one of those can
-be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and fourteen others are not
+be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and fifteen others are not
 available as ledger names, and a name that is refused says which word it must not use.
 Names are otherwise lowercase letters, digits, `-` and `_`; the shape is fixed because the
 name becomes a capability token that is matched **exactly**, and a token must not be
@@ -409,6 +412,7 @@ first".
 | --- | --- |
 | `item:{id}` | `{schema, ledger, item}` |
 | `items` | `{schema, ledger, count, total, offset, items: [item…], unreadable: [{iri, defects}]}` — `count` is the PAGE (`items`' length), `total` how many items the filter admits, `offset` how many the page skipped; `count < total` says the page is not the set. `unreadable` is the plain face's ⚠ footer, as data: the items NOT in `items`. An item listed with a stand-in timestamp carries its own `defects` instead |
+| `count` | `{schema, ledger, total}` — `items`' `total` for the same filter, without the page and without the corpus check behind `unreadable` |
 | `next` | `{schema, ledger, policy, weighs, generated_at, ready, ranking: [{rank, score, because, item}], excluded: [{why, reason, holder, expires, blocked_by, item}]}` — `why` is `claimed`, `lease-expired`, `awaiting-dispatcher`, `deferred` or `blocked` |
 | `doctor` | `{schema, ledger, lifecycle, checked_at, checks, problems: [{check, item: {number, display, iri}, detail, remedy, holder, states, expires}]}` |
 | `append`, `comment`, `close`, `link` | `{schema, ledger, outcome, item: {number, display, iri}, …}` — `outcome` is `filed`, `existing`, `commented`, `closed`, `linked` or `unlinked`, and only that outcome's own fields follow: `status` and `key` (append), `comment` (comment, and close with a note), `handback` (`set` or `cleared`, a comment that changed a hand-back), `reason` (close), `type` and `target` (link) |
@@ -420,6 +424,17 @@ so a Rust consumer reads the same type this crate writes and a later field does 
 it. `tests/faces.rs` pins every document as a literal, and pins the plain face byte for
 byte as 0.3.0 rendered it — the one change there is a `key:` line in an item's detail, and
 only for an item that has a key.
+
+★ **For the total alone, read `count`, not `items limit=1`** (ledger #1128). Both faces of
+`items` that state a total also run the corpus check — two scans of the whole graph — because
+they show what it finds (`unreadable`, and the plain face's ⚠ footer); that check is most of
+what a one-row listing costs. `count` takes the same filter, parsed by the same function and
+counted by the same query, so its number is `total` exactly, and it pays for the count alone.
+Measured over a kernel that caches nothing, at 3000 open items (`tests/listing_cost.rs`, run by
+hand, on a machine with other builds running, so read the ratios rather than the
+milliseconds): `items limit=1 as=application/json` 480 ms debug / 55 ms release, of which the
+check alone is 289 / 31 ms; `count as=application/json` 31 / 3.3 ms. Every read here is
+cacheable, so these are the cold reads a consumer pays after each write.
 
 ## Assume an editor got there first
 
@@ -922,7 +937,7 @@ are these — **per ledger, and a grant for `acme` is worth nothing at `bosatsu`
 
 | to do this in ledger `L` | grant at this module | …and at the store |
 | --- | --- | --- |
-| read (`items`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
+| read (`items`, `count`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
 | write (`append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, editing an item) | `urn:cap:ledger:write:L` | the read grant above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L` |
 | claim, comment, or close and reopen, alone | `urn:cap:ledger:claim:L`, `…:comment:L` or `…:close:L` | the same two as write |
 | delete (`Delete` on an item) | `urn:cap:ledger:delete:L` | both of the above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` |
@@ -1063,7 +1078,7 @@ one graph.
 
 ## Status
 
-All twenty-one resources are bound, tested, and walked clean by `ikigai-conformance`
+All twenty-two resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces).
 
 **A host must bind this crate's space for the resources to resolve.** It composes with
