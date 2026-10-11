@@ -664,6 +664,26 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   `Release`. Requiring `close` for someone else's claim would give the mirror the close it is
   designed never to hold. The fix for "a worker can drop another worker's claim" is the holder
   being the caller's principal, which is not built (see "What is enforced, and where").
+- ★ **`from=<holder>` makes a release a compare-and-set** (since 0.7.0, ledger #1178): it
+  releases only while that holder still holds the claim, in one guarded update, and otherwise
+  is a `Conflict` that releases nothing. A worker releasing "its" claim after a takeover no
+  longer drops the new holder's. **A release without `from=` keeps working** and drops
+  whoever holds the claim: it is the dispatcher's override, and the mirror's when it applies a
+  `Release` for a taker. `from=` is a guard against a race, not an authorization (a holder is
+  free text), so it is opt-in rather than required. A worker should always send it.
+- ★ **`renew=true` renews and never takes** (since 0.7.0, ledger #1178). A plain claim by the
+  same holder takes a FREE item, so a worker whose claim was released, or taken over and then
+  released, silently re-acquired the item on its next heartbeat. With `renew=true` the claim
+  must be held by that holder right now, or the answer is a `Conflict` saying it changed hands
+  or was released; an expired lease still held is still held, and renews. A worker's
+  heartbeat should always send it. It cannot be combined with `takeover=true`.
+
+```text
+$ sink urn:iki:ledger:claim item=12 renew=true lease=30m <<< "worker-1"
+#12 renewed by worker-1 until 2026-10-09T16:00:00.000Z
+$ delete urn:iki:ledger:claim item=12 from=worker-1
+#12 released
+```
 
 ### ★ The kind is the HOST's to stamp, and a direct embedder owns that
 

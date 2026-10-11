@@ -2615,6 +2615,50 @@ enum Guard<'a> {
     FreeOrMine(&'a str),
     /// Held by this holder on a lease that ran out at or before `now`.
     ExpiredFrom(&'a str, u64),
+    /// Held by this holder now, and nothing else: `renew=true` (ledger #1178). Unlike
+    /// [`Guard::FreeOrMine`], a FREE item does not match, so a renewal never re-takes a claim
+    /// that was released or taken over in the meantime.
+    Mine(&'a str),
+}
+
+/// A release as ONE update: every claim field out and `modified` stamped — and with
+/// `from`, only while that holder still holds the claim, so a release racing a takeover
+/// drops nothing it did not mean to (ledger #1178).
+fn release_update(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    from: Option<&str>,
+    now: u64,
+) -> String {
+    let guard = from
+        .map(|from| format!("<{item}> <{}> {} .\n", v::CLAIMED_BY, literal(from)))
+        .unwrap_or_default();
+    let mut owned: Vec<&str> = CLAIM_FIELDS.to_vec();
+    owned.push(v::ext::MODIFIED);
+    let delete: String = owned
+        .iter()
+        .enumerate()
+        .map(|(n, p)| format!("<{item}> <{p}> ?o{n} . "))
+        .collect();
+    let optional: String = owned
+        .iter()
+        .enumerate()
+        .map(|(n, p)| format!("OPTIONAL {{ <{item}> <{p}> ?o{n} }}\n"))
+        .collect();
+    format!(
+        "DELETE {{ {} }}\nINSERT {{ {} }}\nWHERE {{ {} }}",
+        client.in_graph(&delete),
+        client.in_graph(&format!(
+            "<{item}> <{}> {} .",
+            v::ext::MODIFIED,
+            datetime(now)
+        )),
+        client.in_graph(&format!(
+            "<{item}> <{}> <{}> .\n{guard}{optional}",
+            v::ext::TYPE,
+            v::ITEM_CLASS
+        )),
+    )
 }
 
 /// Every field a claim writes on its item — what a release retracts, and what a close
@@ -2643,6 +2687,12 @@ fn claim_update(
 ) -> String {
     let takeover = matches!(guard, Guard::ExpiredFrom(..));
     let guard = match guard {
+        Guard::Mine(holder) => format!(
+            "<{item}> <{by}> {mine} .\n\
+             FILTER NOT EXISTS {{ <{item}> <{by}> ?other . FILTER(?other != {mine}) }}",
+            by = v::CLAIMED_BY,
+            mine = literal(holder),
+        ),
         Guard::FreeOrMine(holder) => format!(
             "FILTER NOT EXISTS {{ <{item}> <{by}> ?other . FILTER(?other != {mine}) }}",
             by = v::CLAIMED_BY,
@@ -2766,6 +2816,16 @@ impl Endpoint for ClaimEndpoint {
                     .map(crate::claim::parse_lease)
                     .transpose()?;
                 let takeover = parse_flag(inv, "takeover")?;
+                let renew = parse_flag(inv, "renew")?;
+                if renew && takeover {
+                    return Err(Error::InvalidArgument {
+                        name: "renew".to_string(),
+                        detail: "`renew=true` extends a claim this holder already holds, and \
+                                 `takeover=true` takes one from another holder; a request is \
+                                 one or the other"
+                            .to_string(),
+                    });
+                }
                 let from = inv.inline_str("from").ok().map(str::trim);
                 match (takeover, from) {
                     (true, None) | (true, Some("")) => {
@@ -2837,6 +2897,29 @@ impl Endpoint for ClaimEndpoint {
                         }
                         Some(_) => Guard::ExpiredFrom(from, now),
                     }
+                } else if renew {
+                    // ★ A renewal names a claim this holder HOLDS. A worker whose claim was
+                    // released, or taken over and released, must learn that it lost the
+                    // item, not silently take it back on its next heartbeat (ledger #1178).
+                    // An expired lease still held is still held, and renews.
+                    match &item.claimed_by {
+                        Some(held) if held == &holder => Guard::Mine(&holder),
+                        Some(held) => {
+                            return Err(Error::Conflict(format!(
+                                "{} is held by {held}, not {holder}: a renewal extends a claim \
+                                 its holder still holds, and this one changed hands",
+                                item.short()
+                            )))
+                        }
+                        None => {
+                            return Err(Error::Conflict(format!(
+                                "{} is not claimed, so {holder} has nothing to renew: the claim \
+                                 was released or never taken. Claim it again (without \
+                                 `renew`) if the work is still yours to do",
+                                item.short()
+                            )))
+                        }
+                    }
                 } else {
                     match &item.claimed_by {
                         Some(held) if held != &holder => {
@@ -2882,6 +2965,13 @@ impl Endpoint for ClaimEndpoint {
                     .await?
                     .ok_or_else(|| Error::NotFound(format!("no ledger item at `{}`", item.iri)))?;
                 if after.claimed_by.as_deref() != Some(holder.as_str()) {
+                    if renew {
+                        return Err(Error::Conflict(format!(
+                            "{} is no longer held by {holder}: the claim changed hands before \
+                             the renewal landed",
+                            item.short()
+                        )));
+                    }
                     return Err(Error::Conflict(format!(
                         "{} was claimed by {} first",
                         item.short(),
@@ -2901,19 +2991,65 @@ impl Endpoint for ClaimEndpoint {
                         item.short(),
                         previous.unwrap_or_default()
                     )
+                } else if renew {
+                    format!("{} renewed by {holder}{until}\n", item.short())
                 } else {
                     format!("{} claimed by {holder}{until}\n", item.short())
                 }))
             }
             Verb::Delete => {
+                let from = match inv.inline_str("from").ok().map(str::trim) {
+                    Some("") => {
+                        return Err(Error::InvalidArgument {
+                            name: "from".to_string(),
+                            detail: "an empty `from` names no holder; omit it to release \
+                                     whoever holds the claim"
+                                .to_string(),
+                        })
+                    }
+                    other => other,
+                };
                 let now = now_ms(inv)?;
                 let item = require_item(&client, inv.inline_str("item")?).await?;
-                let mut ops: Vec<String> = CLAIM_FIELDS
-                    .iter()
-                    .map(|field| retract(&client, &item.iri, field))
-                    .collect();
-                ops.push(touch(&client, &item.iri, now));
-                client.update(&batch(&ops)).await?;
+                let resource = client.ledger().resource("claim");
+                if let Some(from) = from {
+                    // The cheap half first, so a refusal writes nothing; the update's own
+                    // guard is what holds against a racer.
+                    match &item.claimed_by {
+                        Some(held) if held == from => {}
+                        Some(held) => {
+                            return Err(Error::Conflict(format!(
+                                "{} is held by {held}, not {from}: a release with `from` is a \
+                                 compare-and-set against that holder, and the claim has \
+                                 changed hands. Nothing was released",
+                                item.short()
+                            )))
+                        }
+                        None => {
+                            return Err(Error::Conflict(format!(
+                                "{} is not claimed, so {from} holds nothing to release",
+                                item.short()
+                            )))
+                        }
+                    }
+                }
+                client
+                    .update(&release_update(&client, &item.iri, from, now))
+                    .await?;
+                if let Some(from) = from {
+                    let after = model::load_item(&client, &item.iri).await?.ok_or_else(|| {
+                        Error::NotFound(format!("no ledger item at `{}`", item.iri))
+                    })?;
+                    if let Some(held) = after.claimed_by {
+                        return Err(Error::Conflict(format!(
+                            "{} is held by {held}: the claim changed hands before the release \
+                             from {from} landed, and nothing was released. Release it \
+                             (`delete {resource} item={}`) only if that is meant",
+                            item.short(),
+                            item.number
+                        )));
+                    }
+                }
                 if let Ok(note) = inv.inline_str("content") {
                     if !note.trim().is_empty() {
                         write_comment(&client, &item.iri, note.trim(), None, now).await?;
@@ -2992,6 +3128,20 @@ impl Endpoint for ClaimEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(
+                        ArgSpec::new("renew")
+                            .summary(
+                                "`true` to extend a claim this holder ALREADY holds, and \
+                                 nothing else: refused (Conflict) when the item is free or held \
+                                 by someone else, so a worker that lost its claim learns it \
+                                 rather than silently re-taking the item. Without it, the same \
+                                 holder claiming a free item takes it.",
+                            )
+                            .class(v::ext::XSD_BOOLEAN)
+                            .one_of(["true", "false"])
+                            .default_value("false")
+                            .optional(),
+                    )
                     .output(PLAIN),
                 CAP_ANY,
             ))
@@ -3005,6 +3155,17 @@ impl Endpoint for ClaimEndpoint {
                          caller IS the holder cannot be checked.",
                     )
                     .input(item_arg("The item to release."))
+                    .input(
+                        ArgSpec::new("from")
+                            .summary(
+                                "Release only if THIS holder still holds the claim — a \
+                                 compare-and-set, refused (Conflict) and nothing released when \
+                                 the claim changed hands. Without it the release drops whoever \
+                                 holds the claim, which stays the dispatcher's override.",
+                            )
+                            .class(v::ext::XSD_STRING)
+                            .optional(),
+                    )
                     .input(
                         ArgSpec::new("content")
                             .summary("An optional release note, recorded as a comment.")
