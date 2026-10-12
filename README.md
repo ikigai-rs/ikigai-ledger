@@ -1136,6 +1136,24 @@ All twenty-two resources are bound, tested, and walked clean by `ikigai-conforma
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.11.0 (2026-10-12): an agent is its own claim kind (ledger #1329)
+
+A minor, because a public enum gains a variant: `ClaimKind::Agent`, so a consumer's exhaustive
+`match` on `ClaimKind` stops compiling. `ClaimKind` is `#[non_exhaustive]` from now on, so the
+next kind is not a flag day. Additive otherwise: `ClaimKind::ALL`, `ClaimKind::from_word`, and
+`ledger:agent` in this crate's own vocabulary.
+
+- **`agent`** is stamped by a host for an LLM agent, such as a collaborator's Claude in gonk's
+  layer mirror, which until now could only be stamped `machine`. An agent acting for a person
+  is still `agent`. JSON `claim.kind` says `"agent"`; the graph says `ledger:claimKind
+  ledger:agent`. See "Claims".
+- **The doctor reports an agent's claim out of flight** as `orphaned`, exactly as it does a
+  machine's, and the detail names the kind: `(an agent claim)`. Only a person's own hold
+  escapes it, so the new kind lets nothing escape.
+- **Fixed on the way:** the Turtle face matched the kind word against a list of its own, so a
+  kind it did not list was silently dropped from the graph face. It now parses through
+  `ClaimKind`.
+
 ### 0.10.0 (2026-10-11): an `about` grant without close; digest-keyed IRIs are the key contract (ledger #1315)
 
 A minor, because `item:{id}:about` declares a different floor (`urn:cap:ledger:*`, as `claim`,
