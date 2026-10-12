@@ -343,7 +343,7 @@ impl SpaceConfig {
         self
     }
 
-    /// How a claim's kind — `machine` or `person` — is decided: by the HOST, from the
+    /// How a claim's kind — `machine`, `agent` or `person` — is decided: by the HOST, from the
     /// invocation (what its own door stamped on the request, the capability), and never from
     /// an argument the caller sends. The default stamps `machine` on every claim. See
     /// [`crate::claim`].
@@ -3456,8 +3456,8 @@ impl Endpoint for ClaimEndpoint {
                  which is most of what \"what should I do next\" means once more than one \
                  worker shares a ledger. A claim may carry a lease; an expired lease is never \
                  silently free, and `takeover=true from=<holder>` is the only way to take it. \
-                 The holder's kind (machine or person) is stamped by the host, never taken \
-                 from the caller.",
+                 The holder's kind (machine, agent or person) is stamped by the host, never \
+                 taken from the caller.",
             )
             .verb(Verb::Meta)
             .action(write_scopes(

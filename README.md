@@ -714,9 +714,11 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   way to take it is **`takeover=true from=<holder>`**: a compare-and-set against that holder,
   so of two takers exactly one wins. A live lease, or a claim with no lease, is never taken
   over; it is released (`delete …:claim`), which is the deliberate act.
-- **The claim's kind**, `machine` or `person`, is in the JSON face (`claim.kind`) and in the
-  graph (`ledger:claimKind`). The doctor reports a machine claim on an item that is not in
-  flight and leaves a person's hold alone.
+- **The claim's kind**, `machine`, `agent` (since 0.11.0, ledger #1329) or `person`, is in the
+  JSON face (`claim.kind`) and in the graph (`ledger:claimKind`). The doctor reports a
+  machine's or an agent's claim on an item that is not in flight, naming which, and leaves a
+  person's hold alone. An agent acting for a person is stamped `agent`: the hold is the
+  agent's, and only a person's own hold escapes the doctor.
 - ★ **A close releases the claim** (since 0.7.0, ledger #1147). Closed work is held by nobody;
   until 0.7.0 a close left the claim in place, so a closed item went on showing under
   `items holder=` and a machine's claim on it was the doctor's orphan. The release is in the
@@ -777,6 +779,7 @@ the request, and the capability), never a caller's choice:
 ```rust
 let stamper: ClaimKindStamper = Arc::new(|inv| match inv.inline_str("principal") {
     Ok(p) if is_a_person(p) => ClaimKind::Person,
+    Ok(p) if is_an_agent(p) => ClaimKind::Agent,
     _ => ClaimKind::Machine,
 });
 let space = ikigai_ledger::space_with(SpaceConfig::default().claim_kind(stamper));
@@ -808,7 +811,7 @@ ledger's lifecycle filled in as terms:
 
 | check | what it finds |
 | --- | --- |
-| `orphaned` | a machine claim (or one with no recorded kind) on an item whose state is not in flight |
+| `orphaned` | a machine's or an agent's claim (or one with no recorded kind) on an item whose state is not in flight; the detail names the kind |
 | `abandoned` | an item in an in-flight state that nobody holds and that is not awaiting its dispatcher (a hand-back is waiting, not abandoned) |
 | `lease-expired` | a claim whose lease ran out, judged on the kernel's clock |
 | `unknown-state` | a `ledger:state` the ledger's lifecycle does not declare (a hand edit, an import, a ledger whose lifecycle changed) |

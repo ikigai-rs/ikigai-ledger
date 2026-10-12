@@ -810,9 +810,16 @@ impl Endpoint for DoctorEndpoint {
                 let (detail, remedy) = match check {
                     "orphaned" => (
                         format!(
-                            "{short} is held by {} (a machine claim) in `{state_word}`, which is \
-                             not in flight",
-                            holder.as_deref().unwrap_or("?")
+                            "{short} is held by {} ({}) in `{state_word}`, which is not in flight",
+                            holder.as_deref().unwrap_or("?"),
+                            // No recorded kind is a claim from before kinds, read as a machine's.
+                            match rows[0]
+                                .get("kind")
+                                .and_then(|b| crate::claim::ClaimKind::from_iri(&b.value))
+                            {
+                                Some(crate::claim::ClaimKind::Agent) => "an agent claim",
+                                _ => "a machine claim",
+                            }
                         ),
                         format!(
                             "release it (`delete {claim} item={number}`), or move it into flight \
@@ -970,8 +977,8 @@ impl Endpoint for DoctorEndpoint {
             Description::new("ledger-doctor")
                 .title("What is structurally wrong with a ledger")
                 .summary(
-                    "Read-only, and it never repairs: every item with a machine claim and no \
-                     in-flight state (orphaned), an in-flight state, no claim and no hand-back \
+                    "Read-only, and it never repairs: every item with a machine's or an \
+                     agent's claim and no in-flight state (orphaned), an in-flight state, no claim and no hand-back \
                      awaiting its dispatcher (abandoned), an expired lease, a state the \
                      ledger's lifecycle does not declare, two states, or a closed item still \
                      awaiting someone (awaiting-closed) — all at once, each with a remedy. Each \
