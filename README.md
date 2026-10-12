@@ -1133,6 +1133,24 @@ All twenty-two resources are bound, tested, and walked clean by `ikigai-conforma
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.10.0 (2026-10-11): an `about` grant without close; digest-keyed IRIs are the key contract (ledger #1315)
+
+A minor, because `item:{id}:about` declares a different floor (`urn:cap:ledger:*`, as `claim`,
+`comment`, `close` and `reopen` do since 0.7.0), and that over-offers it to read and delete
+holders; enforcement is exact. Additive otherwise: a grant, `CAP_ABOUT`, `Ledger::cap_about`.
+
+- **`urn:cap:ledger:about:{ledger}`** adds and removes an item's `about` edges at
+  `…:item:{id}:about`, and nothing else, so a process that records where work went (gonk's
+  layer mirror noting its offer) needs no close grant. `write:{ledger}` still covers it; the
+  worker grant does not include it. The item Sink's own `about=` stays under write.
+  `tests/about_grant.rs`.
+- **Keys: the digest fallback is the contract**, not a wider alphabet. An IRI that is not a
+  legal key is keyed as `{prefix}sha256:{hex}` with the IRI in the text; `parse_key`'s refusal
+  says so. See "Keys: file once, under your own name".
+- Since 0.9.0, tests and documentation only: the read row alone reads every read, `next`
+  included (ledger #1220, `tests/read_grants.rs`); routing a filed item is a label edit
+  (ledger #1234, `tests/label_edit.rs`).
+
 ### 0.9.0 (2026-10-10): `count`, the total without the corpus check (ledger #1128)
 
 A minor, because it adds a resource and reserves a ledger name (`count`; `ledger::RESERVED` is
