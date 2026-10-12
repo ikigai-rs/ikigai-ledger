@@ -104,8 +104,9 @@ pub struct Claim {
     pub holder: String,
     /// Why they took it, when they said.
     pub purpose: Option<String>,
-    /// `machine` or `person`, as the host stamped it — never the caller's choice. `null` for a
-    /// claim taken before 0.5.0, which the doctor reads as a machine's. Added in 0.5.0.
+    /// `machine`, `agent` (since 0.11.0) or `person`, as the host stamped it — never the
+    /// caller's choice. `null` for a claim taken before 0.5.0, which the doctor reads as a
+    /// machine's. Added in 0.5.0.
     #[serde(default)]
     pub kind: Option<String>,
     /// When the lease runs out (`xsd:dateTime`, UTC); `null` for a claim with no lease. An

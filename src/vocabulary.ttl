@@ -428,11 +428,15 @@ ledger:stateToken a rdf:Property ;
 
 ledger:ClaimKind a rdfs:Class ;
     rdfs:label "ClaimKind" ;
-    rdfs:comment "Whether a claim is held by a machine or a person. ★ STAMPED BY THE HOST, never taken from the caller: the doctor reports a machine claim on an item that is not in flight and leaves a person's hold alone, so a kind the caller could choose would let a machine pose as a person to escape it. A claim from before ledger:claimKind existed is read as a machine's." .
+    rdfs:comment "Whether a claim is held by a machine, an agent or a person. ★ STAMPED BY THE HOST, never taken from the caller: the doctor reports a machine claim on an item that is not in flight and leaves a person's hold alone, so a kind the caller could choose would let a machine pose as a person to escape it. A claim from before ledger:claimKind existed is read as a machine's." .
 
 ledger:machine a ledger:ClaimKind ;
     rdfs:label "machine" ;
-    rdfs:comment "A claim held by a loop, an agent or a client. The kind a host that does not decide stamps on every claim." .
+    rdfs:comment "A claim held by a loop, a client or a service. The kind a host that does not decide stamps on every claim." .
+
+ledger:agent a ledger:ClaimKind ;
+    rdfs:label "agent" ;
+    rdfs:comment "A claim held by an LLM agent, such as a collaborator's Claude. Reported by the doctor as a machine's is when the item is not in flight: an agent acting for a person (prov:actedOnBehalfOf) is still stamped agent, because the hold is the agent's. Since 0.11.0." .
 
 ledger:person a ledger:ClaimKind ;
     rdfs:label "person" ;
@@ -442,7 +446,7 @@ ledger:claimKind a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range ledger:ClaimKind ;
     rdfs:label "claimKind" ;
-    rdfs:comment "Who holds this item's claim: ledger:machine or ledger:person, as the host stamped it when the claim was taken." .
+    rdfs:comment "Who holds this item's claim: ledger:machine, ledger:agent or ledger:person, as the host stamped it when the claim was taken." .
 
 ledger:lease a rdf:Property ;
     rdfs:domain ledger:Item ;

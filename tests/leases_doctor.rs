@@ -520,6 +520,89 @@ fn a_host_stamper_decides_the_kind_from_the_invocation() {
     assert_eq!(item_json(&kernel, 2)["item"]["claim"]["kind"], "machine");
 }
 
+/// A stamper telling a person, an agent and a machine apart — the three kinds a layer's
+/// participants graph names (ledger #1329).
+fn three_kinds() -> ClaimKindStamper {
+    Arc::new(|inv| match inv.inline_str("principal") {
+        Ok(p) if p.starts_with("urn:test:person:") => ClaimKind::Person,
+        Ok(p) if p.starts_with("urn:test:agent:") => ClaimKind::Agent,
+        _ => ClaimKind::Machine,
+    })
+}
+
+/// ★ An agent is its own kind (ledger #1329): until 0.11.0 a host could only stamp an agent
+/// `machine`, so gonk's layer mirror filed a collaborator's Claude beside a cron loop. The
+/// kind reaches the JSON face, the graph and the plain face of every reader.
+#[test]
+fn an_agent_claim_is_stamped_agent_in_every_face() {
+    let (kernel, _clock) = kernel_with(SpaceConfig::default().claim_kind(three_kinds()));
+    append(&kernel, "One", &[]);
+    append(&kernel, "Two", &[]);
+    append(&kernel, "Three", &[]);
+    for (n, holder, principal) in [
+        ("1", "claude", "urn:test:agent:claude"),
+        ("2", "brian", "urn:test:person:brian"),
+        ("3", "loop", "urn:test:loop"),
+    ] {
+        claim(
+            &kernel,
+            &[("item", n), ("content", holder), ("principal", principal)],
+        )
+        .unwrap();
+    }
+    assert_eq!(item_json(&kernel, 1)["item"]["claim"]["kind"], "agent");
+    assert_eq!(item_json(&kernel, 2)["item"]["claim"]["kind"], "person");
+    assert_eq!(item_json(&kernel, 3)["item"]["claim"]["kind"], "machine");
+
+    let turtle = source(&kernel, "urn:iki:ledger:item:1", &[("as", "text/turtle")]);
+    assert!(
+        turtle.contains("<https://ikigai-rs.dev/ns/ledger#agent>")
+            || turtle.contains("ledger:agent"),
+        "the graph face lost the agent kind: {turtle}"
+    );
+    assert!(
+        !turtle.contains("ledger#machine") && !turtle.contains("ledger:machine"),
+        "an agent's claim was written as a machine's: {turtle}"
+    );
+}
+
+/// ★ The doctor reports an agent's claim on an item that is not in flight, as it does a
+/// machine's: only a PERSON's hold is deliberate. Adding a kind lets nothing escape the
+/// doctor, and the report names the kind it found.
+#[test]
+fn the_doctor_reports_an_agent_claim_out_of_flight_and_names_its_kind() {
+    let (kernel, _clock) = kernel_with(SpaceConfig::default().claim_kind(three_kinds()));
+    append(&kernel, "Agent", &[]);
+    append(&kernel, "Person", &[]);
+    append(&kernel, "Machine", &[]);
+    for (n, holder, principal) in [
+        ("1", "claude", "urn:test:agent:claude"),
+        ("2", "brian", "urn:test:person:brian"),
+        ("3", "loop", "urn:test:loop"),
+    ] {
+        claim(
+            &kernel,
+            &[("item", n), ("content", holder), ("principal", principal)],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        findings(&kernel),
+        [("orphaned".to_string(), 1), ("orphaned".to_string(), 3)]
+    );
+    let report = doctor(&kernel);
+    let details: Vec<&str> = report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["detail"].as_str().unwrap())
+        .collect();
+    assert!(details[0].contains("(an agent claim)"), "{details:?}");
+    assert!(details[1].contains("(a machine claim)"), "{details:?}");
+    let plain = source(&kernel, "urn:iki:ledger:doctor", &[]);
+    assert!(plain.contains("(an agent claim)"), "{plain}");
+}
+
 // --------------------------------------------------------------------- doctor
 
 #[test]

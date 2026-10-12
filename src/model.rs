@@ -128,7 +128,7 @@ pub struct Item {
     pub claimed_by: Option<String>,
     /// Why the holder took it.
     pub purpose: Option<String>,
-    /// The holder's kind, `machine` or `person`, as the HOST stamped it (see
+    /// The holder's kind, `machine`, `agent` or `person`, as the HOST stamped it (see
     /// [`crate::claim`]). `None` for a claim taken before kinds existed, which the doctor
     /// reads as a machine's.
     pub claim_kind: Option<String>,
@@ -388,12 +388,12 @@ impl Item {
         if let Some(purpose) = &self.purpose {
             push(v::PURPOSE, plain(purpose));
         }
-        if let Some(kind) = self.claim_kind.as_deref().and_then(|k| match k {
-            "machine" => Some(v::MACHINE),
-            "person" => Some(v::PERSON),
-            _ => None,
-        }) {
-            push(v::CLAIM_KIND, named(kind));
+        if let Some(kind) = self
+            .claim_kind
+            .as_deref()
+            .and_then(crate::claim::ClaimKind::from_word)
+        {
+            push(v::CLAIM_KIND, named(kind.iri()));
         }
         if let Some(lease) = &self.lease {
             push(v::LEASE, typed(lease, v::ext::XSD_DURATION));

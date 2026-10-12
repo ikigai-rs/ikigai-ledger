@@ -66,8 +66,8 @@ pub struct LifecycleState {
     /// Its position: the states in order are the lifecycle read left to right.
     pub order: i64,
     /// Whether an item in this state is being worked — held by a claim while it is. The
-    /// doctor reports an in-flight item with no claim as abandoned, and a machine claim on an
-    /// item that is not in flight as orphaned.
+    /// doctor reports an in-flight item with no claim as abandoned, and a machine's or an
+    /// agent's claim on an item that is not in flight as orphaned.
     pub in_flight: bool,
     /// Who picks an item up from this state — `None` exactly when the state is in flight.
     pub drain: Option<String>,

@@ -230,10 +230,12 @@ term! {
     STATE_AT => "stateAt";
     /// `ledger:stateToken` — the receipt of the transition that set the current state.
     STATE_TOKEN => "stateToken";
-    /// `ledger:ClaimKind` — machine or person.
+    /// `ledger:ClaimKind` — machine, agent or person.
     CLAIM_KIND_CLASS => "ClaimKind";
-    /// `ledger:machine` — a claim held by a loop, an agent, a client.
+    /// `ledger:machine` — a claim held by a loop, a client, a service.
     MACHINE => "machine";
+    /// `ledger:agent` — a claim held by an LLM agent (since 0.11.0).
+    AGENT => "agent";
     /// `ledger:person` — a claim held by a person.
     PERSON => "person";
     /// `ledger:claimKind` — who holds the claim, as the HOST stamped it.

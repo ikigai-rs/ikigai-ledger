@@ -3,9 +3,11 @@
 //!
 //! # ★ The kind is the host's to stamp, never the caller's
 //!
-//! A claim is held by a `machine` (a loop, an agent, a client certificate) or a `person`, and
-//! the doctor's rules differ by kind: a machine claim on an item that is not in flight is
-//! orphaned, while a person holding an item is a deliberate hold. kata-flight encodes the
+//! A claim is held by a `machine` (a loop, a client certificate), an `agent` (an LLM agent such
+//! as a collaborator's Claude, since 0.11.0) or a `person`, and the doctor's rules differ by
+//! kind: a machine's or an agent's claim on an item that is not in flight is orphaned, while a
+//! person holding an item is a deliberate hold. An agent acting for a person is still stamped
+//! `agent`: the hold is the agent's, and only a person's own hold escapes the doctor. kata-flight encodes the
 //! difference in a naming convention (a `kata-ship/` prefix on the owner string), which any
 //! writer can spell. Here it is **not an argument at all**: `urn:iki:ledger:{ledger}:claim`
 //! declares no `kind` input and ignores one if sent, and the kind is decided by a
@@ -33,20 +35,32 @@ use ikigai_core::{Error, Invocation, Result};
 use crate::vocabulary as v;
 
 /// Who holds a claim.
+///
+/// `#[non_exhaustive]` since 0.11.0, when `Agent` arrived: a kind added later is then a minor
+/// for this crate and no consumer's `match` stops compiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClaimKind {
-    /// A loop, an agent, a client — reported by the doctor when it holds an item that is not
-    /// in flight.
+    /// A loop, a client, a service: reported by the doctor when it holds an item that is not
+    /// in flight. What a host that does not decide stamps on every claim.
     Machine,
+    /// An LLM agent, a collaborator's Claude for one (since 0.11.0, ledger #1329). Reported by
+    /// the doctor as a machine is: an agent acting for a person is still the agent's hold.
+    Agent,
     /// A person deliberately holding an item.
     Person,
 }
 
 impl ClaimKind {
-    /// `machine` or `person` — the word every face uses.
+    /// Every kind, in the order the faces document them.
+    pub const ALL: &'static [ClaimKind] =
+        &[ClaimKind::Machine, ClaimKind::Agent, ClaimKind::Person];
+
+    /// `machine`, `agent` or `person`: the word every face uses.
     pub fn as_str(self) -> &'static str {
         match self {
             ClaimKind::Machine => "machine",
+            ClaimKind::Agent => "agent",
             ClaimKind::Person => "person",
         }
     }
@@ -55,17 +69,25 @@ impl ClaimKind {
     pub fn iri(self) -> &'static str {
         match self {
             ClaimKind::Machine => v::MACHINE,
+            ClaimKind::Agent => v::AGENT,
             ClaimKind::Person => v::PERSON,
         }
     }
 
     /// The kind a stored `ledger:claimKind` names.
     pub fn from_iri(iri: &str) -> Option<ClaimKind> {
-        match iri {
-            i if i == v::MACHINE => Some(ClaimKind::Machine),
-            i if i == v::PERSON => Some(ClaimKind::Person),
-            _ => None,
-        }
+        Self::ALL.iter().copied().find(|kind| kind.iri() == iri)
+    }
+
+    /// The kind a face's word names: the inverse of [`ClaimKind::as_str`].
+    ///
+    /// ```
+    /// use ikigai_ledger::claim::ClaimKind;
+    /// assert_eq!(ClaimKind::from_word("agent"), Some(ClaimKind::Agent));
+    /// assert_eq!(ClaimKind::from_word("robot"), None);
+    /// ```
+    pub fn from_word(word: &str) -> Option<ClaimKind> {
+        Self::ALL.iter().copied().find(|kind| kind.as_str() == word)
     }
 }
 
@@ -222,6 +244,20 @@ fn iso_duration(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_kind_round_trips_through_its_word_and_its_iri() {
+        for kind in ClaimKind::ALL.iter().copied() {
+            assert_eq!(ClaimKind::from_word(kind.as_str()), Some(kind));
+            assert_eq!(ClaimKind::from_iri(kind.iri()), Some(kind));
+            // Exhaustive on purpose: a kind added to the enum and forgotten in ALL fails here.
+            match kind {
+                ClaimKind::Machine | ClaimKind::Agent | ClaimKind::Person => {}
+            }
+        }
+        assert_eq!(ClaimKind::ALL.len(), 3);
+        assert_eq!(ClaimKind::from_iri(v::CLAIM_KIND_CLASS), None);
+    }
 
     #[test]
     fn a_lease_round_trips_through_its_canonical_form() {
