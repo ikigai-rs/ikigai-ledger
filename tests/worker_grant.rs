@@ -390,6 +390,67 @@ fn a_bad_comment_key_is_refused_before_anything_is_written() {
     assert_eq!(comment_count(&kernel), 0);
 }
 
+/// ★ An IRI that does not fit a key is keyed by its digest, and that is the contract (ledger
+/// #1315): the IRIs a taker may mint (a `/`, a `#`, a query, past 256 characters) are refused
+/// as keys, naming the fallback, and the digest form of each is a legal key that replays as
+/// `existing`.
+#[test]
+fn an_iri_that_does_not_fit_a_key_is_keyed_by_its_digest() {
+    use sha2::{Digest, Sha256};
+    let kernel = ledger_with_an_item();
+    let long = format!("urn:layer:tasks:report:{}", "x".repeat(240));
+    for iri in [
+        "https://example.org/layer/tasks/report/1",
+        "urn:layer:tasks:report#1",
+        "https://example.org/r?id=1",
+        long.as_str(),
+    ] {
+        let refused = try_verb(
+            &kernel,
+            Verb::Sink,
+            &at("comment"),
+            &[("item", "1"), ("content", "hi"), ("key", iri)],
+        );
+        match refused {
+            Err(Error::InvalidArgument {
+                ref name,
+                ref detail,
+            }) if name == "key" => {
+                assert!(detail.contains("sha256:"), "{iri}: {detail}");
+            }
+            other => panic!("{iri}: expected a refused key, got {other:?}"),
+        }
+        let hex: String = Sha256::digest(iri.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let key = format!("layer:tasks:report:sha256:{hex}");
+        let text = format!("Report <{iri}>");
+        let first = try_verb(
+            &kernel,
+            Verb::Sink,
+            &at("comment"),
+            &[("item", "1"), ("content", &text), ("key", &key)],
+        )
+        .expect("the digest form is a legal key");
+        assert!(!first.contains("existing"), "{first}");
+        let again = try_verb(
+            &kernel,
+            Verb::Sink,
+            &at("comment"),
+            &[("item", "1"), ("content", &text), ("key", &key)],
+        )
+        .expect("a replay under the digest key answers");
+        assert!(again.contains("existing"), "{again}");
+    }
+    assert_eq!(comment_count(&kernel), 4);
+    // The longest prefix the digest form leaves room for, and one past it.
+    let fits = format!("{}sha256:{}", "p".repeat(185), "0".repeat(64));
+    assert!(ikigai_ledger::model::parse_key(&fits).is_ok());
+    let over = format!("{}sha256:{}", "p".repeat(186), "0".repeat(64));
+    assert!(ikigai_ledger::model::parse_key(&over).is_err());
+}
+
 /// Concurrent keyed comments with one key file one comment: the check and the write are
 /// one store update.
 #[test]

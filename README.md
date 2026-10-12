@@ -136,7 +136,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}:state:{value}` | Exists | is it in that state? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:holder:{holder}` | Exists | is it held by that holder? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:closed` | Exists | is it closed? | `read:{ledger}` |
-| `…:{ledger}:item:{id}:about` | Sink · Delete | add / remove what it is about, title and body untouched | `write:{ledger}` |
+| `…:{ledger}:item:{id}:about` | Sink · Delete | add / remove what it is about, title and body untouched | `about:{ledger}` or `write:{ledger}` |
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
 | `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
 | `urn:iki:ledger:lifecycle:{name}` | Source · Exists | the legal states, in order | any `read:*` |
@@ -299,6 +299,18 @@ exactly. The shape is fixed so a key is a legal IRI segment **and survives gonk'
 door**, which maps an IRI to a URL path by turning every `:` into a `/` — so a `/` in a key
 would come back as a different key. Both foreign ids the gonk bridges carry fit as they
 stand. It is unique **per ledger**: two ledgers may use one key.
+
+★ **An IRI that does not fit is keyed by its digest, and that is the contract** (ledger
+#1315). The shape is the same for a comment key, so an arbitrary IRI minted elsewhere (a
+taker's report IRI, say) may not be spellable as one: `/`, `?`, `#` and `%` are refused, and so
+is anything past 256 characters. The answer is NOT a wider alphabet, for three reasons:
+no alphabet removes the need, since an IRI has no length bound and a key must; `#` and
+whitespace cannot cross the engine grammar as a `key=` value at all; and widening is additive
+while narrowing would strand keys already filed, so the narrow set is the reversible choice. A
+caller with such an IRI keys it as `{its own prefix}sha256:{64 lowercase hex of the IRI's UTF-8
+bytes}`, which fits with up to 185 characters of prefix, and keeps the IRI itself in the comment
+text. `parse_key` refuses with that advice, and a test pins that the digest
+form is a legal comment key and that the IRIs it stands for are not (`tests/worker_grant.rs`).
 
 Finding an item by its key:
 
@@ -876,10 +888,20 @@ worker can be handed the work without the verdict on it:
 | `urn:cap:ledger:claim:{ledger}` | `claim` Sink (take, renew, take over) and Delete (release) | |
 | `urn:cap:ledger:comment:{ledger}` | `comment`, keyed or not | |
 | `urn:cap:ledger:close:{ledger}` | `close` and `reopen` | |
-| `urn:cap:ledger:write:{ledger}` | **all three of the above**, and filing, linking, labeling, deferring, editing, `about`, state | unchanged: no grant issued before 0.7.0 changed meaning |
+| `urn:cap:ledger:about:{ledger}` (0.10.0) | `item:{id}:about` Sink (add) and Delete (remove) | not the item Sink's own `about=`, which is the edit door |
+| `urn:cap:ledger:write:{ledger}` | **all four of the above**, and filing, linking, labeling, deferring, editing, `about=` on the item, state | unchanged: no grant issued before 0.7.0 or 0.10.0 changed meaning |
 
 A claim's or a close's note, and the release record a close writes, are part of that verb and
 need no comment grant.
+
+**Since 0.10.0 `about` has one too** (ledger #1315): a process that records where work went (a
+layer mirror noting the offer it published, a hook noting the session that delivered) can add
+and remove an item's `about` edges without the close grant that `write:{ledger}` carries. ⚠
+**The worker grant below does not include it**: an `about` edge is what `items about=` finds
+items by, so whoever issues grants decides who may add one, and adds the line
+`urn:cap:ledger:about:acme` for that caller. `tests/about_grant.rs` holds it to its row: it adds
+and removes, it is refused at close, comment, claim, label, edit, append and at another ledger,
+and `write:{ledger}` still does both.
 
 ★ **The worker grant**, as an operator's config line (here for ledger `acme`): claim, renew,
 release, comment and read, and **no close, no relabel, no edit, no filing**:

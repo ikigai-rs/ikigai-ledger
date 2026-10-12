@@ -328,9 +328,11 @@ impl Ledger {
     }
 
     /// `urn:cap:ledger:write:{name}` — filing, commenting, closing, claiming, linking,
-    /// labeling, deferring, editing. It still means every one of those since 0.7.0, when
-    /// [`cap_claim`](Self::cap_claim), [`cap_comment`](Self::cap_comment) and
-    /// [`cap_close`](Self::cap_close) split three of them out as grants of their own.
+    /// labeling, deferring, editing, saying what an item is about. It still means every one
+    /// of those since 0.7.0, when [`cap_claim`](Self::cap_claim),
+    /// [`cap_comment`](Self::cap_comment) and [`cap_close`](Self::cap_close) split three of
+    /// them out as grants of their own, and 0.10.0, when [`cap_about`](Self::cap_about) split
+    /// out a fourth.
     pub fn cap_write(&self) -> String {
         format!("{CAP_WRITE_PREFIX}{}", self.name)
     }
@@ -361,6 +363,19 @@ impl Ledger {
         format!("{CAP_CLOSE_PREFIX}{}", self.name)
     }
 
+    /// `urn:cap:ledger:about:{name}` — adding and removing an item's `ledger:about` edges
+    /// at `…:item:{id}:about`, and nothing else (since 0.10.0, ledger #1315). Not part of the
+    /// worker grant: whoever issues grants decides who may say what an item is about.
+    ///
+    /// ```
+    /// use ikigai_ledger::Ledger;
+    /// let acme = Ledger::parse("acme").unwrap();
+    /// assert_eq!(acme.cap_about(), "urn:cap:ledger:about:acme");
+    /// ```
+    pub fn cap_about(&self) -> String {
+        format!("{CAP_ABOUT_PREFIX}{}", self.name)
+    }
+
     /// `urn:cap:ledger:delete:{name}` — moving an item out of view, recoverably.
     pub fn cap_delete(&self) -> String {
         format!("{CAP_DELETE_PREFIX}{}", self.name)
@@ -380,6 +395,7 @@ pub(crate) const CAP_PURGE_PREFIX: &str = "urn:cap:ledger:purge:";
 pub(crate) const CAP_CLAIM_PREFIX: &str = "urn:cap:ledger:claim:";
 pub(crate) const CAP_COMMENT_PREFIX: &str = "urn:cap:ledger:comment:";
 pub(crate) const CAP_CLOSE_PREFIX: &str = "urn:cap:ledger:close:";
+pub(crate) const CAP_ABOUT_PREFIX: &str = "urn:cap:ledger:about:";
 
 /// A grammar matching **both** `urn:iki:ledger:{ledger}:{action}` and the bare
 /// `urn:iki:ledger:{action}`, capturing `ledger` either way.

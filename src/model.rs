@@ -1137,6 +1137,13 @@ pub const KEY_PREFIX: &str = "key:";
 /// later is additive; narrowing it would strand keys already filed, which is why it starts
 /// narrow.
 ///
+/// ★ **An IRI that does not fit is keyed by its digest, and that is the contract** (ledger
+/// #1315), for a comment key as for an item key: `{prefix}sha256:{64 lowercase hex}` of the
+/// IRI's UTF-8 bytes, with the IRI itself kept in the text. A wider alphabet would not remove
+/// the need — an IRI has no length bound and a key must — and `#` and whitespace cannot cross
+/// the engine grammar as a `key=` value anyway. The digest form fits with up to 185 characters
+/// of prefix (`sha256:` and 64 digits are 71).
+///
 /// ```
 /// use ikigai_ledger::model::parse_key;
 /// assert_eq!(parse_key("urn:kata:issue:01JZ0ABC").unwrap(), "urn:kata:issue:01JZ0ABC");
@@ -1145,6 +1152,10 @@ pub const KEY_PREFIX: &str = "key:";
 /// assert!(parse_key("a b").is_err());
 /// assert!(parse_key("a#b").is_err());     // a comment in the engine grammar
 /// assert!(parse_key(&"k".repeat(257)).is_err());
+/// // The fallback for an IRI that does not fit:
+/// let digest = format!("layer:tasks:report:sha256:{}", "0".repeat(64));
+/// assert!(parse_key("https://example.org/report/1").is_err());
+/// assert_eq!(parse_key(&digest).unwrap(), digest);
 /// ```
 pub fn parse_key(key: &str) -> Result<String> {
     let bad = |detail: String| Error::InvalidArgument {
@@ -1158,7 +1169,8 @@ pub fn parse_key(key: &str) -> Result<String> {
     }
     if key.len() > MAX_KEY {
         return Err(bad(format!(
-            "a key is at most {MAX_KEY} characters, and this one is {}",
+            "a key is at most {MAX_KEY} characters, and this one is {}. An IRI that does \
+             not fit is keyed by its digest, `{{prefix}}sha256:{{hex}}`, with the IRI in the text",
             key.len()
         )));
     }
@@ -1169,7 +1181,8 @@ pub fn parse_key(key: &str) -> Result<String> {
         return Err(bad(format!(
             "`{key}` contains {c:?}; a key is ASCII letters, digits, `-`, `.`, `_`, `~` and \
              `:`, so that it is a legal IRI segment (`urn:iki:ledger:item:key:{{key}}`) and \
-             survives a URL path unchanged"
+             survives a URL path unchanged. An IRI that does not fit is keyed by its digest, \
+             `{{prefix}}sha256:{{hex}}`, with the IRI in the text"
         )));
     }
     Ok(key.to_string())
