@@ -90,6 +90,12 @@
 //! `close`, `reopen`) declare [`CAP_ANY`], the one family both grants satisfy. `README.md`,
 //! "What is enforced, and where", publishes the worker grant line by line.
 //!
+//! Since 0.10.0 (ledger #1315) `urn:cap:ledger:about:{ledger}` splits a fourth out of `write`:
+//! adding and removing an item's `about` edges at `…:item:{id}:about`, and nothing else, so a
+//! process that records where work went can do it without the close grant. `write:{ledger}`
+//! still covers it; the worker grant does not include it. `item:{id}:about` declares
+//! [`CAP_ANY`] too.
+//!
 //! Since 0.8.0 (ledger #1199) a worker hands an item back with `comment handback=true`, under
 //! its comment grant, and `next` stops offering it until the dispatcher (the close grant)
 //! answers; and when the capability carries a principal, a claim records it and only that
@@ -142,7 +148,7 @@ pub mod sparql;
 pub mod vocabulary;
 
 pub use endpoints::{
-    space, space_with, space_with_policies, SpaceConfig, CAP_ANY, CAP_CLAIM, CAP_CLOSE,
+    space, space_with, space_with_policies, SpaceConfig, CAP_ABOUT, CAP_ANY, CAP_CLAIM, CAP_CLOSE,
     CAP_COMMENT, CAP_DELETE, CAP_PURGE, CAP_READ, CAP_WRITE, SPACE_ID,
 };
 pub use ledger::Ledger;

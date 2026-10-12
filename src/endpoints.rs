@@ -123,10 +123,11 @@ use crate::vocabulary as v;
 pub const CAP_READ: &str = "urn:cap:ledger:read:*";
 
 /// Every ordinary mutation — filing, commenting, closing, claiming, linking, labeling,
-/// deferring, editing — as declared. A held grant names one ledger:
-/// [`Ledger::cap_write`], and it still covers claiming, commenting and closing, which
-/// since 0.7.0 also have grants of their own ([`CAP_CLAIM`], [`CAP_COMMENT`],
-/// [`CAP_CLOSE`]).
+/// deferring, editing, saying what an item is about — as declared. A held grant names one
+/// ledger: [`Ledger::cap_write`], and it still covers claiming, commenting and closing,
+/// which since 0.7.0 also have grants of their own ([`CAP_CLAIM`], [`CAP_COMMENT`],
+/// [`CAP_CLOSE`]), and adding or removing an `about`, which has had one since 0.10.0
+/// ([`CAP_ABOUT`]).
 pub const CAP_WRITE: &str = "urn:cap:ledger:write:*";
 
 /// The family of the claim grant: taking, renewing and releasing claims, and nothing else.
@@ -148,10 +149,26 @@ pub const CAP_COMMENT: &str = "urn:cap:ledger:comment:*";
 /// names one ledger: [`Ledger::cap_close`]. Declared as [`CAP_ANY`]; see [`CAP_CLAIM`].
 pub const CAP_CLOSE: &str = "urn:cap:ledger:close:*";
 
-/// "Holds some ledger grant": the floor `claim`, `comment`, `close` and `reopen` DECLARE,
+/// The family of the about grant: adding and removing an item's `ledger:about` edges at
+/// `…:item:{id}:about`, and nothing else (ledger #1315). A held grant names one ledger:
+/// [`Ledger::cap_about`]. Declared as [`CAP_ANY`]; see [`CAP_CLAIM`].
+///
+/// ★ **Why it is its own grant.** `about` is how an item names what it is filed against,
+/// and a process that RECORDS where work went (a layer mirror noting the offer it published,
+/// a hook noting the session that delivered) needs to write that edge without being able to
+/// close the item. Before 0.10.0 the only grant that reached it was `write:{ledger}`, which
+/// is the close grant too. ⚠ The worker grant does NOT include it: an about edge is visible
+/// to every `items about=` query, so whoever issues grants decides who may add one.
+///
+/// The item Sink's own `about=` stays under [`CAP_WRITE`]: that door also edits the title,
+/// body and priority, and a per-argument grant is not a thing a declaration can say.
+pub const CAP_ABOUT: &str = "urn:cap:ledger:about:*";
+
+/// "Holds some ledger grant": the floor `claim`, `comment`, `close`, `reopen` and
+/// `item:{id}:about` DECLARE,
 /// because it is the only family both the narrow grant and `write:{ledger}` satisfy (see
 /// [`CAP_CLAIM`]). It over-offers: a caller holding only a read or a delete grant, and a
-/// store graph write grant, sees those four actions in its manifold and is refused at
+/// store graph write grant, sees those actions in its manifold and is refused at
 /// `invoke` with a `Denied` naming both tokens that would do. Declared stays a superset of
 /// enforced, never the reverse.
 pub const CAP_ANY: &str = "urn:cap:ledger:*";
@@ -177,6 +194,8 @@ enum Need {
     Comment,
     /// Close or reopen: `close:{ledger}`, or `write:{ledger}`.
     Close,
+    /// Add or remove an item's `about` edges: `about:{ledger}`, or `write:{ledger}`.
+    About,
 }
 
 impl Need {
@@ -190,13 +209,18 @@ impl Need {
             Need::Claim => ledger.cap_claim(),
             Need::Comment => ledger.cap_comment(),
             Need::Close => ledger.cap_close(),
+            Need::About => ledger.cap_about(),
         }
     }
 
     /// Whether `write:{ledger}` also satisfies it: the three verbs split out of the write
-    /// grant in 0.7.0, which it still covers so that no grant issued before changed meaning.
+    /// grant in 0.7.0 and `about` in 0.10.0, which it still covers so that no grant issued
+    /// before changed meaning.
     fn write_covers(self) -> bool {
-        matches!(self, Need::Claim | Need::Comment | Need::Close)
+        matches!(
+            self,
+            Need::Claim | Need::Comment | Need::Close | Need::About
+        )
     }
 
     /// The family this crate declares for it.
@@ -206,7 +230,7 @@ impl Need {
             Need::Write => CAP_WRITE,
             Need::Delete => CAP_DELETE,
             Need::Purge => CAP_PURGE,
-            Need::Claim | Need::Comment | Need::Close => CAP_ANY,
+            Need::Claim | Need::Comment | Need::Close | Need::About => CAP_ANY,
         }
     }
 }
@@ -219,9 +243,10 @@ impl Need {
 /// ledger is in the IRI and the check runs before `invoke` can read it. Declared and
 /// enforced name the same scope; only the exactness differs, and the exact half is here.
 ///
-/// ★ **Claim, comment and close take either of two grants**: their own (`claim:{ledger}`,
-/// `comment:{ledger}`, `close:{ledger}`) or `write:{ledger}`, which meant all three before
-/// 0.7.0 split them out and still does. A worker holding claim and comment is refused here
+/// ★ **Claim, comment, close and about take either of two grants**: their own
+/// (`claim:{ledger}`, `comment:{ledger}`, `close:{ledger}`, `about:{ledger}`) or
+/// `write:{ledger}`, which meant all four before 0.7.0 and 0.10.0 split them out and still
+/// does. A worker holding claim and comment is refused here
 /// at close, label, edit and every other write, by name.
 fn ledger_for(inv: &Invocation<'_>, need: Need) -> Result<Ledger> {
     let ledger = Ledger::from_bindings(inv.bindings)?;
@@ -2531,8 +2556,9 @@ impl Endpoint for CommentEndpoint {
                                  and the item named is the one the comment is ON. The check \
                                  and the write are one store update, so a replay comments \
                                  once. The append key's shape: ASCII letters, digits, `-` \
-                                 `.` `_` `~` `:`, at most 256. Comment keys and item keys \
-                                 are separate names.",
+                                 `.` `_` `~` `:`, at most 256; an IRI that does not fit is \
+                                 keyed by its digest, `{prefix}sha256:{hex}`, with the IRI \
+                                 in the text. Comment keys and item keys are separate names.",
                             )
                             .class(v::ext::XSD_STRING)
                             .optional(),
@@ -3870,7 +3896,7 @@ impl Endpoint for AboutEndpoint {
             Verb::Delete => "no longer about",
             other => return Err(unsupported("ledger-item-about", other)),
         };
-        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let client = StoreClient::new(inv, ledger_for(inv, Need::About)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, flight::part_id(inv)?).await?;
         let targets: Vec<&str> = inv.inline_str("content")?.split_whitespace().collect();
@@ -3920,7 +3946,9 @@ impl Endpoint for AboutEndpoint {
             .summary(
                 "The resources an item is filed against (`ledger:about`) — a file, a PR, the \
                  session that delivered it — added or removed without touching the item's \
-                 title or body. `urn:iki:ledger:items about=` finds items by them.",
+                 title or body. `urn:iki:ledger:items about=` finds items by them. Takes \
+                 `urn:cap:ledger:about:{ledger}` or `urn:cap:ledger:write:{ledger}`; the \
+                 worker grant (claim and comment) does not reach it.",
             )
             .verb(Verb::Meta)
             .action(write_scopes(
@@ -3930,7 +3958,7 @@ impl Endpoint for AboutEndpoint {
                     .input(flight::item_id_input())
                     .input(content("The targets to add."))
                     .output(PLAIN),
-                CAP_WRITE,
+                CAP_ANY,
             ))
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
@@ -3939,7 +3967,7 @@ impl Endpoint for AboutEndpoint {
                     .input(flight::item_id_input())
                     .input(content("The targets to remove."))
                     .output(PLAIN),
-                CAP_WRITE,
+                CAP_ANY,
             ))
     }
 }
