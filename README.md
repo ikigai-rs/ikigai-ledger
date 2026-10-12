@@ -900,6 +900,24 @@ is its own: another worker holding the same lines cannot release it (see "Claims
 comment and release succeed; close, reopen, label, edit, append, defer and delete are each a
 typed `Denied` naming the grant that would do.
 
+★ **Routing a filed item to another worker is a label edit** (ledger #1234). A worker reads
+`next labels=worker:<name>`, so the dispatcher moves an item by removing one label and adding
+the other, under `write:{ledger}`:
+
+```text
+$ delete urn:iki:ledger:acme:label item=12 worker:lawnboy
+unlabeled acme#12 worker:lawnboy
+$ sink urn:iki:ledger:acme:label item=12 worker:bug
+labeled acme#12 worker:bug
+```
+
+Remove first, so the item is never offered to two workers. Each write stamps `modified`, and
+`next`, `count`, `items` and the item see it on the very next read, cached or not
+(`tests/label_edit.rs`). The worker grant can do neither half, so a worker cannot route work to
+itself. This is two writes, which is safe with one dispatcher; two dispatchers racing would be
+the double-label defect of "Lifecycle state" above, and the answer then is a single-valued
+compare-and-set like `state`, not a label "replace".
+
 ⚠ **What `claim`, `comment`, `close` and `reopen` DECLARE is `urn:cap:ledger:*`**, "holds some
 ledger grant", not their own family. They must admit both their own grant and `write:{ledger}`,
 and `ikigai-core` ANDs every `requires` and matches a family only as a trailing-`*` prefix, so
