@@ -787,8 +787,8 @@ fn is_dispatcher(inv: &Invocation<'_>, ledger: &Ledger) -> bool {
 }
 
 /// The update that applies a [`Handback`] to `item`, carrying `guard` (a keyed comment's
-/// "the key is free" clause) so it lands exactly when the comment does. Empty for
-/// [`Handback::Unchanged`].
+/// "the key is free" clause, and a hand-back's "the item is open") so it lands exactly when
+/// the comment does. Empty for [`Handback::Unchanged`].
 fn handback_update(
     client: &StoreClient<'_, '_>,
     item: &str,
@@ -853,7 +853,7 @@ async fn write_keyed_comment(
     }
     // ★ The hand-back is in the SAME update as the comment (ledger #1199), so the evidence
     // and the state it puts the item in land together or not at all.
-    let Some(key) = key else {
+    if key.is_none() && handback != Handback::Set {
         client
             .update(&batch(&[
                 format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
@@ -862,16 +862,30 @@ async fn write_keyed_comment(
             ]))
             .await?;
         return Ok(comment);
+    }
+    // ★ A hand-back lands only on an OPEN item (ledger #1418): the endpoint refuses a closed
+    // one before writing, and this clause holds against a close that lands between that read
+    // and this write, so the comment and its `awaiting` are both written or neither is.
+    let open = if handback == Handback::Set {
+        client.in_graph(&format!("<{item}> <{}> <{}>", v::STATUS, v::OPEN))
+    } else {
+        String::new()
     };
-    triples.push_str(&format!(
-        "\n<{comment}> <{}> {} .",
-        v::COMMENT_KEY,
-        literal(key)
-    ));
-    let free = format!(
-        "FILTER NOT EXISTS {{ {} }}",
-        client.in_graph(&format!("?taken <{}> {}", v::COMMENT_KEY, literal(key)))
-    );
+    let free = match key {
+        Some(key) => {
+            triples.push_str(&format!(
+                "\n<{comment}> <{}> {} .",
+                v::COMMENT_KEY,
+                literal(key)
+            ));
+            format!(
+                "FILTER NOT EXISTS {{ {} }}",
+                client.in_graph(&format!("?taken <{}> {}", v::COMMENT_KEY, literal(key)))
+            )
+        }
+        None => String::new(),
+    };
+    let free = format!("{open} {free}");
     // The stamp and the hand-back first: once the comment is in, the key is taken and the
     // guard is false, so a replay changes neither.
     client
@@ -1096,13 +1110,17 @@ impl Endpoint for ItemsEndpoint {
                 .iter()
                 .map(|item| format!("{}\n", item.line()))
                 .collect();
-            let last = (filter.offset + limit).min(total);
+            // ★ Saturating (ledger #1420): `limit` and `offset` take any count, and the store
+            // answers `LIMIT 18446744073709551615`, so an unchecked sum panicked in a debug
+            // build and, in a release one, wrapped into a footer that sent the reader back to
+            // the start.
+            let last = filter.offset.saturating_add(limit).min(total);
             if filter.offset == 0 && last == total {
                 out.push_str(&format!("\n{total} item(s)\n"));
             } else {
                 out.push_str(&format!(
                     "\n{}–{last} of {total} item(s)",
-                    filter.offset + 1
+                    filter.offset.saturating_add(1)
                 ));
                 if last < total {
                     out.push_str(&format!(
@@ -2403,6 +2421,37 @@ fn append_answer(
     }))
 }
 
+/// The refusal for an act closed work does not admit (a hand-back, a claim; ledger #1418,
+/// #1419): a `Conflict`, because the request is fine and the item's state does not permit it,
+/// naming the item, its state and how to reopen it.
+fn closed_refusal(item: &Item, ledger: &Ledger, why: &str) -> Error {
+    Error::Conflict(format!(
+        "{} is closed{}: {why}. Reopen it first (`sink {} item={}`) if there is more to do",
+        item.short(),
+        item.closed_reason
+            .as_deref()
+            .map(|reason| format!(" ({})", reason.rsplit(['#', '/']).next().unwrap_or(reason)))
+            .unwrap_or_default(),
+        ledger.resource("reopen"),
+        item.number
+    ))
+}
+
+/// Whether the comment minted as `comment` is in the ledger: how a guarded write learns
+/// whether it landed.
+async fn comment_written(client: &StoreClient<'_, '_>, comment: &str) -> Result<bool> {
+    client
+        .ask(&format!(
+            "ASK {{ {} }}",
+            client.in_graph(&format!(
+                "<{comment}> <{}> <{}>",
+                v::ext::TYPE,
+                v::COMMENT_CLASS
+            ))
+        ))
+        .await
+}
+
 // ------------------------------------------------------------------------- comment
 
 #[derive(Clone)]
@@ -2443,6 +2492,18 @@ impl Endpoint for CommentEndpoint {
             });
         }
         let author = inv.inline_str("author").ok();
+        // ★ A hand-back asks the dispatcher to check work that is still open; closed work
+        // awaits nobody (ledger #1418). Until 0.11.1 this wrote `awaiting` on a closed item,
+        // the state the doctor's `awaiting-closed` says only a write around the ledger leaves.
+        // The write carries the same condition, against a close that lands in between.
+        if handback && !item.open {
+            return Err(closed_refusal(
+                &item,
+                client.ledger(),
+                "a hand-back asks the dispatcher to check work that is still open, and closed \
+                 work awaits nobody; a comment without `handback=true` is still written",
+            ));
+        }
         // A taken key is answered without a write, for the reason the keyed append gives
         // (ledger #822): even a no-op update cuts every cached read of the ledger. Sound only
         // because a key, once on a live comment, stays there while its item lives; the
@@ -2472,6 +2533,24 @@ impl Endpoint for CommentEndpoint {
             change,
         )
         .await?;
+        // A hand-back the write's guard refused: the item closed between the read above and the
+        // write, and neither the comment nor `awaiting` landed. A keyed one whose key a racer
+        // took is answered below as that racer's comment, as any taken key is.
+        if change == Handback::Set && !comment_written(&client, &comment).await? {
+            let keyed = match &key {
+                Some(key) => model::find_comment_by_key(&client, key).await?,
+                None => None,
+            };
+            if keyed.is_none() {
+                let now = model::load_item(&client, &item.iri).await?.unwrap_or(item);
+                return Err(closed_refusal(
+                    &now,
+                    client.ledger(),
+                    "it was closed before the hand-back landed, and nothing was written. Closed \
+                     work awaits nobody",
+                ));
+            }
+        }
         if let Some(key) = &key {
             let found = model::find_comment_by_key(&client, key)
                 .await?
@@ -2570,7 +2649,8 @@ impl Endpoint for CommentEndpoint {
                                  comment as the evidence: in the same store update, the item \
                                  is marked `ledger:awaiting <urn:iki:ledger:awaiting:dispatcher>` \
                                  and `next` stops offering it (`why: awaiting-dispatcher`). \
-                                 Needs only the comment grant. Cleared by close, reopen, a \
+                                 Needs only the comment grant, and an open item: refused \
+                                 (Conflict) on a closed one. Cleared by close, reopen, a \
                                  comment with `rejects=true`, or any comment from a caller \
                                  holding the close grant. The answer ends ` awaiting-dispatcher` \
                                  (`\"handback\": \"set\"` in JSON).",
@@ -3056,14 +3136,18 @@ fn claim_update(
             datetime(now + lease.millis),
         ));
     }
+    // ★ Only an OPEN item (ledger #1419): the endpoint refuses a closed one before writing,
+    // and this holds against a close that lands between that read and this write.
     format!(
         "DELETE {{ {} }}\nINSERT {{ {} }}\nWHERE {{ {} }}",
         client.in_graph(&delete),
         client.in_graph(&insert),
         client.in_graph(&format!(
-            "<{item}> <{}> <{}> .\n{guard}\n{optional}",
+            "<{item}> <{}> <{}> ; <{}> <{}> .\n{guard}\n{optional}",
             v::ext::TYPE,
-            v::ITEM_CLASS
+            v::ITEM_CLASS,
+            v::STATUS,
+            v::OPEN
         )),
     )
 }
@@ -3151,6 +3235,18 @@ impl Endpoint for ClaimEndpoint {
                 let kind = (self.stamper)(inv);
                 let now = now_ms(inv)?;
                 let item = require_item(&client, inv.inline_str("item")?).await?;
+                // ★ Closed work is held by nobody (ledger #1147), so a closed item cannot be
+                // claimed, renewed or taken over (ledger #1419). Until 0.11.1 a claim took it,
+                // recreating the held-closed state a close removes: listed under `holder=`
+                // again, and an orphaned claim to the doctor. The update carries the same
+                // condition, against a close that lands between this read and the write.
+                if !item.open {
+                    return Err(closed_refusal(
+                        &item,
+                        client.ledger(),
+                        "closed work is held by nobody",
+                    ));
+                }
                 let resource = client.ledger().resource("claim");
                 let expired = item.lease_expires.is_some_and(|ends| ends <= now);
                 // ★ The claimant's principal, from the capability its door minted — never an
@@ -3284,6 +3380,14 @@ impl Endpoint for ClaimEndpoint {
                 let after = model::load_item(&client, &item.iri)
                     .await?
                     .ok_or_else(|| Error::NotFound(format!("no ledger item at `{}`", item.iri)))?;
+                if !after.open {
+                    // The update's guard refused it: a close landed after the read above.
+                    return Err(closed_refusal(
+                        &after,
+                        client.ledger(),
+                        "it was closed before the claim landed, and closed work is held by nobody",
+                    ));
+                }
                 if after.claimed_by.as_deref() == Some(holder.as_str())
                     && after.claim_principal.as_deref() != caller
                 {
@@ -3465,7 +3569,8 @@ impl Endpoint for ClaimEndpoint {
                     .input(ledger_arg("claim"))
                     .summary(
                         "Claim the item for a holder, in one guarded store update; refuses \
-                         (Conflict) if someone else holds it. The same holder claiming again \
+                         (Conflict) if someone else holds it or the item is closed (closed \
+                         work is held by nobody). The same holder claiming again \
                          renews the claim and its lease. When the capability carries a \
                          principal, the claim records it (`ledger:claimPrincipal`) beside the \
                          holder's name, and \"the same holder\" means the same name AND the \

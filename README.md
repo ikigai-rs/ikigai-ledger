@@ -378,6 +378,11 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) cleared-awaiting
   speaking on a handed-back item is the answer to it. A worker's ordinary comment leaves it
   standing; a worker clears it only by saying `rejects=true`. `handback=true` and
   `rejects=true` together are refused.
+- **Only on open work** (since 0.11.1, ledger #1418): `handback=true` on a closed item is
+  refused with a `Conflict` naming the item and its state, and writes nothing. Until 0.11.1 it
+  wrote `awaiting` on the closed item. The comment and its `awaiting` carry the same condition
+  in the store update, so a hand-back racing a close writes neither. An ordinary comment on a
+  closed item is still written.
 - **On every face**: `awaiting: dispatcher` in the item's text (and `awaiting-dispatcher` at the
   end of its line in a listing), `"awaiting": "dispatcher"` in JSON (`null` otherwise), the
   triple in Turtle, and `"handback": "set"` or `"cleared"` on the comment's JSON answer. The
@@ -726,6 +731,11 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   <holder>; the claim is released.` (attributed to the closer's `author`), `released <holder>`
   at the end of the plain answer, and `"released": "<holder>"` in JSON. Reopening does not
   restore it; whoever picks the work up again claims it.
+- ★ **And a closed item cannot be claimed** (since 0.11.1, ledger #1419). A claim, a renewal
+  and a takeover on a closed item are each refused with a `Conflict` naming the item and its
+  state; until 0.11.1 a claim took it, and the held-closed state the close had just removed
+  came back. The store update carries the same condition, so a claim racing a close does not
+  land either. Reopen the item first if there is more to do.
 - ★ **The holder is the caller's PRINCIPAL when there is one** (since 0.8.0, ledger #1199). When
   the claimant's capability carries a principal (`urn:cap:principal:<iri>`, minted by the host's
   door: gonk's QUIC door names every client `urn:iki:gonk:client:<fingerprint>`, its HTTP door
