@@ -1146,6 +1146,32 @@ All twenty-two resources are bound, tested, and walked clean by `ikigai-conforma
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.11.1 (2026-10-13): a deep `blocks` chain, a large ledger, closed items (ledger #1418, #1419, #1420, #1422, #1423)
+
+A patch: five defects an unled audit of 0.11.0 reproduced, each pinned by a test that failed on
+0.11.0 because of it. No public API changes.
+
+- ★ **A long `blocks` chain no longer aborts the host** (ledger #1422). The cycle check
+  recursed once per link, so a chain about 15,000 long overflowed a 2 MiB stack (a tokio
+  worker's) and aborted the whole process on every `next`. It walks with an explicit stack
+  now, in the same order, so it names the same cycle. Leverage is computed once for the whole
+  graph rather than one walk per item, which was quadratic on a chain (20 s for 10,000 linked
+  items against 0.25 s unlinked); the counts, and so `next`'s ranking, are unchanged.
+- **`next` answers past about 19,400 open items** (ledger #1423). It listed every open item's
+  IRI in one `VALUES` list, which passed the store's 1 MiB SPARQL bound, and refused on every
+  call. The lists are split under the bound now (also the JSON face's link numbers and
+  comments, and a listing's page); the store's bound is unchanged. Loading labels and links
+  is also linear now: two `VALUES` lists in one query were joined in time quadratic in the
+  items once they carried links or labels.
+- **A hand-back on a closed item is refused** (ledger #1418), `Conflict`, naming the item and
+  its state, and writes nothing. It used to write `awaiting` on closed work. See "Handing
+  back".
+- **A closed item cannot be claimed** (ledger #1419): claim, renew and takeover are refused,
+  and the store update requires an open item, so a claim racing a close does not land
+  either. See "Claims".
+- **`items limit=<the largest count> offset=1`** no longer panics in a debug build or prints
+  a wrapped footer in a release one (ledger #1420).
+
 ### 0.11.0 (2026-10-12): an agent is its own claim kind (ledger #1329)
 
 A minor, because a public enum gains a variant: `ClaimKind::Agent`, so a consumer's exhaustive
