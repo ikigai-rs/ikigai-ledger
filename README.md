@@ -77,9 +77,10 @@ than a column: partitioning by graph costs nothing when you want the whole pictu
 Every read here is a SPARQL query issued at `urn:iki:store:graph-select`, and every write is
 a SPARQL UPDATE at `urn:iki:store:graph-update` — the **narrow** doors, each naming one
 ledger's graph and gated by a grant for that graph.
-[`ikigai-store`](https://crates.io/crates/ikigai-store) (**0.2.10 or later**: the doors
-arrived in 0.2.2, and 0.2.10 is where they stopped being network egress; see "SPARQL never
-leaves the process" below) owns the dataset, the write lock and the golden threads; this
+[`ikigai-store`](https://crates.io/crates/ikigai-store) (**0.2.21 or later**: the doors
+arrived in 0.2.2, 0.2.10 is where they stopped being network egress (see "SPARQL never
+leaves the process" below), and 0.2.21 is where a query inside every bound stopped planning
+uncancellably for minutes) owns the dataset, the write lock and the golden threads; this
 module owns the **domain**.
 
 ```rust
@@ -1149,7 +1150,18 @@ All twenty-two resources are bound, tested, and walked clean by `ikigai-conforma
 ### 0.11.1 (2026-10-13): a deep `blocks` chain, a large ledger, closed items (ledger #1418, #1419, #1420, #1422, #1423)
 
 A patch: five defects an unled audit of 0.11.0 reproduced, each pinned by a test that failed on
-0.11.0 because of it. No public API changes.
+0.11.0 because of it, and a new `ikigai-store` floor. No public API changes.
+
+- ★ **`ikigai-store` 0.2.21 is the floor**, a SECURITY floor like 0.2.10 before it, not an API
+  one (ledger #1426, #1427, #1428, #1429). A ledger caller holds this ledger's store graph
+  grants and can resolve the store's doors directly, and before 0.2.21 a `GRAPH` block (every
+  query here is one) and three other wrappers the planner erases hid their patterns from the
+  store's join bound, so a query inside every bound could plan uncancellably for minutes. 0.2.21
+  also reserves the overdue-evaluation slot at start and bounds `urn:iki:store:load`'s document
+  size and XML entity expansion. A caret on 0.2.10 admitted 0.2.21 but did not require it, so a
+  consumer's lock could keep an older store under this release. This crate's own queries are
+  counted the same under 0.2.21 as under 0.2.19 (each is one `GRAPH` block, whose inside was
+  already a join of its own), so nothing here that answered before is refused now.
 
 - ★ **A long `blocks` chain no longer aborts the host** (ledger #1422). The cycle check
   recursed once per link, so a chain about 15,000 long overflowed a 2 MiB stack (a tokio

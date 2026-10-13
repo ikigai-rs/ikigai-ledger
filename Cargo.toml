@@ -44,11 +44,18 @@ ikigai-core = "0.1.93"
 # unified on (`ikigai-cli`, through rudof), a `SERVICE <http://…>` or `LOAD <url> INTO GRAPH`
 # sent there was an outbound request — so a ledger's published grant list was a grant to make
 # network requests. 0.2.10 refuses both at every door. `tests/service_egress.rs` is the
-# reproduction. Default features only: the RocksDB backend is the HOST's choice, taken in the
-# host's manifest, and nothing in this library needs it. ⚠ `"0.2.10"` is a range
-# `>=0.2.10, <0.3.0`; when the store reaches 0.3 this line must move or this crate freezes
-# out of it.
-ikigai-store = { version = "0.2.10", default-features = false }
+# reproduction. ★ **And 0.2.21 is the floor now, a SECOND security floor, not an API one**
+# (ledger #1426, #1427, #1428, #1429): a `GRAPH` block, and three planner-erasable wrappers, hid
+# join operands from the store's join bound, so an in-bounds query planned uncancellably for
+# minutes; the overdue-evaluation cap now reserves its slot at start; and `urn:iki:store:load`
+# bounds document size and XML entity expansion. A ledger caller can resolve those doors
+# directly, as above, so a host composing this ledger must not resolve a store without them.
+# Caret alone admits 0.2.21 but does not REQUIRE it: a consumer's lock could keep an older
+# store under a fresh ledger. This crate uses no API newer than 0.2.10. Default features only:
+# the RocksDB backend is the HOST's choice, taken in the host's manifest, and nothing in this
+# library needs it. ⚠ `"0.2.21"` is a range `>=0.2.21, <0.3.0`; when the store reaches 0.3 this
+# line must move or this crate freezes out of it.
+ikigai-store = { version = "0.2.21", default-features = false }
 
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
@@ -106,8 +113,8 @@ ikigai-conformance = "0.6.0"
 # `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
 # `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
-# costs an `oxrocksdb-sys` compile once per cache.
-ikigai-store = { version = "0.2.10", features = ["persistent"] }
+# costs an `oxrocksdb-sys` compile once per cache. The same 0.2.21 security floor as above.
+ikigai-store = { version = "0.2.21", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
