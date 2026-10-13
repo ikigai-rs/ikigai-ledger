@@ -956,17 +956,9 @@ async fn load(
     filter: &Filter,
     page: Option<&[String]>,
 ) -> Result<Vec<Item>> {
-    let values = match page {
-        Some(iris) => format!(
-            "VALUES ?item {{ {} }}\n",
-            iris.iter()
-                .map(|iri| sparql::iri(iri, "item"))
-                .collect::<Result<Vec<_>>>()?
-                .join(" ")
-        ),
-        None => String::new(),
-    };
-    let query = format!(
+    let filters = filter_clauses(filter)?;
+    let query = |values: &str| {
+        format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
          ?principal ?awaiting WHERE {{ {} }} \
@@ -1014,13 +1006,58 @@ async fn load(
             expires = v::LEASE_EXPIRES,
             principal = v::CLAIM_PRINCIPAL,
             awaiting = v::AWAITING,
-            filters = filter_clauses(filter)?,
         ))
-    );
-    let rows = client.select(&query).await?;
+        )
+    };
+    // ★ A page is named by its IRIs, in lists under the store's bound (ledger #1423). The rows
+    // of one item are all in one list, and `items_from_rows` sorts them as a whole.
+    let rows = match page {
+        Some(iris) => {
+            let mut rows = Vec::new();
+            for list in values_lists(iris)? {
+                rows.extend(
+                    client
+                        .select(&query(&format!("VALUES ?item {{ {list} }}\n")))
+                        .await?,
+                );
+            }
+            rows
+        }
+        None => client.select(&query("")).await?,
+    };
     let mut items = items_from_rows(&rows);
     fill_multivalued(client, &mut items).await?;
     Ok(items)
+}
+
+/// How many bytes of IRIs one `VALUES` list may hold.
+///
+/// ★ **The store refuses any SPARQL text over 1 MiB** (`MAX_SPARQL_BYTES`), before parsing it:
+/// its parser and evaluator recurse, and the bound is a security limit, not a tuning knob. A
+/// list of every open item's IRI passed it at about 19,400 items in the default ledger (sooner
+/// in a named one, whose IRIs are longer), and `next` then refused on every call (ledger
+/// #1423). A quarter of the bound leaves the rest of any query here ample room.
+const VALUES_BUDGET: usize = 256 * 1024;
+
+/// `iris` as the bodies of `VALUES` lists (`<a> <b> …`), in order, each under
+/// [`VALUES_BUDGET`] bytes: one query per list, and the caller joins the answers.
+fn values_lists<S: AsRef<str>>(iris: impl IntoIterator<Item = S>) -> Result<Vec<String>> {
+    let mut lists = Vec::new();
+    let mut list = String::new();
+    for iri in iris {
+        let term = sparql::iri(iri.as_ref(), "item")?;
+        if !list.is_empty() && list.len() + 1 + term.len() > VALUES_BUDGET {
+            lists.push(std::mem::take(&mut list));
+        }
+        if !list.is_empty() {
+            list.push(' ');
+        }
+        list.push_str(&term);
+    }
+    if !list.is_empty() {
+        lists.push(list);
+    }
+    Ok(lists)
 }
 
 /// Load one item by its IRI, with its multi-valued edges.
@@ -1292,26 +1329,27 @@ pub async fn numbers_of(
     if iris.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let values = iris
-        .iter()
-        .map(|iri| sparql::iri(iri, "item"))
-        .collect::<Result<Vec<_>>>()?
-        .join(" ");
-    let query = format!(
-        "SELECT ?i ?n WHERE {{ {} }}",
-        client.in_graph(&format!(
-            "VALUES ?i {{ {values} }}\n?i <{}> <{}> ; <{}> ?n .",
-            v::ext::TYPE,
-            v::ITEM_CLASS,
-            v::NUMBER
-        ))
-    );
-    Ok(client
-        .select(&query)
-        .await?
-        .iter()
-        .filter_map(|row| Some((row.get("i")?.value.clone(), row.get("n")?.as_i64()?)))
-        .collect())
+    let mut numbers = BTreeMap::new();
+    // In lists under the store's bound (ledger #1423): see `VALUES_BUDGET`.
+    for values in values_lists(iris)? {
+        let query = format!(
+            "SELECT ?i ?n WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "VALUES ?i {{ {values} }}\n?i <{}> <{}> ; <{}> ?n .",
+                v::ext::TYPE,
+                v::ITEM_CLASS,
+                v::NUMBER
+            ))
+        );
+        numbers.extend(
+            client
+                .select(&query)
+                .await?
+                .iter()
+                .filter_map(|row| Some((row.get("i")?.value.clone(), row.get("n")?.as_i64()?))),
+        );
+    }
+    Ok(numbers)
 }
 
 /// The comments on several items at once, each item's oldest first (ties broken by the
@@ -1324,24 +1362,25 @@ pub async fn load_comments_for(
     if items.is_empty() {
         return Ok(by_item);
     }
-    let values = items
-        .iter()
-        .map(|iri| sparql::iri(iri, "item"))
-        .collect::<Result<Vec<_>>>()?
-        .join(" ");
-    let query = format!(
-        "SELECT ?item ?comment ?body ?author ?created WHERE {{ {} }} ORDER BY ?created ?comment",
-        client.in_graph(&format!(
-            "VALUES ?item {{ {values} }}\n\
-             ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
-             OPTIONAL {{ ?comment <{author}> ?author }}",
-            on_item = v::ON_ITEM,
-            body = v::BODY,
-            created = v::ext::CREATED,
-            author = v::AUTHOR,
-        ))
-    );
-    for row in client.select(&query).await? {
+    // In lists under the store's bound (ledger #1423): see `VALUES_BUDGET`. An item's comments
+    // are all in its own list's answer, so each item's order is that answer's order.
+    let mut rows = Vec::new();
+    for values in values_lists(items)? {
+        let query = format!(
+            "SELECT ?item ?comment ?body ?author ?created WHERE {{ {} }} ORDER BY ?created ?comment",
+            client.in_graph(&format!(
+                "VALUES ?item {{ {values} }}\n\
+                 ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
+                 OPTIONAL {{ ?comment <{author}> ?author }}",
+                on_item = v::ON_ITEM,
+                body = v::BODY,
+                created = v::ext::CREATED,
+                author = v::AUTHOR,
+            ))
+        );
+        rows.extend(client.select(&query).await?);
+    }
+    for row in rows {
         let Some(comment) = (|| {
             Some(Comment {
                 iri: row.get("comment")?.value.clone(),
@@ -1548,24 +1587,29 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
     if items.is_empty() {
         return Ok(());
     }
-    let values = items
-        .iter()
-        .map(|item| format!("<{}>", item.iri))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let query = format!(
-        "SELECT ?item ?p ?o WHERE {{ {} }}",
-        client.in_graph(&format!(
-            "VALUES ?item {{ {values} }}\nVALUES ?p {{ <{}> <{}> <{}> <{}> <{}> }}\n?item ?p ?o .",
-            v::LABEL,
-            v::ABOUT,
-            v::BLOCKS,
-            v::PARENT,
-            v::RELATED,
-        ))
-    );
+    // ★ In lists under the store's bound (ledger #1423; see `VALUES_BUDGET`), and with ONE
+    // `VALUES`: the predicates are a `FILTER … IN`, not a second `VALUES ?p`. The store joins
+    // two `VALUES` lists with the pattern in time quadratic in the items once they carry links
+    // or labels: 4,000 items each `related` to the next took 2.1 s here against 0.1 s (debug
+    // build), and that was most of `next`'s time.
+    let mut rows = Vec::new();
+    for values in values_lists(items.iter().map(|item| item.iri.as_str()))? {
+        let query = format!(
+            "SELECT ?item ?p ?o WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "VALUES ?item {{ {values} }}\n?item ?p ?o .\n\
+                 FILTER(?p IN (<{}>, <{}>, <{}>, <{}>, <{}>))",
+                v::LABEL,
+                v::ABOUT,
+                v::BLOCKS,
+                v::PARENT,
+                v::RELATED,
+            ))
+        );
+        rows.extend(client.select(&query).await?);
+    }
     let mut by_item: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-    for row in client.select(&query).await? {
+    for row in rows {
         let (Some(item), Some(p), Some(o)) = (row.get("item"), row.get("p"), row.get("o")) else {
             continue;
         };

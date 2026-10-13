@@ -226,6 +226,9 @@ async fn ready_inner(
         map
     };
 
+    // ★ Once for the whole graph, never one walk per item (ledger #1422): a walk per item is
+    // quadratic on a chain, and a 10,000-item chain took 20 s against 0.25 s unlinked.
+    let downstream = downstream_counts(&edges);
     let leverage: BTreeMap<String, (usize, usize)> = open
         .iter()
         .map(|item| {
@@ -233,7 +236,11 @@ async fn ready_inner(
                 .get(item.iri.as_str())
                 .map(|t| t.len())
                 .unwrap_or_default();
-            (item.iri.clone(), (reachable(&edges, &item.iri), direct))
+            let reach = downstream
+                .get(item.iri.as_str())
+                .copied()
+                .unwrap_or_default();
+            (item.iri.clone(), (reach, direct))
         })
         .collect();
 
@@ -527,6 +534,39 @@ impl Selection {
     }
 }
 
+/// The `blocks` graph over integer indices, so a walk is array work: `name[i]` is a node,
+/// `next[i]` its targets in the order the map gives them. The map's keys come first, in
+/// sorted order, then any target that is not a key (a node with no edges of its own).
+struct Indexed<'a> {
+    name: Vec<&'a str>,
+    next: Vec<Vec<usize>>,
+    keys: usize,
+}
+
+fn indexed<'a>(edges: &BTreeMap<&'a str, Vec<&'a str>>) -> Indexed<'a> {
+    let mut at: BTreeMap<&'a str, usize> = BTreeMap::new();
+    let mut name: Vec<&'a str> = Vec::with_capacity(edges.len());
+    for key in edges.keys() {
+        at.insert(key, name.len());
+        name.push(key);
+    }
+    let keys = name.len();
+    let mut next: Vec<Vec<usize>> = Vec::with_capacity(keys);
+    for targets in edges.values() {
+        let mut out = Vec::with_capacity(targets.len());
+        for target in targets {
+            let i = *at.entry(target).or_insert_with(|| {
+                name.push(target);
+                name.len() - 1
+            });
+            out.push(i);
+        }
+        next.push(out);
+    }
+    next.resize(name.len(), Vec::new());
+    Indexed { name, next, keys }
+}
+
 /// The `blocks` subgraph's first cycle, as the path that closes it, or `None` when it is
 /// a DAG.
 ///
@@ -535,64 +575,152 @@ impl Selection {
 /// invisible to property paths. `?a ledger:blocks+ ?a` would answer *whether* there is a
 /// cycle over a direct predicate but never *which* — and a refusal that cannot name the
 /// cycle leaves the operator exactly where the silent empty answer did.
+///
+/// ★ **An explicit stack, never recursion** (ledger #1422). The graph is anyone's with a
+/// ledger's write grant, so its depth is request input: until 0.11.1 this recursed once per
+/// link, and a chain about 15,000 long overflowed a 2 MiB stack, the size of a tokio
+/// worker's, aborting the whole host on every `next`. The walk is the same depth-first one
+/// in the same order, so the cycle reported for a given graph is the one it always was.
 fn find_cycle(edges: &BTreeMap<&str, Vec<&str>>) -> Option<Vec<String>> {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Mark {
-        Open,
-        Done,
-    }
-    let mut marks: BTreeMap<&str, Mark> = BTreeMap::new();
-    let mut stack: Vec<&str> = Vec::new();
-
-    fn walk<'a>(
-        node: &'a str,
-        edges: &BTreeMap<&'a str, Vec<&'a str>>,
-        marks: &mut BTreeMap<&'a str, Mark>,
-        stack: &mut Vec<&'a str>,
-    ) -> Option<Vec<String>> {
-        match marks.get(node) {
-            Some(Mark::Done) => return None,
-            Some(Mark::Open) => {
-                // The cycle is the suffix of the stack from this node, closed by it.
-                let at = stack.iter().position(|n| *n == node)?;
-                let mut cycle: Vec<String> = stack[at..].iter().map(|n| n.to_string()).collect();
-                cycle.push(node.to_string());
-                return Some(cycle);
-            }
-            None => {}
-        }
-        marks.insert(node, Mark::Open);
-        stack.push(node);
-        for next in edges.get(node).into_iter().flatten() {
-            if let Some(cycle) = walk(next, edges, marks, stack) {
-                return Some(cycle);
-            }
-        }
-        stack.pop();
-        marks.insert(node, Mark::Done);
-        None
-    }
-
+    const NEW: u8 = 0;
+    const OPEN: u8 = 1;
+    const DONE: u8 = 2;
+    let graph = indexed(edges);
+    let mut mark = vec![NEW; graph.name.len()];
+    // The path from the root, each node with the index of its next target to try.
+    let mut path: Vec<(usize, usize)> = Vec::new();
     // Sorted iteration: the cycle reported for a given graph is always the same one.
-    for node in edges.keys() {
-        if let Some(cycle) = walk(node, edges, &mut marks, &mut stack) {
-            return Some(cycle);
+    for root in 0..graph.keys {
+        if mark[root] != NEW {
+            continue;
+        }
+        mark[root] = OPEN;
+        path.push((root, 0));
+        while let Some(top) = path.last_mut() {
+            let (node, tried) = *top;
+            let Some(&next) = graph.next[node].get(tried) else {
+                mark[node] = DONE;
+                path.pop();
+                continue;
+            };
+            top.1 += 1;
+            match mark[next] {
+                DONE => {}
+                OPEN => {
+                    // The cycle is the suffix of the path from this node, closed by it.
+                    let at = path.iter().position(|(n, _)| *n == next)?;
+                    let mut cycle: Vec<String> = path[at..]
+                        .iter()
+                        .map(|(n, _)| graph.name[*n].to_string())
+                        .collect();
+                    cycle.push(graph.name[next].to_string());
+                    return Some(cycle);
+                }
+                _ => {
+                    mark[next] = OPEN;
+                    path.push((next, 0));
+                }
+            }
         }
     }
     None
 }
 
-/// How many distinct open items this one blocks, transitively (not counting itself).
-fn reachable(edges: &BTreeMap<&str, Vec<&str>>, from: &str) -> usize {
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    let mut queue: Vec<&str> = edges.get(from).cloned().unwrap_or_default();
-    while let Some(node) = queue.pop() {
-        if node == from || !seen.insert(node) {
+/// For every node of a DAG, how many distinct nodes it blocks, transitively (not counting
+/// itself): the leverage `next` ranks by, computed once for the whole graph.
+///
+/// Children are counted before their parents (a depth-first postorder, with an explicit
+/// stack), and then:
+///
+/// - a node with ONE target counts that target and the target's own count. Exact, because
+///   in a DAG a node is never downstream of itself, so nothing is counted twice. This is the
+///   chain, linear however long.
+/// - a node with SEVERAL targets walks its downstream once, counting each node once. Adding
+///   its targets' counts instead would count a diamond's far corner twice
+///   (`a_diamond_counts_each_item_once`).
+///
+/// ⚠ So it is linear on chains and trees of single links, and quadratic only where many
+/// nodes each block several items with a large shared downstream. Exact distinct counts in a
+/// general DAG cost a reachability computation; the walk here is array work over integer
+/// indices, which keeps that case cheap where it does arise.
+///
+/// ⚠ Only for a DAG: called after [`find_cycle`] found none. On a graph with a cycle it still
+/// terminates, but its counts mean nothing.
+fn downstream_counts<'a>(edges: &BTreeMap<&'a str, Vec<&'a str>>) -> BTreeMap<&'a str, usize> {
+    let graph = indexed(edges);
+    let n = graph.name.len();
+    // Distinct targets per node: a repeated link is one link.
+    let next: Vec<Vec<usize>> = graph
+        .next
+        .iter()
+        .map(|targets| {
+            let mut unique = targets.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            unique
+        })
+        .collect();
+
+    // A postorder of every node: each after everything it reaches.
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut visited = vec![false; n];
+    let mut path: Vec<(usize, usize)> = Vec::new();
+    for root in 0..n {
+        if visited[root] {
             continue;
         }
-        queue.extend(edges.get(node).cloned().unwrap_or_default());
+        visited[root] = true;
+        path.push((root, 0));
+        while let Some(top) = path.last_mut() {
+            let (node, tried) = *top;
+            match next[node].get(tried) {
+                Some(&target) => {
+                    top.1 += 1;
+                    if !visited[target] {
+                        visited[target] = true;
+                        path.push((target, 0));
+                    }
+                }
+                None => {
+                    order.push(node);
+                    path.pop();
+                }
+            }
+        }
     }
-    seen.len()
+
+    let mut count = vec![0usize; n];
+    // The walk's visited set, by generation: `seen[m] == pass` means seen in this pass.
+    let mut seen = vec![0usize; n];
+    let mut pass = 0usize;
+    let mut queue: Vec<usize> = Vec::new();
+    for &node in &order {
+        count[node] = match next[node].as_slice() {
+            [] => 0,
+            [only] => count[*only] + 1,
+            targets => {
+                pass += 1;
+                let mut reached = 0;
+                queue.clear();
+                queue.extend_from_slice(targets);
+                while let Some(m) = queue.pop() {
+                    if m == node || seen[m] == pass {
+                        continue;
+                    }
+                    seen[m] = pass;
+                    reached += 1;
+                    queue.extend_from_slice(&next[m]);
+                }
+                reached
+            }
+        };
+    }
+    graph
+        .name
+        .iter()
+        .zip(count)
+        .map(|(name, count)| (*name, count))
+        .collect()
 }
 
 #[cfg(test)]
@@ -632,14 +760,181 @@ mod tests {
     #[test]
     fn leverage_counts_the_whole_downstream_not_just_the_next_hop() {
         let graph = edges(&[("a", "b"), ("b", "c"), ("c", "d")]);
+        let counts = downstream_counts(&graph);
+        assert_eq!(counts["a"], 3);
+        assert_eq!(counts["c"], 1);
+        assert_eq!(counts["d"], 0);
         assert_eq!(reachable(&graph, "a"), 3);
-        assert_eq!(reachable(&graph, "c"), 1);
-        assert_eq!(reachable(&graph, "d"), 0);
     }
 
     #[test]
     fn a_diamond_counts_each_item_once() {
         let graph = edges(&[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]);
+        assert_eq!(downstream_counts(&graph)["a"], 3);
         assert_eq!(reachable(&graph, "a"), 3);
+    }
+
+    /// How many distinct nodes `from` reaches: 0.11.0's per-item walk, kept as the
+    /// reference the whole-graph count must agree with.
+    fn reachable(edges: &BTreeMap<&str, Vec<&str>>, from: &str) -> usize {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut queue: Vec<&str> = edges.get(from).cloned().unwrap_or_default();
+        while let Some(node) = queue.pop() {
+            if node == from || !seen.insert(node) {
+                continue;
+            }
+            queue.extend(edges.get(node).cloned().unwrap_or_default());
+        }
+        seen.len()
+    }
+
+    /// 0.11.0's recursive cycle walk, kept as the reference the iterative one must agree with:
+    /// the same cycle, not merely a cycle, since the refusal names it.
+    fn find_cycle_recursive(edges: &BTreeMap<&str, Vec<&str>>) -> Option<Vec<String>> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Mark {
+            Open,
+            Done,
+        }
+        fn walk<'a>(
+            node: &'a str,
+            edges: &BTreeMap<&'a str, Vec<&'a str>>,
+            marks: &mut BTreeMap<&'a str, Mark>,
+            stack: &mut Vec<&'a str>,
+        ) -> Option<Vec<String>> {
+            match marks.get(node) {
+                Some(Mark::Done) => return None,
+                Some(Mark::Open) => {
+                    let at = stack.iter().position(|n| *n == node)?;
+                    let mut cycle: Vec<String> =
+                        stack[at..].iter().map(|n| n.to_string()).collect();
+                    cycle.push(node.to_string());
+                    return Some(cycle);
+                }
+                None => {}
+            }
+            marks.insert(node, Mark::Open);
+            stack.push(node);
+            for next in edges.get(node).into_iter().flatten() {
+                if let Some(cycle) = walk(next, edges, marks, stack) {
+                    return Some(cycle);
+                }
+            }
+            stack.pop();
+            marks.insert(node, Mark::Done);
+            None
+        }
+        let mut marks = BTreeMap::new();
+        let mut stack = Vec::new();
+        for node in edges.keys() {
+            if let Some(cycle) = walk(node, edges, &mut marks, &mut stack) {
+                return Some(cycle);
+            }
+        }
+        None
+    }
+
+    /// A small deterministic generator, so a failure names a seed that reproduces it.
+    struct Lcg(u64);
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as usize) % n
+        }
+    }
+
+    /// `n` named nodes with about `links` random edges. With `dag`, every edge runs from a
+    /// lower index to a higher one, so the graph has no cycle.
+    fn random_graph(seed: u64, n: usize, links: usize, dag: bool) -> Vec<(String, String)> {
+        let mut rng = Lcg(seed);
+        let mut pairs = Vec::new();
+        for _ in 0..links {
+            let (a, b) = (rng.below(n), rng.below(n));
+            let (a, b) = if dag { (a.min(b), a.max(b)) } else { (a, b) };
+            if dag && a == b {
+                continue;
+            }
+            pairs.push((format!("n{a:03}"), format!("n{b:03}")));
+        }
+        // Every node is a key, as in `next`, where every open item is one.
+        for i in 0..n {
+            pairs.push((format!("n{i:03}"), String::new()));
+        }
+        pairs
+    }
+
+    fn graph_of(pairs: &[(String, String)]) -> BTreeMap<&str, Vec<&str>> {
+        let mut map: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (from, to) in pairs {
+            let targets = map.entry(from.as_str()).or_default();
+            if !to.is_empty() {
+                targets.push(to.as_str());
+            }
+        }
+        for targets in map.values_mut() {
+            targets.sort_unstable();
+        }
+        map
+    }
+
+    /// ★ `next`'s ranking is unchanged (ledger #1422): on random DAGs, dense and sparse, the
+    /// whole-graph count is the per-item walk's count for every node.
+    #[test]
+    fn whole_graph_leverage_matches_the_per_item_walk_on_random_dags() {
+        for seed in 0..200 {
+            let n = 2 + (seed as usize % 40);
+            let links = (seed as usize * 7) % (3 * n);
+            let pairs = random_graph(seed, n, links, true);
+            let graph = graph_of(&pairs);
+            assert!(find_cycle(&graph).is_none(), "seed {seed}");
+            let counts = downstream_counts(&graph);
+            for node in graph.keys() {
+                assert_eq!(
+                    counts.get(node).copied().unwrap_or_default(),
+                    reachable(&graph, node),
+                    "seed {seed}, node {node}"
+                );
+            }
+        }
+    }
+
+    /// ★ The refusal names the same cycle it always did: on random graphs with and without
+    /// cycles, the iterative walk answers exactly what the recursive one did.
+    #[test]
+    fn the_iterative_cycle_walk_names_the_recursive_walks_cycle() {
+        let mut cyclic = 0;
+        for seed in 0..300 {
+            let n = 2 + (seed as usize % 30);
+            let links = 1 + (seed as usize * 5) % (2 * n);
+            let pairs = random_graph(seed, n, links, seed % 3 == 0);
+            let graph = graph_of(&pairs);
+            let found = find_cycle(&graph);
+            cyclic += usize::from(found.is_some());
+            assert_eq!(found, find_cycle_recursive(&graph), "seed {seed}");
+        }
+        assert!(cyclic > 50, "the corpus has cycles to find: {cyclic}");
+    }
+
+    /// A chain far deeper than any stack would hold one frame per link: the walk is an
+    /// explicit stack, so this runs on the test thread (2 MiB) and answers.
+    #[test]
+    fn a_deep_chain_is_walked_without_recursion() {
+        let names: Vec<String> = (0..200_000).map(|i| format!("n{i:06}")).collect();
+        let mut graph: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for pair in names.windows(2) {
+            graph.insert(pair[0].as_str(), vec![pair[1].as_str()]);
+        }
+        graph.insert(names[names.len() - 1].as_str(), Vec::new());
+        assert!(find_cycle(&graph).is_none());
+        let counts = downstream_counts(&graph);
+        assert_eq!(counts[names[0].as_str()], names.len() - 1);
+        // Closed into a ring, it is one cycle, named from the first node.
+        graph.insert(names[names.len() - 1].as_str(), vec![names[0].as_str()]);
+        let cycle = find_cycle(&graph).expect("a ring");
+        assert_eq!(cycle.len(), names.len() + 1);
+        assert_eq!(cycle.first(), cycle.last());
     }
 }
