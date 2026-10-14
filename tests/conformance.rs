@@ -64,40 +64,26 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
     let item = format!("urn:iki:ledger:default:item:{a}");
     let target = format!("urn:iki:ledger:default:item:{b}");
     let purge_target = format!("urn:iki:ledger:default:item:{c}");
-    // ⚠ **All twelve, and the count is the point.** The store grew from seven resources to
-    // twelve when it added the graph-scoped doors, and every one of them is in this kernel
-    // because the ledger composes over it. The walk found the five new ones immediately —
-    // which is the suite working — and the fix is to opt them out here, not to skip the
-    // walk. If this list is ever short again, the walk will say so by name.
-    let store_owned = [
-        "store-select",
-        "store-ask",
-        "store-construct",
-        "store-describe",
-        "store-graph-select",
-        "store-graph-ask",
-        "store-graph-construct",
-        "store-graph-describe",
-        "store-info",
-        "store-update",
-        "store-graph-update",
-        "store-load",
-    ];
-    store_owned
-        .iter()
-        .fold(Suite::new(), |suite, id| {
-            // ⚠ The store's resources are in THIS kernel because the ledger composes over
-            // them, but they are `ikigai-store`'s to conform — and its own suite hands
-            // them real SPARQL, which the synthesized `"x"` never is. Walking them here
-            // would report another crate's endpoints against fixtures this crate has no
-            // business writing.
-            suite.opt_out(
-                *id,
-                None,
-                "ikigai-store's own conformance suite covers it; it is bound in this \
-                 kernel only because every ledger read and write composes over it",
-            )
-        })
+    // ★ **The walk is scoped to THIS crate's endpoints** (`Suite::own`, conformance 0.8).
+    // The store's resources are in this kernel because every ledger read and write
+    // composes over them, but they are `ikigai-store`'s to conform, and its own suite hands
+    // them real SPARQL, which the synthesized `"x"` never is. Until 0.8 this file opted out
+    // twelve of them by hand; that list had already fallen one short (`store-graphs` was
+    // walked here unasked), which is the drift a hand partition invites. Now everything
+    // the store binds is INHERITED (not walked, no check reads it, no probe fires it), and
+    // `the_walk_reaches_every_resource_this_crate_binds` pins the inherited list exactly,
+    // so a store that gains a resource turns that test red by name instead of joining the
+    // pile unseen.
+    Suite::new()
+        .own("ledger-*")
+        // REQUIRED on the mutating actions too (conformance 0.8, ledger #329): every
+        // required by-value input of every Sink and Delete is dropped once and the firing
+        // must be refused with a typed `MissingArgument` or `InvalidArgument`. Off by
+        // default because a wrongly accepted drop has WRITTEN; this kernel is a fixture
+        // over an in-memory store, so a write here costs nothing but the finding. It is
+        // where the check bites for this crate: the reads take their item by binding,
+        // while `item`, `from`/`to` and `content` arrive by value on the writes.
+        .required_on_mutating()
         // The module's own namespace: every `ledger:` term in every probed face is
         // defined in `src/vocabulary.ttl`, which `ikigai-vocab` has never heard of.
         .namespace("https://ikigai-rs.dev/ns/ledger#")
@@ -229,14 +215,9 @@ fn conforms() {
 fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
-    // The store's seven are in the walk too (they are bound in this kernel); this test is
-    // about the twenty-two THIS crate binds.
-    let mut walked: Vec<&str> = report
-        .walked
-        .iter()
-        .map(String::as_str)
-        .filter(|id| id.starts_with("ledger-"))
-        .collect();
+    // `Suite::own("ledger-*")` walks only the twenty-two THIS crate binds, so the whole of
+    // `walked` is the module; no filter stands between this list and what was checked.
+    let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
     walked.sort_unstable();
     assert_eq!(
         walked,
@@ -263,6 +244,36 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-policy",
             "ledger-purge",
             "ledger-reopen",
+        ],
+        "{report}"
+    );
+    // And the other half, EXACTLY: what the store binds beside the ledger, inherited and
+    // not walked. A store release that adds a resource turns this red by name, rather than
+    // the resource joining the inherited pile unseen (the hand-written opt-out list this
+    // replaced had already missed `store-graphs`).
+    let mut inherited: Vec<&str> = report
+        .declared
+        .inherited
+        .iter()
+        .map(String::as_str)
+        .collect();
+    inherited.sort_unstable();
+    assert_eq!(
+        inherited,
+        vec![
+            "store-ask",
+            "store-construct",
+            "store-describe",
+            "store-graph-ask",
+            "store-graph-construct",
+            "store-graph-describe",
+            "store-graph-select",
+            "store-graph-update",
+            "store-graphs",
+            "store-info",
+            "store-load",
+            "store-select",
+            "store-update",
         ],
         "{report}"
     );
