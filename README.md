@@ -1187,6 +1187,28 @@ All twenty-two resources are bound, tested, and walked clean by `ikigai-conforma
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.12.0 (2026-10-13): `labels=` at any length, a goal's children, the hand-back reason (ledger #1452, #1454, #1455)
+
+A minor, because it adds public API: `parent=` on `items` and `count`, the public fields
+`Filter::parent` and `Item::children`, and `children` in every item object of the JSON face.
+All additive: the JSON schema stays 1, a field is `#[serde(default)]`, and the plain face only
+gains `child:` lines on an item that has children. Each item was reproduced first as a test
+that failed on 0.11.1.
+
+- ★ **`labels=` takes any number of labels** (ledger #1452). Each label was a triple pattern in
+  the main join, and the store refuses a join wider than 32 operands, so `items` and `count`
+  refused at 28 labels and `next` at 30, with an error about SPARQL patterns that never named
+  `labels=`. The first label is still a pattern, and the rest are one `VALUES` list inside a
+  `FILTER NOT EXISTS`, which adds nothing to the join it sits in: `labels=` widens the main
+  join by one at any length, measured by the store's own walk. `tests/labels_at_scale.rs` runs
+  1, 28 and 100 labels on all three.
+- **`parent=` and an item's children** (ledger #1454). See "A goal and its arcs". On 0.11.1
+  `parent=` was not an argument and was ignored, so `items parent=1` listed every item.
+- **`next` names a hand-back before a claim** (ledger #1455): a handed-back item whose worker
+  still holds the claim is `awaiting the dispatcher`, not `claimed by`. See "Handing back".
+- ⚠ Not in this release: the dev-dependency `ikigai-conformance = "0.6.0"` is a ceiling below
+  0.7.x (ledger #1452's note), left for its own change.
+
 ### 0.11.1 (2026-10-13): a deep `blocks` chain, a large ledger, closed items (ledger #1418, #1419, #1420, #1422, #1423)
 
 A patch: five defects an unled audit of 0.11.0 reproduced, each pinned by a test that failed on
