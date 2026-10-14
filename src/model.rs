@@ -31,6 +31,10 @@ pub struct Filter {
     pub without: Vec<String>,
     /// Must be `ledger:about` this resource IRI.
     pub about: Option<String>,
+    /// Must be a child of this item: carry `ledger:parent` to this item IRI (ledger #1454).
+    /// An IRI, never a number: the endpoints resolve `parent=12` / `parent=#12` to the item's
+    /// IRI before the filter is built, exactly as they resolve `item=`. Added in 0.12.0.
+    pub parent: Option<String>,
     /// Must carry this `ledger:key` — the caller's own name for the item. At most one item
     /// in a ledger carries a given key, so this is a lookup wearing a filter's clothes; it
     /// is a filter so that `items key=` composes with the others (`status` included: the
@@ -165,6 +169,10 @@ pub struct Item {
     pub blocks: Vec<String>,
     /// Items this one is part of.
     pub parents: Vec<String>,
+    /// Items that are part of this one: every item carrying `ledger:parent` to it, whatever its
+    /// status, sorted by IRI. The INBOUND side of [`parents`](Item::parents), so a goal shows
+    /// its arcs without a query (ledger #1454). Added in 0.12.0.
+    pub children: Vec<String>,
     /// See-also.
     pub related: Vec<String>,
     /// What the reader read AROUND to list this item — `unreadable dcterms:modified
@@ -295,6 +303,11 @@ impl Item {
         }
         for target in &self.parents {
             out.push_str(&format!("  parent:   {target}\n"));
+        }
+        // Only when there are some, like every edge above, so an item with none renders
+        // exactly as in 0.11.
+        for child in &self.children {
+            out.push_str(&format!("  child:    {child}\n"));
         }
         for target in &self.related {
             out.push_str(&format!("  related:  {target}\n"));
@@ -453,6 +466,17 @@ impl Item {
                 }
             }
         }
+        // The children as the triples that make them so, `<child> ledger:parent <this>`: the
+        // vocabulary has no inverse property, and minting one would put two spellings of one
+        // fact in the graph. In a listing that holds the child too the triple is the same one,
+        // and a graph holds it once.
+        if let Ok(parent) = NamedNode::new(v::PARENT) {
+            for child in &self.children {
+                if let Ok(node) = NamedNode::new(child) {
+                    graph.insert(&Triple::new(node, parent.clone(), subject.clone()));
+                }
+            }
+        }
     }
 }
 
@@ -604,8 +628,9 @@ pub fn turtle(graph: &Graph) -> Result<Vec<u8>> {
 /// never silently not be — but it means the `without` filter here (`FILTER NOT EXISTS
 /// { ?item ledger:label "x" }`) cannot take that door at all.
 ///
-/// So adopting it would bind `kind`, `about`, `labels` and `holder` and interpolate
-/// `without`, leaving **two mechanisms in one query string** — and a reader could no longer
+/// So adopting it would bind `kind`, `about`, `parent` and `holder` and interpolate
+/// `without` and all but the first of `labels` (a `VALUES` list inside a `NOT EXISTS` since
+/// 0.12.0), leaving **two mechanisms in one query string** — and a reader could no longer
 /// tell which path a value took by looking at it. One mechanism used everywhere is worth
 /// more here than a stronger one used in most places, because the value of the strong door
 /// is that you never have to check. Every value below becomes an RDF term through
@@ -630,8 +655,32 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
         Status::Closed => clauses.push_str(&format!("?item <{}> <{}> .\n", v::STATUS, v::CLOSED)),
         Status::All => {}
     }
-    for label in &filter.labels {
-        clauses.push_str(&format!("?item <{}> {} .\n", v::LABEL, literal(label)));
+    // ★ **Two clauses for every wanted label, whatever their number** (ledger #1452). Through
+    // 0.11.1 each label was a triple pattern here, so each widened the main join by one, and
+    // the store refuses a join wider than 32 operands (`MAX_JOIN_OPERANDS`) before planning:
+    // `items` refused at 28 labels and `next` at 30, with an error about SPARQL patterns that
+    // never named `labels=`. Now the FIRST label stays a pattern, so the store still starts
+    // from its label index (all of them in the list instead measured 2.3× slower on a count
+    // over 5,000 items), and the rest are one double negation, "no other wanted label is
+    // missing": a `VALUES` list, which costs one operand of its OWN join and no algebra nodes
+    // per value, inside a `FILTER NOT EXISTS`, which adds nothing to the join it sits in. So
+    // `labels=` widens the main join by one at any length. Not a
+    // `GROUP BY … HAVING (COUNT(…) = n)`: a label named twice would need deduplicating first or
+    // it could never match, and a double negation has no count to get wrong.
+    if let Some((first, rest)) = filter.labels.split_first() {
+        clauses.push_str(&format!("?item <{}> {} .\n", v::LABEL, literal(first)));
+        if !rest.is_empty() {
+            let wanted = rest
+                .iter()
+                .map(|label| literal(label))
+                .collect::<Vec<_>>()
+                .join(" ");
+            clauses.push_str(&format!(
+                "FILTER NOT EXISTS {{ VALUES ?wantedLabel {{ {wanted} }}\n  \
+                 FILTER NOT EXISTS {{ ?item <{}> ?wantedLabel }} }}\n",
+                v::LABEL
+            ));
+        }
     }
     for label in &filter.without {
         clauses.push_str(&format!(
@@ -649,6 +698,13 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
     }
     if let Some(key) = &filter.key {
         clauses.push_str(&format!("?item <{}> {} .\n", v::KEY, literal(key)));
+    }
+    if let Some(parent) = &filter.parent {
+        clauses.push_str(&format!(
+            "?item <{}> {} .\n",
+            v::PARENT,
+            sparql::iri(parent, "parent")?
+        ));
     }
     match &filter.holder {
         Holder::Any => {}
@@ -1578,7 +1634,7 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
         .collect())
 }
 
-/// Fill in labels, about, blocks, parent and related for a loaded set.
+/// Fill in labels, about, blocks, parent, related and the children for a loaded set.
 ///
 /// One extra query rather than `GROUP_CONCAT` in the first: concatenating multi-valued
 /// columns means choosing a separator no value can contain, and a label or an IRI can
@@ -1593,6 +1649,7 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
     // or labels: 4,000 items each `related` to the next took 2.1 s here against 0.1 s (debug
     // build), and that was most of `next`'s time.
     let mut rows = Vec::new();
+    let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for values in values_lists(items.iter().map(|item| item.iri.as_str()))? {
         let query = format!(
             "SELECT ?item ?p ?o WHERE {{ {} }}",
@@ -1607,6 +1664,26 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
             ))
         );
         rows.extend(client.select(&query).await?);
+        // The inbound `parent` edges: the children (ledger #1454). A query of its own, with the
+        // same one `VALUES`, because the edge runs the other way; only items count, so a stray
+        // `ledger:parent` on some other subject is not a child.
+        let query = format!(
+            "SELECT ?item ?child WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "VALUES ?item {{ {values} }}\n?child <{}> ?item ;\n  <{}> <{}> .",
+                v::PARENT,
+                v::ext::TYPE,
+                v::ITEM_CLASS,
+            ))
+        );
+        for row in client.select(&query).await? {
+            if let (Some(item), Some(child)) = (row.get("item"), row.get("child")) {
+                children
+                    .entry(item.value.clone())
+                    .or_default()
+                    .push(child.value.clone());
+            }
+        }
     }
     let mut by_item: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for row in rows {
@@ -1619,6 +1696,11 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
             .push((p.value.clone(), o.value.clone()));
     }
     for item in items.iter_mut() {
+        if let Some(mut found) = children.remove(&item.iri) {
+            found.sort();
+            found.dedup();
+            item.children = found;
+        }
         let Some(pairs) = by_item.get(&item.iri) else {
             continue;
         };
@@ -1784,6 +1866,7 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         about: Vec::new(),
         blocks: Vec::new(),
         parents: Vec::new(),
+        children: Vec::new(),
         related: Vec::new(),
         defects,
         states,
@@ -1891,6 +1974,7 @@ mod tests {
             about: vec!["urn:repo:file:ikigai-cli/src/main.rs".to_string()],
             blocks: Vec::new(),
             parents: Vec::new(),
+            children: Vec::new(),
             related: Vec::new(),
             defects: Vec::new(),
             states: Vec::new(),
@@ -1973,5 +2057,68 @@ mod tests {
         assert!(clauses.contains("ledger#open"), "{clauses}");
         assert!(clauses.contains("NOT EXISTS"), "{clauses}");
         assert!(clauses.contains("\"rust\""), "{clauses}");
+    }
+
+    /// How many operands `body` puts into the main join, by the STORE'S OWN walk: pad the
+    /// group past `MAX_JOIN_OPERANDS` and read the width back out of the refusal, which names
+    /// it. Not a copy of the walk, which would drift from the store that enforces it.
+    fn join_width(body: &str) -> usize {
+        use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
+        use ikigai_store::budget::MAX_JOIN_OPERANDS;
+        let store = ikigai_store::DurableStore::in_memory().expect("an in-memory store");
+        let kernel = Kernel::new(std::sync::Arc::new(ikigai_store::space(store)));
+        let pad = MAX_JOIN_OPERANDS + 1;
+        let padding: String = (0..pad)
+            .map(|i| format!("?item <urn:test:pad> ?pad{i} .\n"))
+            .collect();
+        let query = format!(
+            "SELECT ?item WHERE {{ GRAPH <urn:iki:ledger:graph:default> {{ {body}{padding} }} }}"
+        );
+        let request = Request::new(Verb::Source, Iri::parse(sparql::STORE_SELECT).unwrap())
+            .with_arg("query", ArgRef::Inline(query.into_bytes()));
+        let refusal = futures::executor::block_on(kernel.issue(request, &Capability::root()))
+            .expect_err("padded past the bound, so refused")
+            .to_string();
+        let width: usize = refusal
+            .split("joins ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("the refusal names the width: {refusal}"));
+        width - pad
+    }
+
+    /// ★ ledger #1452, measured: what `labels=` adds to the main join, at 1, 28 and 100 labels:
+    /// one operand, the first label.
+    /// The control is the 0.11.1 shape, one pattern a label, so the measurement is not vacuous.
+    #[test]
+    fn labels_add_one_operand_to_the_main_join_however_many() {
+        let listed = listed_pattern();
+        let base = join_width(&listed);
+        assert_eq!(base, 4, "the listed pattern is four triple patterns");
+        for n in [1, 28, 100] {
+            let labels: Vec<String> = (0..n).map(|i| format!("l{i}")).collect();
+            let old: String = labels
+                .iter()
+                .map(|l| format!("?item <{}> {} .\n", v::LABEL, literal(l)))
+                .collect();
+            assert_eq!(
+                join_width(&format!("{listed}{old}")) - base,
+                n,
+                "0.11.1 shape"
+            );
+            let filter = Filter {
+                labels,
+                ..Filter::default()
+            };
+            let now = filter_clauses(&filter).unwrap();
+            // `status=open` (the default) and the first label are the two patterns the filter
+            // adds, at any length.
+            assert_eq!(
+                join_width(&format!("{listed}{now}")) - base,
+                2,
+                "{n} label(s)"
+            );
+        }
     }
 }

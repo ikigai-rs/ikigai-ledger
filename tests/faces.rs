@@ -291,6 +291,7 @@ fn the_json_item_document_is_schema_1() {
         }
       }
     ],
+    "children": [],
     "comments": [
       {
         "id": "urn:iki:ledger:default:comment:{c}",
@@ -344,6 +345,7 @@ fn the_json_items_document_is_schema_1() {
       "created": "2026-09-15T00:00:00.000Z",
       "modified": "2026-09-15T00:00:00.000Z",
       "links": [],
+      "children": [],
       "comments": [],
       "defects": [],
       "state": "filed",
@@ -369,6 +371,7 @@ fn the_json_items_document_is_schema_1() {
       "created": "2026-09-15T00:00:00.000Z",
       "modified": "2026-09-15T00:00:00.000Z",
       "links": [],
+      "children": [],
       "comments": [
         {
           "id": "urn:iki:ledger:default:comment:{c}",
@@ -460,6 +463,7 @@ fn the_json_next_document_is_schema_1() {
         "created": "2026-09-15T00:00:00.000Z",
         "modified": "2026-09-15T00:00:00.000Z",
         "links": [],
+        "children": [],
         "comments": [],
         "defects": [],
         "state": "filed",
@@ -496,6 +500,7 @@ fn the_json_next_document_is_schema_1() {
         "created": "2026-09-15T00:00:00.000Z",
         "modified": "2026-09-15T00:00:00.000Z",
         "links": [],
+        "children": [],
         "comments": [],
         "defects": [],
         "state": "filed",
@@ -549,6 +554,7 @@ fn the_json_next_document_is_schema_1() {
             }
           }
         ],
+        "children": [],
         "comments": [
           {
             "id": "urn:iki:ledger:default:comment:{d}",

@@ -373,6 +373,11 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) cleared-awaiting
 - **`next` does not offer it**: `why: "awaiting-dispatcher"` in JSON, `handed back, awaiting the
   dispatcher` in text. Before this, the worker released the item and `next` offered it to the
   next worker as if nothing had happened (`tests/awaiting.rs` is the reproduction).
+- **The hand-back is the reason even while the worker still holds the claim** (0.12.0, ledger
+  #1455). A worker that hands back without releasing was reported as `claimed by worker-1`
+  through 0.11.1, which is true and is not what anyone should act on; the hand-back is what the
+  dispatcher acts on, and it outlasts the release, so `next` gives it first and the reason does
+  not change when the worker lets go.
 - **What clears it**: close (closed work awaits nobody), reopen, a comment with `rejects=true`
   (the evidence did not hold; the item is ready again), and **any comment from a caller holding
   the close grant** (`close:{ledger}` or `write:{ledger}`, which root holds): the dispatcher
@@ -393,6 +398,37 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) cleared-awaiting
   awaiting its dispatcher can still be claimed (the dispatcher may, to review it); `next` simply
   does not offer it.
 
+## A goal and its arcs: `parent=` and an item's children
+
+`link type=parent` says one item is part of another, and until 0.12.0 only the child said so:
+its faces showed `parent:`, and the goal showed nothing, so a hub listing a goal's arcs needed
+SPARQL (ledger #1454). Now both ends do:
+
+```text
+$ source urn:iki:ledger:items parent=12 status=all
+#14  open    p-  Arc one
+#15  closed  p-  Arc two
+…
+$ source urn:iki:ledger:count parent=12
+1
+$ source urn:iki:ledger:item:12
+#12  open    p1  The goal
+  …
+  child:    urn:iki:ledger:default:item:01m7…
+  child:    urn:iki:ledger:default:item:01m8…
+```
+
+- **`parent=` on `items` and `count`** takes what `item=` takes (`12`, `#12`, the item's IRI)
+  and is subject to `status` like every filter, so `status=all` lists every arc and the default
+  lists the open ones. **An unknown parent is not found**, never an empty answer: "no children"
+  and "no such item" are different facts. An item of another ledger is refused by name.
+- **Every face of an item names its children**, every status: `child:` lines in the plain face
+  (only when there are some), `children` in JSON, and in Turtle the `<child> ledger:parent
+  <item>` triples themselves, since the vocabulary has no inverse property and one fact should
+  have one spelling. A listing's items carry them too: the item object is the same everywhere.
+- `tests/children.rs`. On 0.11.1 `parent=` was not an argument, and an unknown argument is
+  ignored, so `items parent=1` listed every item.
+
 ## The JSON face
 
 `as=application/json` is the machine contract; the plain face is for people and is not a
@@ -410,6 +446,7 @@ object is the same wherever it appears:
   "author":"brian","revision":null,"claim":{"holder":"satellite","purpose":"brief-x"},
   "created":"2026-09-15T00:00:00.000Z","modified":"2026-09-15T00:00:00.000Z",
   "links":[{"type":"blocks","target":{"number":13,"display":"#13","iri":"urn:iki:ledger:default:item:01m5…"}}],
+  "children":[{"number":14,"display":"#14","iri":"urn:iki:ledger:default:item:01m7…"}],
   "comments":[{"id":"urn:iki:ledger:default:comment:01m6…","author":"chris",
                "time":"2026-09-15T00:00:00.000Z","text":"looked at it"}],
   "defects":[],"state":"filed","awaiting":null}}
@@ -436,12 +473,15 @@ first".
 | `append`, `comment`, `close`, `link` | `{schema, ledger, outcome, item: {number, display, iri}, …}` — `outcome` is `filed`, `existing`, `commented`, `closed`, `linked` or `unlinked`, and only that outcome's own fields follow: `status` and `key` (append), `comment` (comment, and close with a note), `handback` (`set` or `cleared`, a comment that changed a hand-back), `reason` (close), `type` and `target` (link) |
 
 `links` are the item's **outbound** edges — `blocks`, then `parent`, then `related` — and a
-target that is not a live item in the ledger has a `null` number. The documents are Rust
+target that is not a live item in the ledger has a `null` number. `children` (0.12.0) is the
+one **inbound** edge a face carries: the items whose `parent` is this one, every status, sorted
+by IRI (see "A goal and its arcs"). The documents are Rust
 types in `ikigai_ledger::json`, `Deserialize` as well as `Serialize` and `#[non_exhaustive]`,
 so a Rust consumer reads the same type this crate writes and a later field does not break
 it. `tests/faces.rs` pins every document as a literal, and pins the plain face byte for
-byte as 0.3.0 rendered it — the one change there is a `key:` line in an item's detail, and
-only for an item that has a key.
+byte as 0.3.0 rendered it — the changes there are a `key:` line in an item's detail, only for
+an item that has a key, and (0.12.0) a `child:` line per child, only for an item that has
+children.
 
 ★ **For the total alone, read `count`, not `items limit=1`** (ledger #1128). Both faces of
 `items` that state a total also run the corpus check — two scans of the whole graph — because

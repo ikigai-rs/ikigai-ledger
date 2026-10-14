@@ -658,12 +658,41 @@ fn split_content(content: &str) -> Result<(String, String)> {
 /// [`LinkEndpoint::describe`]; the refusal is here, once, for every endpoint that takes
 /// an item.
 async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<Item> {
+    let iri = item_iri(client, reference, "item").await?;
+    if let Some(item) = model::load_item(client, &iri).await? {
+        return Ok(item);
+    }
+    // Present but unreadable is a different fact from absent, and only one of them is
+    // fixable by the person reading the error.
+    let wrong = model::defects_of(client, &iri).await?;
+    if wrong.is_empty() {
+        Err(Error::NotFound(format!("no ledger item at `{iri}`")))
+    } else {
+        Err(Error::Endpoint(format!(
+            "`{iri}` is in the ledger graph but nothing here can read it: {}. Some write \
+             did not pass through a ledger Sink (an editor, a merge, a bulk load); fix \
+             {} or delete the subject",
+            wrong.join(", "),
+            if wrong.len() == 1 {
+                "that property"
+            } else {
+                "those properties"
+            }
+        )))
+    }
+}
+
+/// The IRI an item reference names in this ledger — a number (`12`, `#12`), a key
+/// (`key:…`), an opaque id or an item IRI — without reading the item. `arg` is the argument
+/// a refusal names (`item`, or `parent` for the filter). An unknown number or key is
+/// `NotFound`; an item of another ledger is refused.
+async fn item_iri(client: &StoreClient<'_, '_>, reference: &str, arg: &str) -> Result<String> {
     let here = client.ledger();
-    let iri = if reference.starts_with("urn:") {
+    Ok(if reference.starts_with("urn:") {
         match Ledger::item_iri(reference) {
             Some((other, _)) if &other != here => {
                 return Err(Error::InvalidArgument {
-                    name: "item".to_string(),
+                    name: arg.to_string(),
                     detail: format!(
                         "`{reference}` is an item of the ledger `{}`, and this resource is \
                          `{}`. A ledger is a boundary: an item is read, changed and linked \
@@ -690,28 +719,7 @@ async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<I
         }
     } else {
         model::resolve_id(client, reference).await?
-    };
-    if let Some(item) = model::load_item(client, &iri).await? {
-        return Ok(item);
-    }
-    // Present but unreadable is a different fact from absent, and only one of them is
-    // fixable by the person reading the error.
-    let wrong = model::defects_of(client, &iri).await?;
-    if wrong.is_empty() {
-        Err(Error::NotFound(format!("no ledger item at `{iri}`")))
-    } else {
-        Err(Error::Endpoint(format!(
-            "`{iri}` is in the ledger graph but nothing here can read it: {}. Some write \
-             did not pass through a ledger Sink (an editor, a merge, a bulk load); fix \
-             {} or delete the subject",
-            wrong.join(", "),
-            if wrong.len() == 1 {
-                "that property"
-            } else {
-                "those properties"
-            }
-        )))
-    }
+    })
 }
 
 /// Several SPARQL operations as ONE update request.
@@ -1060,7 +1068,7 @@ impl Endpoint for ItemsEndpoint {
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv, &READ_FACES)?;
-        let mut filter = listing_filter(inv)?;
+        let mut filter = listing_filter(inv, &client).await?;
         filter.limit = parse_limit(inv, 50)?;
         filter.offset = parse_count(inv, "offset", 0)?;
         let items = model::load_items(&client, &filter).await?;
@@ -1254,7 +1262,7 @@ impl Endpoint for CountEndpoint {
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv, &COUNT_FACES)?;
-        let filter = listing_filter(inv)?;
+        let filter = listing_filter(inv, &client).await?;
         let total = model::count_items(&client, &filter).await?;
         if want == JSON {
             return Ok(json_face(json::render(&json::CountDocument {
@@ -1292,7 +1300,7 @@ impl Endpoint for CountEndpoint {
 }
 
 /// The filter's inputs, in the order `items` has always declared them: `status`, `kind`,
-/// `labels`, `without`, `about`, `key`, `holder`, `deferred`, `text` — what
+/// `labels`, `without`, `about`, `parent` (0.12.0), `key`, `holder`, `deferred`, `text` — what
 /// [`listing_filter`] parses, declared once for `items` and `count`.
 fn filter_inputs(desc: Description) -> Description {
     desc.input(
@@ -1335,6 +1343,17 @@ fn filter_inputs(desc: Description) -> Description {
             .optional(),
     )
     .input(
+        ArgSpec::new("parent")
+            .summary(
+                "An item (`12`, `#12` or its IRI): only its children, the items \
+                 linked to it with `link type=parent`. Subject to `status` like every \
+                 filter here, so open children by default and `status=all` for every \
+                 child. An unknown item is not found, never an empty answer.",
+            )
+            .class(v::ext::XSD_STRING)
+            .optional(),
+    )
+    .input(
         ArgSpec::new("key")
             .summary(
                 "The caller's own name for an item (`append key=`). At most one \
@@ -1372,8 +1391,14 @@ fn filter_inputs(desc: Description) -> Description {
 /// The filter `items` and `count` share — every argument but the page (`limit`, `offset`),
 /// which only a listing has. One parser, so `count`'s number is the listing's `total` for the
 /// same arguments, refusals included.
-fn listing_filter(inv: &Invocation<'_>) -> Result<Filter> {
+async fn listing_filter(inv: &Invocation<'_>, client: &StoreClient<'_, '_>) -> Result<Filter> {
+    // Resolved, so `parent=12`, `parent=#12` and the IRI mean one item, as `item=` does.
+    let parent = match inv.inline_str("parent").ok().map(str::trim) {
+        None | Some("") => None,
+        Some(reference) => Some(item_iri(client, reference, "parent").await?),
+    };
     Ok(Filter {
+        parent,
         status: match inv.inline_str("status").unwrap_or("open") {
             "closed" => Status::Closed,
             "all" => Status::All,

@@ -195,6 +195,11 @@ pub struct Item {
     pub modified: String,
     /// Outbound edges: `blocks` first, then `parent`, then `related`, each sorted by IRI.
     pub links: Vec<Link>,
+    /// The INBOUND `parent` edges: the items that are part of this one, every status, sorted by
+    /// IRI (ledger #1454). Added in 0.12.0; `#[serde(default)]`, so an earlier document reads
+    /// with none.
+    #[serde(default)]
+    pub children: Vec<ItemRef>,
     /// Its comments, oldest first.
     pub comments: Vec<Comment>,
     /// What the reader read around to list it — `unreadable dcterms:modified "yesterday"`,
@@ -557,6 +562,7 @@ pub(crate) fn item(
         created: sparql::iso8601(item.created),
         modified: sparql::iso8601(item.modified),
         links,
+        children: item.children.iter().map(target).collect(),
         comments: comments.iter().map(self::comment).collect(),
         defects: item.defects.clone(),
         state: item.state().map(str::to_string),
@@ -575,7 +581,13 @@ pub(crate) async fn items(
 ) -> Result<Vec<Item>> {
     let targets = items
         .iter()
-        .flat_map(|i| i.blocks.iter().chain(&i.parents).chain(&i.related))
+        .flat_map(|i| {
+            i.blocks
+                .iter()
+                .chain(&i.parents)
+                .chain(&i.related)
+                .chain(&i.children)
+        })
         .cloned()
         .collect();
     let numbers = model::numbers_of(client, &targets).await?;
