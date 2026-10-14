@@ -137,6 +137,58 @@ fn a_handed_back_item_is_not_offered_by_next() {
     assert!(plain.contains("awaiting the dispatcher"), "{plain}");
 }
 
+/// ★ ledger #1455: a worker that hands back WITHOUT releasing still holds the claim, and
+/// through 0.11.1 `next` gave the claim as the reason ("claimed by worker-1"). The hand-back is
+/// what the dispatcher acts on, so it is the reason, before the release and after it alike.
+#[test]
+fn a_handback_still_claimed_is_excluded_as_awaiting_not_as_claimed() {
+    let kernel = ledger_with_an_item();
+    let w = worker();
+    try_as(
+        &kernel,
+        &w,
+        Verb::Sink,
+        &at("claim"),
+        &[("item", "1"), ("content", "worker-1"), ("lease", "30m")],
+    )
+    .unwrap();
+    // Claimed and not handed back: the claim is the reason, as before.
+    let next = next_json(&kernel);
+    assert_eq!(next["excluded"][0]["why"], "claimed", "{next}");
+    comment(
+        &kernel,
+        &w,
+        &[("content", "PR green, over to you"), ("handback", "true")],
+    )
+    .unwrap();
+    // The claim is still held…
+    assert_eq!(item_json(&kernel)["item"]["claim"]["holder"], "worker-1");
+    // …and the reason is the hand-back.
+    let next = next_json(&kernel);
+    let excluded = next["excluded"].as_array().expect("exclusions");
+    assert_eq!(excluded.len(), 1, "{next}");
+    assert_eq!(excluded[0]["why"], "awaiting-dispatcher", "{next}");
+    let plain = source(&kernel, &at("next"), &[]);
+    assert!(
+        plain.contains("acme#1 handed back, awaiting the dispatcher"),
+        "{plain}"
+    );
+    assert!(!plain.contains("claimed by worker-1"), "{plain}");
+    // The release changes nothing a reader of `next` sees.
+    try_as(
+        &kernel,
+        &w,
+        Verb::Delete,
+        &at("claim"),
+        &[("item", "1"), ("from", "worker-1")],
+    )
+    .unwrap();
+    assert_eq!(
+        next_json(&kernel)["excluded"][0]["why"],
+        "awaiting-dispatcher"
+    );
+}
+
 #[test]
 fn the_handback_is_recorded_on_every_face() {
     let kernel = ledger_with_an_item();

@@ -10,8 +10,9 @@
 //! 3. Compute leverage — how many open items each one transitively unblocks.
 //! 4. Narrow to the caller's filters (level, labels, `about`), evaluated **in the query**
 //!    by the same clauses `urn:iki:ledger:items` uses.
-//! 5. Partition what is left: ready (unclaimed, not awaiting its dispatcher, not deferred,
-//!    no open blocker) versus excluded, and keep the exclusion reasons.
+//! 5. Partition what is left: ready (not awaiting its dispatcher, unclaimed, not deferred,
+//!    no open blocker) versus excluded, and keep the exclusion reasons — one per item, the
+//!    first that applies in that order.
 //! 6. Hand the ready set to the [`OrderingPolicy`].
 //!
 //! ⚠ **Steps 2 and 3 run over the whole ledger and step 4 comes after them, and that
@@ -168,6 +169,7 @@ async fn ready_inner(
         || !narrowing.labels.is_empty()
         || !narrowing.without.is_empty()
         || narrowing.about.is_some()
+        || narrowing.parent.is_some()
         || narrowing.text.is_some();
     let admitted = if narrows {
         Some(model::matching_iris(client, &narrowing).await?)
@@ -258,17 +260,22 @@ async fn ready_inner(
         {
             continue;
         }
-        let why = if let Some(holder) = item.claimed_by.clone() {
+        // ★ The hand-back FIRST, before the claim (ledger #1455). A worker that hands back
+        // without releasing still holds the claim, and through 0.11.1 the reason given was
+        // "claimed by" the worker: true, and not what anyone should act on. Awaiting the
+        // dispatcher is the state the dispatcher acts on, and it outlasts the claim (a
+        // release leaves it), so the reason does not change when the worker lets go.
+        let why = if item.awaiting.is_some() {
+            // ★ Any `ledger:awaiting` value, not only the dispatcher's: an item waiting on
+            // someone is not ready for a worker, whoever the out-of-band write named.
+            Some(Excluded::AwaitingDispatcher)
+        } else if let Some(holder) = item.claimed_by.clone() {
             match (now, item.lease_expires) {
                 (Some(now), Some(expires)) if expires <= now => {
                     Some(Excluded::LeaseExpired { holder, expires })
                 }
                 _ => Some(Excluded::Claimed(holder)),
             }
-        } else if item.awaiting.is_some() {
-            // ★ Any `ledger:awaiting` value, not only the dispatcher's: an item waiting on
-            // someone is not ready for a worker, whoever the out-of-band write named.
-            Some(Excluded::AwaitingDispatcher)
         } else if item.deferred {
             Some(Excluded::Deferred)
         } else {
