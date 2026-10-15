@@ -73,6 +73,8 @@ pub mod ext {
     pub const XSD_DURATION: &str = "http://www.w3.org/2001/XMLSchema#duration";
     /// `xsd:boolean`
     pub const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+    /// `xsd:date`
+    pub const XSD_DATE: &str = "http://www.w3.org/2001/XMLSchema#date";
     /// `xsd:string`
     pub const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
     /// `xsd:anyURI`
@@ -146,6 +148,8 @@ term! {
     ABOUT => "about";
     /// `ledger:revision`
     REVISION => "revision";
+    /// `ledger:raised` — when the claim AROSE (an `xsd:date`), apart from `dcterms:created`.
+    RAISED => "raised";
     /// `ledger:key` — the caller's own name for an item, unique per ledger.
     KEY => "key";
     /// `ledger:commentKey` — the caller's own name for a comment, apart from `ledger:key`.

@@ -72,6 +72,29 @@ Name the graph (`GRAPH <urn:iki:ledger:graph:acme>`) to ask one ledger, or bind 
 variable to ask across them — which is the second reason a ledger is a named graph rather
 than a column: partitioning by graph costs nothing when you want the whole picture.
 
+"The oldest open items" is a question about when each claim AROSE, which is not when it
+was filed: a migration files hundreds of items in minutes. `append raised=YYYY-MM-DD`
+records the first as `ledger:raised` (an `xsd:date`) beside `dcterms:created`, and an item
+filed without it was raised when it was filed (ledger #240):
+
+```sparql
+# the oldest open items in one ledger, oldest claim first
+SELECT ?number ?title WHERE {
+  GRAPH <urn:iki:ledger:graph:default> {
+    ?item a ledger:Item ; ledger:number ?number ; dcterms:title ?title ;
+          ledger:status ledger:open ; dcterms:created ?created .
+    OPTIONAL { ?item ledger:raised ?raised }
+  }
+}
+ORDER BY COALESCE(?raised, ?created)
+```
+
+⚠ The store compares the `xsd:date` with the `xsd:dateTime` as points in time
+(`tests/raised.rs` pins it, with a claim raised after everything was filed). SPARQL 1.1's
+operator table does not define that comparison, so another engine may order the two kinds
+apart: `ORDER BY COALESCE(STR(?raised), STR(?created))` is the portable spelling, since the
+lexical forms (`2026-07-21`, `2026-09-16T02:03:13.608Z`) sort correctly as strings.
+
 ## Composition: this crate owns no bytes
 
 Every read here is a SPARQL query issued at `urn:iki:store:graph-select`, and every write is

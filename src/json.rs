@@ -221,6 +221,12 @@ pub struct Item {
     /// 0.8.0 (ledger #1199); `#[serde(default)]`, so an earlier document reads with `null`.
     #[serde(default)]
     pub awaiting: Option<String>,
+    /// When the claim it records arose, `YYYY-MM-DD` (`ledger:raised`), apart from `created`,
+    /// which is when it was filed; `null` when not given, which means raised when filed. Added
+    /// after 0.12.0 (ledger #240), LAST rather than beside `revision` so every earlier field keeps
+    /// its place; `#[serde(default)]`, so an earlier document reads with `null`.
+    #[serde(default)]
+    pub raised: Option<String>,
 }
 
 /// `item:{id}`.
@@ -551,6 +557,7 @@ pub(crate) fn item(
         key: item.key.clone(),
         author: item.author.clone(),
         revision: item.revision.clone(),
+        raised: item.raised.clone(),
         claim: item.claimed_by.as_ref().map(|holder| Claim {
             holder: holder.clone(),
             purpose: item.purpose.clone(),

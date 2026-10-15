@@ -302,7 +302,8 @@ fn the_json_item_document_is_schema_1() {
     ],
     "defects": [],
     "state": "filed",
-    "awaiting": null
+    "awaiting": null,
+    "raised": null
   }
 }"##
     );
@@ -349,7 +350,8 @@ fn the_json_items_document_is_schema_1() {
       "comments": [],
       "defects": [],
       "state": "filed",
-      "awaiting": null
+      "awaiting": null,
+      "raised": null
     },
     {
       "number": 3,
@@ -382,7 +384,8 @@ fn the_json_items_document_is_schema_1() {
       ],
       "defects": [],
       "state": "filed",
-      "awaiting": null
+      "awaiting": null,
+      "raised": null
     }
   ],
   "unreadable": []
@@ -467,7 +470,8 @@ fn the_json_next_document_is_schema_1() {
         "comments": [],
         "defects": [],
         "state": "filed",
-        "awaiting": null
+        "awaiting": null,
+        "raised": null
       }
     }
   ],
@@ -504,7 +508,8 @@ fn the_json_next_document_is_schema_1() {
         "comments": [],
         "defects": [],
         "state": "filed",
-        "awaiting": null
+        "awaiting": null,
+        "raised": null
       }
     },
     {
@@ -565,7 +570,8 @@ fn the_json_next_document_is_schema_1() {
         ],
         "defects": [],
         "state": "filed",
-        "awaiting": null
+        "awaiting": null,
+        "raised": null
       }
     }
   ]
