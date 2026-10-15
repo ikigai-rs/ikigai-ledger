@@ -2086,7 +2086,9 @@ mod tests {
         let query = format!(
             "SELECT ?item WHERE {{ GRAPH <urn:iki:ledger:graph:default> {{ {body}{padding} }} }}"
         );
-        let request = Request::new(Verb::Source, Iri::parse(sparql::STORE_SELECT).unwrap())
+        // The broad door, named here and nowhere in the crate: this measures the store's join
+        // walk over a whole-dataset query, which is the door that walk is reached through.
+        let request = Request::new(Verb::Source, Iri::parse("urn:iki:store:select").unwrap())
             .with_arg("query", ArgRef::Inline(query.into_bytes()));
         let refusal = futures::executor::block_on(kernel.issue(request, &Capability::root()))
             .expect_err("padded past the bound, so refused")

@@ -70,9 +70,9 @@
 //!
 //! ★ **So the ledger capabilities are a tenancy boundary now**, where before 0.2.0 they
 //! segmented this module's own doors and the store underneath was one open room. The
-//! exception is one resource and it is documented on it: `urn:iki:ledger:ledgers` asks
-//! *which graphs exist*, which no scoped read can answer, and resolves the broad
-//! `urn:iki:store:select` **only under a root capability**.
+//! one resource that asks a cross-graph question, `urn:iki:ledger:ledgers` (*which graphs
+//! exist*), asks it of `urn:iki:store:graphs` and then reads each ledger through the narrow
+//! door; until ledger #272 its root path resolved the broad `urn:iki:store:select`.
 //!
 //! ⚠ A host that hands a ledger caller `urn:cap:store:read` anyway has still given it every
 //! graph in the store. Nothing here asks for it, so that is a configuration decision rather
@@ -4667,10 +4667,11 @@ impl Endpoint for PolicyEndpoint {
 ///   holds no grant for is never asked about, which is the same answer the old filter gave
 ///   and reaches it without the store ever seeing a cross-graph query.
 /// - A **root** capability enumerates nothing — `Capability::scopes()` is `None` for root,
-///   which is what root means — so this resolves the broad `urn:iki:store:select` once.
-///   Root holds every grant there is, so that widens no authority; it is simply the only
-///   way the question can be answered under it. [`crate::sparql::select_every_graph`] is
-///   the one function in this crate that names a broad door, and it says so at length.
+///   which is what root means — so the store enumerates for it: `urn:iki:store:graphs` names
+///   the graphs that exist, and each ledger graph among them is read through the same narrow
+///   door the scoped path uses ([`crate::sparql::graph_names`]). Until ledger #272 root asked
+///   the whole store once through the broad `urn:iki:store:select`, the one broad door this
+///   crate resolved; it resolves none now.
 ///
 /// ⚠ A ledger granted at THIS module but not at the store **refuses the whole listing**,
 /// naming the token that is missing. A half-granted config is the most likely operator
@@ -4690,10 +4691,10 @@ impl Endpoint for LedgersEndpoint {
         // survives closing and deleting everything, so it, and not the item count, is
         // what says a ledger is there at all.
         //
-        // ★ ONE query text for both paths. Through the narrow door the dataset is exactly
-        // `FROM <G> FROM NAMED <G>`, so `GRAPH ?g` can only bind G and the grouping
-        // yields the one row for that ledger — the same shape the broad door yields per
-        // graph. The branch below is about which door, never about what is asked.
+        // ★ ONE query, one door, for every caller. Through the narrow door the dataset is
+        // exactly `FROM <G> FROM NAMED <G>`, so `GRAPH ?g` can only bind G and the grouping
+        // yields the one row for that ledger. The branch below is about where the candidate
+        // ledgers come from, never about what is asked of them.
         //
         // ⚠ The counter is found by a DISTINCT subquery, not joined: a join multiplies
         // every item row by the number of counter subjects, and a second one (a hand edit,
@@ -4712,21 +4713,20 @@ impl Endpoint for LedgersEndpoint {
             status = v::STATUS,
         );
 
-        let mut found: Vec<(Ledger, i64, i64)> = Vec::new();
-
-        if inv.capability.is_root() {
-            for row in &crate::sparql::select_every_graph(inv, &query).await? {
-                let Some(graph) = row.get("g") else { continue };
-                // The graph IRI is the ledger's name spelled one way; a graveyard graph
-                // and anything else the host keeps in this store are not ledgers and are
-                // skipped rather than guessed at.
-                let Some(ledger) = ledger_of_graph(&graph.value) else {
-                    continue;
-                };
-                found.push((ledger, count(row, "items"), count(row, "open")));
-            }
+        // The candidates: for root, the ledger graphs the store holds; for anyone else, the
+        // ledgers its own grants name, each checked for its store half first.
+        let candidates: Vec<Ledger> = if inv.capability.is_root() {
+            // The graph IRI is the ledger's name spelled one way; a graveyard graph and
+            // anything else the host keeps in this store are not ledgers and are skipped
+            // rather than guessed at. A graph holding no counter yields no row below.
+            crate::sparql::graph_names(inv)
+                .await?
+                .iter()
+                .filter_map(|graph| ledger_of_graph(graph))
+                .collect()
         } else {
-            for ledger in granted_ledgers(inv) {
+            let granted = granted_ledgers(inv);
+            for ledger in &granted {
                 // ⚠ **A half-granted ledger stops the listing rather than thinning it.**
                 // Two tokens per ledger per direction is the shape an operator will get
                 // half right, and a ledger left out of the answer is indistinguishable
@@ -4751,14 +4751,19 @@ impl Endpoint for LedgersEndpoint {
                         ikigai_store::cap_read_graph(&ledger.deleted_graph()),
                     )));
                 }
-                let client = StoreClient::new(inv, ledger.clone());
-                // At most one row: the scoped dataset holds one graph.
-                if let Some(row) = client.select(&query).await?.first() {
-                    found.push((ledger, count(row, "items"), count(row, "open")));
-                }
             }
-            found.sort_by(|a, b| a.0.name().cmp(b.0.name()));
+            granted
+        };
+
+        let mut found: Vec<(Ledger, i64, i64)> = Vec::new();
+        for ledger in candidates {
+            let client = StoreClient::new(inv, ledger.clone());
+            // At most one row: the scoped dataset holds one graph.
+            if let Some(row) = client.select(&query).await?.first() {
+                found.push((ledger, count(row, "items"), count(row, "open")));
+            }
         }
+        found.sort_by(|a, b| a.0.name().cmp(b.0.name()));
 
         if want == TURTLE {
             let mut graph = Graph::new();

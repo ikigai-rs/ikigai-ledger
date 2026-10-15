@@ -20,10 +20,11 @@
 //! | archive / destroy | `urn:iki:store:graph-update` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{name}:deleted` |
 //! | find what a delete archived (purge only) | `urn:iki:store:graph-select` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}:deleted` |
 //!
-//! The one exception is `urn:iki:ledger:ledgers`, which is inherently cross-graph and
-//! resolves the broad `urn:iki:store:select` **only under a root capability** — see
-//! `select_every_graph`, which is the only function in this crate that names a broad
-//! door and says at length why.
+//! `urn:iki:ledger:ledgers`, the one question that is inherently cross-graph, asks the store
+//! *which graphs exist* through `urn:iki:store:graphs` (see `graph_names`) and then reads
+//! each ledger through the same narrow door as everything else. Until ledger #272 it
+//! resolved the broad `urn:iki:store:select` under a root capability instead; nothing in
+//! this crate resolves a broad door now.
 //!
 //! ⚠ **A scoped read sees exactly one graph and a scoped write can affect exactly one.**
 //! `graph=G` is the evaluator's dataset specification — precisely `FROM <G> FROM NAMED
@@ -60,8 +61,14 @@ pub const STORE_GRAPH_ASK: &str = "urn:iki:store:graph-ask";
 /// `urn:iki:store:graph-update` — SPARQL UPDATE confined to one named graph; the Sink
 /// every write in this crate goes through.
 pub const STORE_GRAPH_UPDATE: &str = "urn:iki:store:graph-update";
-/// `urn:iki:store:select` — the BROAD read door, resolved by exactly one caller in this
-/// crate and only under a root capability. See `select_every_graph`.
+/// `urn:iki:store:graphs` — the named graphs that exist in the store AND that the caller may
+/// read, one IRI per line. How a root capability, which names no ledger, finds the ledgers.
+pub const STORE_GRAPHS: &str = "urn:iki:store:graphs";
+/// `urn:iki:store:select` — the BROAD read door.
+#[deprecated(
+    note = "nothing in this crate resolves the broad read door since ledger #272: the root \
+            inventory reads `STORE_GRAPHS` and then one narrow door per ledger"
+)]
 pub const STORE_SELECT: &str = "urn:iki:store:select";
 
 /// A SPARQL string literal, and an IRI term, an integer, a boolean — built as RDF terms
@@ -326,41 +333,38 @@ impl<'a, 'i> StoreClient<'a, 'i> {
     }
 }
 
-/// One SELECT over **every** graph in the store, through the broad
-/// `urn:iki:store:select` door.
+/// The named graphs the store holds that this caller may read, through
+/// `urn:iki:store:graphs`, in the store's order (sorted).
 ///
-/// ⚠ **This is the one place in this crate that resolves a broad store door, it has one
-/// caller, and that caller resolves it only when `inv.capability.is_root()`.** Read that
-/// as a precondition, not a convention: under any other capability this issues a request
-/// requiring `urn:cap:store:read` — the whole dataset — from an action that declares only
-/// the per-graph family, which is exactly the over-offer the module recipe forbids.
+/// ★ **This replaced the crate's one broad door** (ledger #272). `urn:iki:ledger:ledgers` asks
+/// *which* ledgers exist, and a graph-scoped read can enumerate nothing. A scoped capability
+/// carries the answer in its own grants; a root capability names no ledger, so until 0.12.0
+/// root asked the whole store one query through `urn:iki:store:select` — an authority no
+/// action here declares. The store answers the enumeration itself now, as the intersection of
+/// what exists and what the caller may read, and each candidate is then read through the
+/// same narrow door every other read uses.
 ///
-/// It exists because `urn:iki:ledger:ledgers` asks a question no scoped read can answer:
-/// *which* graphs are there. A scoped read is confined to a graph the caller must already
-/// have named, so enumeration through it is only possible from a set of names known in
-/// advance — which is what a non-root capability carries (its `urn:cap:ledger:read:{name}`
-/// grants) and what a root capability, by construction, does not. Root holds every grant
-/// there is, so asking the whole store under it widens nothing; it is simply the only way
-/// the question can be answered at all.
-///
-/// The alternative considered and rejected was a shared registry graph listing the
-/// ledgers: every ledger write would then need write access to one graph all the others
-/// write too — the same path across the boundary the per-ledger graveyard exists to
-/// avoid — and its read grant would hand out the whole client list.
-pub(crate) async fn select_every_graph(inv: &Invocation<'_>, query: &str) -> Result<Vec<Row>> {
-    debug_assert!(
-        inv.capability.is_root(),
-        "select_every_graph is root-only: see its doc comment"
-    );
-    let target = ikigai_core::Iri::parse(STORE_SELECT).expect("a constant IRI");
+/// ⚠ **Root-only here, by choice rather than necessity.** Its declared scope,
+/// `urn:cap:store:read*`, is satisfied by the per-graph grant every ledger action already
+/// declares, so a scoped caller could call it too. The scoped path keeps reading its
+/// candidates from the capability instead, because the half-granted refusal (a ledger granted
+/// at this module and not at the store) cannot be derived from a list the STORE grants
+/// filtered: that ledger would simply be absent from it.
+pub(crate) async fn graph_names(inv: &Invocation<'_>) -> Result<Vec<String>> {
+    let target = ikigai_core::Iri::parse(STORE_GRAPHS).expect("a constant IRI");
     let repr = inv
-        .issue(
-            Request::new(Verb::Source, target)
-                .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec())),
-        )
+        .issue(Request::new(Verb::Source, target))
         .await
         .map_err(store_missing)?;
-    parse_results(&repr.bytes)
+    let text = String::from_utf8(repr.bytes).map_err(|e| {
+        Error::Endpoint(format!("the store's graph list is not UTF-8: {e}"))
+    })?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Make the one composition failure legible rather than letting it surface as the
