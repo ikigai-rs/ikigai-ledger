@@ -745,7 +745,65 @@ fn retract(client: &StoreClient<'_, '_>, item: &str, predicate: &str) -> String 
     format!("DELETE {{ {pattern} }} WHERE {{ {pattern} }}")
 }
 
-/// Stamp an item as modified, as part of the same update that changed it.
+/// The pattern "`item` is a live item": the condition every write on an item carries in its
+/// `WHERE` (ledger #764).
+///
+/// ★ **A write reads its item and then writes, and a delete can commit in between.** Until
+/// 0.12.0 a write's update carried no condition on the item, so one that lost that race
+/// landed on the deleted IRI anyway: a comment, a `modified` stamp, a status or an edge, live
+/// beside the tombstone, read by nothing and counted by nothing (`tests/write_after_delete.rs`
+/// forces the schedule for every write). With this clause in the same update the store
+/// evaluates it under its write lock, so the write lands while the item is live or not at
+/// all. A `DELETE` alone needs no clause: removing a triple a delete already removed leaves
+/// nothing behind.
+fn live(item: &str) -> String {
+    format!("<{item}> <{}> <{}> .", v::ext::TYPE, v::ITEM_CLASS)
+}
+
+/// `INSERT` the given triples into this ledger's graph only while every one of `items` is a
+/// live item: the guarded form of `INSERT DATA` for a write on an item (see [`live`]).
+fn insert_on_live(client: &StoreClient<'_, '_>, items: &[&str], triples: &str) -> String {
+    let guard: String = items.iter().map(|item| live(item)).collect();
+    format!(
+        "INSERT {{ {} }} WHERE {{ {} }}",
+        client.in_graph(triples),
+        client.in_graph(&guard)
+    )
+}
+
+/// Apply a write on `items` and refuse when any of them is no longer live afterwards.
+///
+/// ★ The update's own [`live`] clause is what keeps a late write off a deleted item; this is
+/// how the CALLER learns that it happened, since an update that matched nothing still
+/// succeeds. A write that lost the race to a delete is answered `NotFound`, the answer the
+/// same request gets once the delete has committed, rather than a success for a write that
+/// is in no live graph. ⚠ The read after cannot tell "landed, then the delete took it" from
+/// "did not land": in the first case the write was archived with the item, which is the
+/// delete's to account for, so both are reported the same way.
+async fn guarded_update(client: &StoreClient<'_, '_>, items: &[&str], update: &str) -> Result<()> {
+    client.update(update).await?;
+    for item in items {
+        still_live(client, item).await?;
+    }
+    Ok(())
+}
+
+/// `NotFound` naming the in-flight delete when `item` is not a live item now.
+async fn still_live(client: &StoreClient<'_, '_>, item: &str) -> Result<()> {
+    if client
+        .ask(&format!("ASK {{ {} }}", client.in_graph(&live(item))))
+        .await?
+    {
+        return Ok(());
+    }
+    Err(Error::NotFound(format!(
+        "no ledger item at `{item}`: it was deleted while this write was in flight, and \
+         nothing of the write is in the live graph"
+    )))
+}
+
+/// Stamp an item as modified, as part of the same update that changed it — only while it is
+/// a live item ([`live`]), so a late write never stamps a deleted IRI.
 fn touch(client: &StoreClient<'_, '_>, item: &str, now: u64) -> String {
     format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
@@ -756,7 +814,8 @@ fn touch(client: &StoreClient<'_, '_>, item: &str, now: u64) -> String {
             datetime(now)
         )),
         client.in_graph(&format!(
-            "OPTIONAL {{ <{item}> <{}> ?was }}",
+            "{} OPTIONAL {{ <{item}> <{}> ?was }}",
+            live(item),
             v::ext::MODIFIED
         ))
     )
@@ -862,13 +921,16 @@ async fn write_keyed_comment(
     // ★ The hand-back is in the SAME update as the comment (ledger #1199), so the evidence
     // and the state it puts the item in land together or not at all.
     if key.is_none() && handback != Handback::Set {
-        client
-            .update(&batch(&[
-                format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
+        guarded_update(
+            client,
+            &[item],
+            &batch(&[
+                insert_on_live(client, &[item], &triples),
                 touch(client, item, now),
                 handback_update(client, item, handback, ""),
-            ]))
-            .await?;
+            ]),
+        )
+        .await?;
         return Ok(comment);
     }
     // ★ A hand-back lands only on an OPEN item (ledger #1418): the endpoint refuses a closed
@@ -893,7 +955,8 @@ async fn write_keyed_comment(
         }
         None => String::new(),
     };
-    let free = format!("{open} {free}");
+    // And only on a live item (ledger #764), like every write on one.
+    let free = format!("{} {open} {free}", client.in_graph(&live(item)));
     // The stamp and the hand-back first: once the comment is in, the key is taken and the
     // guard is false, so a replay changes neither.
     client
@@ -918,6 +981,7 @@ async fn write_keyed_comment(
             ),
         ]))
         .await?;
+    still_live(client, item).await?;
     Ok(comment)
 }
 
@@ -1588,14 +1652,15 @@ impl Endpoint for ItemEndpoint {
                 }
                 if let Ok(about) = inv.inline_str("about") {
                     for target in about.split_whitespace() {
-                        updates.push(format!(
-                            "INSERT DATA {{ {} }}",
-                            client.in_graph(&format!(
+                        updates.push(insert_on_live(
+                            &client,
+                            &[&item.iri],
+                            &format!(
                                 "<{}> <{}> {} .",
                                 item.iri,
                                 v::ABOUT,
                                 sparql::iri(target, "about")?
-                            ))
+                            ),
                         ));
                     }
                 }
@@ -1608,7 +1673,7 @@ impl Endpoint for ItemEndpoint {
                     return Err(Error::MissingArgument("content".to_string()));
                 }
                 updates.push(touch(&client, &item.iri, now));
-                client.update(&batch(&updates)).await?;
+                guarded_update(&client, &[&item.iri], &batch(&updates)).await?;
                 Ok(plain(format!("updated {} {}\n", item.short(), item.iri)))
             }
             Verb::Delete => {
@@ -1616,8 +1681,15 @@ impl Endpoint for ItemEndpoint {
                 let item = require_item(&client, id).await?;
                 let reason = inv.inline_str("reason").unwrap_or("").to_string();
                 let author = inv.inline_str("author").ok().map(str::to_string);
-                let removed =
-                    delete_item(&client, &item, &reason, author.as_deref(), now, false).await?;
+                let Some(removed) =
+                    delete_item(&client, &item, &reason, author.as_deref(), now, false).await?
+                else {
+                    return Err(Error::NotFound(format!(
+                        "no ledger item at `{}`: another delete removed it while this one was \
+                         in flight, and its tombstone is that delete's",
+                        item.iri
+                    )));
+                };
                 Ok(plain(format!(
                     "deleted {} {}\n  {} quad(s) moved to <{}> and recoverable\n  tombstone: \
                      {}\n",
@@ -1744,13 +1816,28 @@ impl Endpoint for ItemEndpoint {
     }
 }
 
-/// Replace a single-valued property.
+/// Replace a single-valued property of a live item ([`live`]).
 fn replace_one(client: &StoreClient<'_, '_>, item: &str, predicate: &str, value: &str) -> String {
+    replace_one_of(client, item, v::ITEM_CLASS, predicate, value)
+}
+
+/// Replace a single-valued property of `subject`, only while it is typed `class`: an item for
+/// every write on one, a tombstone for a purge's stamps on it.
+fn replace_one_of(
+    client: &StoreClient<'_, '_>,
+    subject: &str,
+    class: &str,
+    predicate: &str,
+    value: &str,
+) -> String {
     format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
-        client.in_graph(&format!("<{item}> <{predicate}> ?was")),
-        client.in_graph(&format!("<{item}> <{predicate}> {value}")),
-        client.in_graph(&format!("OPTIONAL {{ <{item}> <{predicate}> ?was }}"))
+        client.in_graph(&format!("<{subject}> <{predicate}> ?was")),
+        client.in_graph(&format!("<{subject}> <{predicate}> {value}")),
+        client.in_graph(&format!(
+            "<{subject}> <{}> <{class}> . OPTIONAL {{ <{subject}> <{predicate}> ?was }}",
+            v::ext::TYPE
+        ))
     )
 }
 
@@ -1895,6 +1982,17 @@ fn rows_as_data(rows: &[sparql::Row]) -> Result<String> {
 /// removed and is the honest answer; the archive is a superset. There is no in-band signal
 /// for it, and inventing one would mean a marker quad written before the move that a
 /// reader of the live graph would have to learn to ignore.
+///
+/// # ★ Two deletes of one item write one tombstone (ledger #764)
+///
+/// Two deletes that both read the item live used to both write the tombstone, which is one
+/// IRI per item, so it carried both deletes' times, reasons and counts. Now the commit point
+/// carries the item-still-live condition: a purge's removal runs only while the item is live,
+/// and the tombstone is written only while there is none, which is the same fact (a ledger
+/// has no undelete). The delete that loses is answered `None` and its caller says so; what it
+/// already did to the graveyard is harmless (a recoverable delete re-archives quads that are
+/// there already) or exactly what was asked (a purge destroyed the archive, and its caller
+/// then stamps the tombstone as a purge of a deleted item does).
 async fn delete_item(
     client: &StoreClient<'_, '_>,
     item: &Item,
@@ -1902,7 +2000,7 @@ async fn delete_item(
     author: Option<&str>,
     now: u64,
     destroy: bool,
-) -> Result<Removed> {
+) -> Result<Option<Removed>> {
     let subject = sparql::iri(&item.iri, "item")?;
     let selector = removal_selector(&subject);
     let rows = client
@@ -1939,10 +2037,12 @@ async fn delete_item(
                 client.in_deleted_graph(&selector),
             ))
             .await?;
+        // Only while the item is live: once another delete committed, the selector's
+        // `?o = <item>` would take that delete's tombstone edge with it.
         format!(
             "DELETE {{ {} }} WHERE {{ {} }}",
             client.in_graph("?s ?p ?o"),
-            client.in_graph(&selector)
+            client.in_graph(&format!("{} {selector}", live(&item.iri)))
         )
     } else if rows.is_empty() {
         String::new()
@@ -2021,14 +2121,40 @@ async fn delete_item(
     client
         .update(&batch(&[
             removal,
-            format!("INSERT DATA {{ {} }}", client.in_graph(&triples)),
+            format!(
+                "INSERT {{ {} }} WHERE {{ FILTER NOT EXISTS {{ {} }} }}",
+                client.in_graph(&triples),
+                client.in_graph(&format!(
+                    "<{tombstone}> <{}> <{}>",
+                    v::ext::TYPE,
+                    v::TOMBSTONE_CLASS
+                )),
+            ),
         ]))
         .await?;
-    Ok(Removed {
+    // Whose tombstone it is: this delete's stamp and hash, or another delete's that committed
+    // first. Two deletes in one millisecond over the same quads are indistinguishable here,
+    // and then either answer is true.
+    let ours = client
+        .ask(&format!(
+            "ASK {{ {} }}",
+            client.in_graph(&format!(
+                "<{tombstone}> <{}> {} ; <{}> {}",
+                v::ext::INVALIDATED_AT,
+                datetime(now),
+                v::ext::CONTENT_HASH,
+                literal(&digest)
+            ))
+        ))
+        .await?;
+    if !ours {
+        return Ok(None);
+    }
+    Ok(Some(Removed {
         tombstone,
         quads: rows.len(),
         archived,
-    })
+    }))
 }
 
 /// Destroy what a recoverable delete archived, for an item that is no longer live.
@@ -2074,21 +2200,23 @@ async fn purge_archived(
             .await?;
     }
     let mut operations = vec![
-        replace_one(client, &found.iri, v::RECOVERABLE, &boolean(false)),
-        replace_one(client, &found.iri, v::PURGED_AT, &datetime(now)),
+        replace_one_of(client, &found.iri, v::TOMBSTONE_CLASS, v::RECOVERABLE, &boolean(false)),
+        replace_one_of(client, &found.iri, v::TOMBSTONE_CLASS, v::PURGED_AT, &datetime(now)),
     ];
     if !reason.is_empty() {
-        operations.push(replace_one(
+        operations.push(replace_one_of(
             client,
             &found.iri,
+            v::TOMBSTONE_CLASS,
             v::PURGE_REASON,
             &literal(reason),
         ));
     }
     if let Some(author) = author {
-        operations.push(replace_one(
+        operations.push(replace_one_of(
             client,
             &found.iri,
+            v::TOMBSTONE_CLASS,
             v::PURGED_BY,
             &literal(author),
         ));
@@ -2787,7 +2915,7 @@ impl Endpoint for CloseEndpoint {
         );
         // And a hand-back is answered: closed work awaits nobody (ledger #1199).
         ops.push(retract(&client, &item.iri, v::AWAITING));
-        client.update(&batch(&ops)).await?;
+        guarded_update(&client, &[&item.iri], &batch(&ops)).await?;
         let author = inv.inline_str("author").ok();
         let released = item.claimed_by.clone();
         if released.is_some() {
@@ -2891,16 +3019,19 @@ impl Endpoint for ReopenEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
-        client
-            .update(&batch(&[
+        guarded_update(
+            &client,
+            &[&item.iri],
+            &batch(&[
                 replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::OPEN)),
                 retract(&client, &item.iri, v::CLOSED_REASON),
                 // A reopened item starts from "not awaiting": whatever hand-back preceded
                 // the close was answered by it (ledger #1199).
                 retract(&client, &item.iri, v::AWAITING),
                 touch(&client, &item.iri, now),
-            ]))
-            .await?;
+            ]),
+        )
+        .await?;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
                 write_comment(
@@ -3718,9 +3849,12 @@ impl Endpoint for DeferEndpoint {
             Verb::Delete => (retract(&client, &item.iri, v::DEFERRED), "resumed"),
             other => return Err(unsupported("ledger-defer", other)),
         };
-        client
-            .update(&batch(&[update, touch(&client, &item.iri, now)]))
-            .await?;
+        guarded_update(
+            &client,
+            &[&item.iri],
+            &batch(&[update, touch(&client, &item.iri, now)]),
+        )
+        .await?;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
                 write_comment(&client, &item.iri, note.trim(), None, now).await?;
@@ -3815,8 +3949,9 @@ impl Endpoint for LinkEndpoint {
         }
         let triple = format!("<{}> <{predicate}> <{}> .", from.iri, to.iri);
         let (update, said) = match inv.request.verb {
+            // Both ends live: an edge to a deleted item names something nothing resolves.
             Verb::Sink => (
-                format!("INSERT DATA {{ {} }}", client.in_graph(&triple)),
+                insert_on_live(&client, &[&from.iri, &to.iri], &triple),
                 "linked",
             ),
             Verb::Delete => (
@@ -3825,9 +3960,18 @@ impl Endpoint for LinkEndpoint {
             ),
             other => return Err(unsupported("ledger-link", other)),
         };
-        client
-            .update(&batch(&[update, touch(&client, &from.iri, now)]))
-            .await?;
+        // An unlink checks only its source: removing an edge to a deleted item is a cleanup.
+        let ends: &[&str] = if inv.request.verb == Verb::Sink {
+            &[&from.iri, &to.iri]
+        } else {
+            &[&from.iri]
+        };
+        guarded_update(
+            &client,
+            ends,
+            &batch(&[update, touch(&client, &from.iri, now)]),
+        )
+        .await?;
         if want == JSON {
             let ledger = client.ledger();
             let mut answer =
@@ -3937,19 +4081,19 @@ impl Endpoint for LabelEndpoint {
         }
         let triple = format!("<{}> <{}> {} .", item.iri, v::LABEL, literal(label));
         let (update, said) = match inv.request.verb {
-            Verb::Sink => (
-                format!("INSERT DATA {{ {} }}", client.in_graph(&triple)),
-                "labeled",
-            ),
+            Verb::Sink => (insert_on_live(&client, &[&item.iri], &triple), "labeled"),
             Verb::Delete => (
                 format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
                 "unlabeled",
             ),
             other => return Err(unsupported("ledger-label", other)),
         };
-        client
-            .update(&batch(&[update, touch(&client, &item.iri, now)]))
-            .await?;
+        guarded_update(
+            &client,
+            &[&item.iri],
+            &batch(&[update, touch(&client, &item.iri, now)]),
+        )
+        .await?;
         Ok(plain(format!("{said} {} {label}\n", item.short())))
     }
 
@@ -4045,12 +4189,12 @@ impl Endpoint for AboutEndpoint {
                 sparql::iri(target, "content")?
             );
             updates.push(match inv.request.verb {
-                Verb::Sink => format!("INSERT DATA {{ {} }}", client.in_graph(&triple)),
+                Verb::Sink => insert_on_live(&client, &[&item.iri], &triple),
                 _ => format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
             });
         }
         updates.push(touch(&client, &item.iri, now));
-        client.update(&batch(&updates)).await?;
+        guarded_update(&client, &[&item.iri], &batch(&updates)).await?;
         Ok(plain(format!(
             "{} {said} {}\n",
             item.short(),
@@ -4144,26 +4288,33 @@ impl Endpoint for PurgeEndpoint {
         let reference = inv.inline_str("content")?;
         let reason = inv.inline_str("reason").unwrap_or("");
         let author = inv.inline_str("author").ok();
+        // Not live: it may have been deleted, and then the content is in the graveyard,
+        // findable through the tombstone the delete left in the live graph.
+        let client = &client;
+        let deleted_earlier = |absent: String| async move {
+            let Some(found) = model::find_tombstone(client, reference).await? else {
+                return Err(Error::NotFound(absent));
+            };
+            let archived = purge_archived(client, &found, reason, author, now).await?;
+            Ok(plain(format!(
+                "purged {} {} (deleted earlier)\n  {archived} archived quad(s) destroyed, \
+                 NOT recoverable\n  tombstone: {}\n",
+                client.ledger().number(found.number),
+                found.item,
+                found.iri
+            )))
+        };
         let item = match require_item(&client, reference).await {
             Ok(item) => item,
-            // Not live: it may have been deleted, and then the content is in the graveyard,
-            // findable through the tombstone the delete left in the live graph.
-            Err(Error::NotFound(absent)) => {
-                let Some(found) = model::find_tombstone(&client, reference).await? else {
-                    return Err(Error::NotFound(absent));
-                };
-                let archived = purge_archived(&client, &found, reason, author, now).await?;
-                return Ok(plain(format!(
-                    "purged {} {} (deleted earlier)\n  {archived} archived quad(s) destroyed, \
-                     NOT recoverable\n  tombstone: {}\n",
-                    client.ledger().number(found.number),
-                    found.item,
-                    found.iri
-                )));
-            }
+            Err(Error::NotFound(absent)) => return deleted_earlier(absent).await,
             Err(other) => return Err(other),
         };
-        let removed = delete_item(&client, &item, reason, author, now, true).await?;
+        // ★ A delete that committed while this purge was in flight (ledger #764): the
+        // tombstone is that delete's, and what it archived is purged as for any item deleted
+        // earlier, so the answer is the one a purge sent a moment later would have had.
+        let Some(removed) = delete_item(&client, &item, reason, author, now, true).await? else {
+            return deleted_earlier(format!("no ledger item at `{}`", item.iri)).await;
+        };
         Ok(plain(format!(
             "purged {} {}\n  {} quad(s) destroyed, NOT recoverable{}\n  tombstone: {}\n",
             item.short(),
