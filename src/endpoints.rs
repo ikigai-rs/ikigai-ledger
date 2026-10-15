@@ -1841,6 +1841,50 @@ fn replace_one_of(
     )
 }
 
+/// `raised=` as an `xsd:date` lexical form: `YYYY-MM-DD`, a real calendar date, no time and
+/// no zone (ledger #240). Refused rather than normalized, so what is stored is what was sent.
+///
+/// ```text
+/// 2026-07-21   accepted
+/// 2024-02-29   accepted (a leap year)
+/// 2026-02-30   refused, and so are 2026-7-21, 2026-13-01 and 2026-07-21T00:00:00Z
+/// ```
+fn parse_date(value: &str) -> Result<String> {
+    let refused = |why: &str| Error::InvalidArgument {
+        name: "raised".to_string(),
+        detail: format!(
+            "`{value}` is not a date: {why}. `raised` is when the claim arose, as \
+             `YYYY-MM-DD` (an `xsd:date`, no time and no zone)"
+        ),
+    };
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let shaped = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+    if !shaped {
+        return Err(refused("the shape is YYYY-MM-DD"));
+    }
+    let number = |range: std::ops::Range<usize>| value[range].parse::<u32>().unwrap_or(0);
+    let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(refused("there is no such month")),
+    };
+    if day == 0 || day > days {
+        return Err(refused("there is no such day in that month"));
+    }
+    Ok(value.to_string())
+}
+
 fn parse_priority(value: &str) -> Result<i64> {
     match value.trim().parse::<i64>() {
         Ok(p) if (0..=4).contains(&p) => Ok(p),
@@ -2200,8 +2244,20 @@ async fn purge_archived(
             .await?;
     }
     let mut operations = vec![
-        replace_one_of(client, &found.iri, v::TOMBSTONE_CLASS, v::RECOVERABLE, &boolean(false)),
-        replace_one_of(client, &found.iri, v::TOMBSTONE_CLASS, v::PURGED_AT, &datetime(now)),
+        replace_one_of(
+            client,
+            &found.iri,
+            v::TOMBSTONE_CLASS,
+            v::RECOVERABLE,
+            &boolean(false),
+        ),
+        replace_one_of(
+            client,
+            &found.iri,
+            v::TOMBSTONE_CLASS,
+            v::PURGED_AT,
+            &datetime(now),
+        ),
     ];
     if !reason.is_empty() {
         operations.push(replace_one_of(
@@ -2245,6 +2301,7 @@ impl Endpoint for AppendEndpoint {
             .ok()
             .map(model::parse_key)
             .transpose()?;
+        let raised = inv.inline_str("raised").ok().map(parse_date).transpose()?;
         let now = now_ms(inv)?;
         let (title, body) = split_content(inv.inline_str("content")?)?;
         let author = inv.inline_str("author").ok();
@@ -2304,6 +2361,13 @@ impl Endpoint for AppendEndpoint {
                 "\n<{iri}> <{}> {} .",
                 v::REVISION,
                 literal(revision)
+            ));
+        }
+        if let Some(raised) = &raised {
+            triples.push_str(&format!(
+                "\n<{iri}> <{}> {} .",
+                v::RAISED,
+                ikigai_store::sparql::typed_literal(raised, v::ext::XSD_DATE, "raised")?
             ));
         }
         for label in split_labels(inv.inline_str("labels").ok()) {
@@ -2480,6 +2544,18 @@ impl Endpoint for AppendEndpoint {
                              pin that keeps a finding about line 40 from rotting.",
                         )
                         .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("raised")
+                        .summary(
+                            "When the claim AROSE, `YYYY-MM-DD` — the review or audit it came \
+                             from — when that is not when it is filed: a migration or an \
+                             import. Stored as `ledger:raised` (an `xsd:date`) beside \
+                             `dcterms:created`; \"oldest first\" orders by \
+                             `COALESCE(?raised, ?created)`. Absent means raised when filed.",
+                        )
+                        .class(v::ext::XSD_DATE)
                         .optional(),
                 )
                 .input(
@@ -4304,7 +4380,7 @@ impl Endpoint for PurgeEndpoint {
                 found.iri
             )))
         };
-        let item = match require_item(&client, reference).await {
+        let item = match require_item(client, reference).await {
             Ok(item) => item,
             Err(Error::NotFound(absent)) => return deleted_earlier(absent).await,
             Err(other) => return Err(other),
@@ -4312,7 +4388,7 @@ impl Endpoint for PurgeEndpoint {
         // ★ A delete that committed while this purge was in flight (ledger #764): the
         // tombstone is that delete's, and what it archived is purged as for any item deleted
         // earlier, so the answer is the one a purge sent a moment later would have had.
-        let Some(removed) = delete_item(&client, &item, reason, author, now, true).await? else {
+        let Some(removed) = delete_item(client, &item, reason, author, now, true).await? else {
             return deleted_earlier(format!("no ledger item at `{}`", item.iri)).await;
         };
         Ok(plain(format!(

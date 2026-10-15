@@ -126,6 +126,10 @@ pub struct Item {
     pub author: Option<String>,
     /// The revision the item was filed against.
     pub revision: Option<String>,
+    /// When the claim it records arose, `YYYY-MM-DD` (`ledger:raised`, an `xsd:date`): apart
+    /// from `created`, which is when it was filed. `None` when it was not given, which means
+    /// raised when filed (ledger #240).
+    pub raised: Option<String>,
     /// The caller's own name for the item (`append key=`), unique per ledger.
     pub key: Option<String>,
     /// Who holds it, if anyone.
@@ -295,6 +299,9 @@ impl Item {
         if let Some(revision) = &self.revision {
             out.push_str(&format!("  revision: {revision}\n"));
         }
+        if let Some(raised) = &self.raised {
+            out.push_str(&format!("  raised:   {raised}\n"));
+        }
         for about in &self.about {
             out.push_str(&format!("  about:    {about}\n"));
         }
@@ -391,6 +398,9 @@ impl Item {
         }
         if let Some(revision) = &self.revision {
             push(v::REVISION, plain(revision));
+        }
+        if let Some(raised) = &self.raised {
+            push(v::RAISED, typed(raised, v::ext::XSD_DATE));
         }
         if let Some(key) = &self.key {
             push(v::KEY, plain(key));
@@ -1016,7 +1026,7 @@ async fn load(
     let query = |values: &str| {
         format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
+         ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
          ?principal ?awaiting WHERE {{ {} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
@@ -1031,6 +1041,7 @@ async fn load(
              OPTIONAL {{ ?item <{deferred}> ?deferred }}\n\
              OPTIONAL {{ ?item <{author}> ?author }}\n\
              OPTIONAL {{ ?item <{revision}> ?revision }}\n\
+             OPTIONAL {{ ?item <{raised}> ?raised }}\n\
              OPTIONAL {{ ?item <{key}> ?key }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
              OPTIONAL {{ ?item <{purpose}> ?purpose }}\n\
@@ -1053,6 +1064,7 @@ async fn load(
             deferred = v::DEFERRED,
             author = v::AUTHOR,
             revision = v::REVISION,
+            raised = v::RAISED,
             key = v::KEY,
             holder = v::CLAIMED_BY,
             purpose = v::PURPOSE,
@@ -1120,7 +1132,7 @@ fn values_lists<S: AsRef<str>>(iris: impl IntoIterator<Item = S>) -> Result<Vec<
 pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option<Item>> {
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
-         ?revision ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
+         ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
          ?principal ?awaiting WHERE {{ {} }} \
          ORDER BY DESC({RECENCY})",
         client.in_graph(&format!(
@@ -1136,6 +1148,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{deferred}> ?deferred }}\n\
              OPTIONAL {{ ?item <{author}> ?author }}\n\
              OPTIONAL {{ ?item <{revision}> ?revision }}\n\
+             OPTIONAL {{ ?item <{raised}> ?raised }}\n\
              OPTIONAL {{ ?item <{key}> ?key }}\n\
              OPTIONAL {{ ?item <{holder}> ?holder }}\n\
              OPTIONAL {{ ?item <{purpose}> ?purpose }}\n\
@@ -1159,6 +1172,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
             deferred = v::DEFERRED,
             author = v::AUTHOR,
             revision = v::REVISION,
+            raised = v::RAISED,
             key = v::KEY,
             holder = v::CLAIMED_BY,
             purpose = v::PURPOSE,
@@ -1854,6 +1868,7 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
             .unwrap_or(false),
         author: row.get("author").map(|b| b.value.clone()),
         revision: row.get("revision").map(|b| b.value.clone()),
+        raised: row.get("raised").map(|b| b.value.clone()),
         key: row.get("key").map(|b| b.value.clone()),
         claimed_by: row.get("holder").map(|b| b.value.clone()),
         purpose: row.get("purpose").map(|b| b.value.clone()),
@@ -1972,6 +1987,7 @@ mod tests {
             deferred: false,
             author: Some("brian".to_string()),
             revision: Some("f41a333".to_string()),
+            raised: None,
             key: None,
             claimed_by: None,
             purpose: None,
