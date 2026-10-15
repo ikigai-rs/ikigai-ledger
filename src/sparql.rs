@@ -356,9 +356,8 @@ pub(crate) async fn graph_names(inv: &Invocation<'_>) -> Result<Vec<String>> {
         .issue(Request::new(Verb::Source, target))
         .await
         .map_err(store_missing)?;
-    let text = String::from_utf8(repr.bytes).map_err(|e| {
-        Error::Endpoint(format!("the store's graph list is not UTF-8: {e}"))
-    })?;
+    let text = String::from_utf8(repr.bytes)
+        .map_err(|e| Error::Endpoint(format!("the store's graph list is not UTF-8: {e}")))?;
     Ok(text
         .lines()
         .map(str::trim)

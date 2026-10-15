@@ -39,7 +39,12 @@ fn frozen_kernel() -> Kernel {
 fn order_in(text: &str, bodies: &[String]) -> Vec<String> {
     let mut found: Vec<(usize, String)> = bodies
         .iter()
-        .map(|b| (text.find(b.as_str()).expect("every comment is listed"), b.clone()))
+        .map(|b| {
+            (
+                text.find(b.as_str()).expect("every comment is listed"),
+                b.clone(),
+            )
+        })
         .collect();
     found.sort();
     found.into_iter().map(|(_, b)| b).collect()
@@ -53,7 +58,9 @@ fn comments_in_one_millisecond_list_in_the_order_they_were_written() {
     let kernel = frozen_kernel();
     append(&kernel, "an imported item", &[]);
     // Zero-padded, so no body is a prefix of another and `find` locates each one exactly.
-    let bodies: Vec<String> = (0..20).map(|n| format!("imported comment {n:02}")).collect();
+    let bodies: Vec<String> = (0..20)
+        .map(|n| format!("imported comment {n:02}"))
+        .collect();
     for body in &bodies {
         sink(
             &kernel,

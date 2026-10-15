@@ -30,6 +30,14 @@ const LIVE: &str = "urn:iki:ledger:graph:default";
 /// The request to run first, once, when the next live-graph update arrives.
 type Armed = Arc<Mutex<Option<Request>>>;
 
+/// One write under test: its name, verb, target and arguments.
+type Case = (
+    &'static str,
+    Verb,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
+
 struct Interleave {
     inner: Arc<dyn Space>,
     kernel: Arc<OnceLock<Kernel>>,
@@ -45,13 +53,15 @@ struct BeforeLiveUpdate {
 impl Space for Interleave {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
         let (kernel, armed) = (Arc::clone(&self.kernel), Arc::clone(&self.armed));
-        self.inner.resolve(request, scope).map_endpoint(move |inner| {
-            Arc::new(BeforeLiveUpdate {
-                inner,
-                kernel,
-                armed,
-            }) as Arc<dyn Endpoint>
-        })
+        self.inner
+            .resolve(request, scope)
+            .map_endpoint(move |inner| {
+                Arc::new(BeforeLiveUpdate {
+                    inner,
+                    kernel,
+                    armed,
+                }) as Arc<dyn Endpoint>
+            })
     }
 }
 
@@ -138,7 +148,7 @@ fn leftovers(kernel: &Kernel, item: &str) -> Vec<String> {
 /// update already required the item) answered success and left live triples behind.
 #[test]
 fn a_write_landing_after_its_items_delete_writes_nothing_and_refuses() {
-    let cases: &[(&str, Verb, &str, &[(&str, &str)])] = &[
+    let cases: &[Case] = &[
         (
             "comment",
             Verb::Sink,
@@ -220,7 +230,10 @@ fn a_write_landing_after_its_items_delete_writes_nothing_and_refuses() {
         append(kernel, "bystander", &[]);
         *armed.lock().unwrap() = Some(request(Verb::Delete, "urn:iki:ledger:item:1", &[]));
         let answer = try_verb(kernel, *verb, iri, args);
-        assert!(armed.lock().unwrap().is_none(), "{name}: the delete never ran");
+        assert!(
+            armed.lock().unwrap().is_none(),
+            "{name}: the delete never ran"
+        );
         let left = leftovers(kernel, &item);
         if answer.is_ok() || !left.is_empty() {
             wrong.push(format!("{name}: answered {answer:?}, left {left:?}"));
@@ -264,7 +277,10 @@ fn a_second_delete_landing_after_the_first_writes_no_second_tombstone_state() {
                 &[("reason", "second")],
             )
         };
-        assert!(armed.lock().unwrap().is_none(), "the first delete never ran");
+        assert!(
+            armed.lock().unwrap().is_none(),
+            "the first delete never ran"
+        );
         let json: serde_json::Value = serde_json::from_str(&select(
             kernel,
             &format!(
@@ -308,10 +324,7 @@ fn a_second_delete_landing_after_the_first_writes_no_second_tombstone_state() {
             );
             assert!(!archived.contains("urn:iki:ledger"), "{archived}");
         } else {
-            assert!(
-                late.is_err(),
-                "the late delete answered success: {late:?}"
-            );
+            assert!(late.is_err(), "the late delete answered success: {late:?}");
         }
     }
 }

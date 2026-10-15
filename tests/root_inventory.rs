@@ -42,9 +42,8 @@ impl Endpoint for NoBroadDoor {
 
 fn kernel_without_the_broad_door() -> Kernel {
     let space = Fallback::new(vec![
-        Arc::new(
-            EndpointSpace::new().bind(Exact::new("urn:iki:store:select"), NoBroadDoor),
-        ) as Arc<dyn Space>,
+        Arc::new(EndpointSpace::new().bind(Exact::new("urn:iki:store:select"), NoBroadDoor))
+            as Arc<dyn Space>,
         Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>,
         Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
     ]);
