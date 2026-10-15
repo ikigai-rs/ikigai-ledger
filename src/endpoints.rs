@@ -4742,6 +4742,19 @@ mod tests {
         assert!(earlier.bytes().all(|b| CROCKFORD.contains(&b)), "{earlier}");
     }
 
+    /// ★ The property `model::load_comments` breaks a same-millisecond tie on (ledger #813):
+    /// ids minted by this process in one millisecond sort in the order they were minted,
+    /// because the suffix is the mint sequence offset by a fixed nonce.
+    #[test]
+    fn ids_minted_in_one_millisecond_sort_in_mint_order() {
+        let minted: Vec<String> = (0..1_000)
+            .map(|_| mint_id(1_757_700_000_000).unwrap())
+            .collect();
+        let mut sorted = minted.clone();
+        sorted.sort();
+        assert_eq!(sorted, minted);
+    }
+
     #[test]
     fn content_splits_into_title_and_body() {
         let (title, body) = split_content("Fix the thing\n\nIt is broken.\nBadly.").unwrap();

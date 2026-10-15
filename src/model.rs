@@ -1605,9 +1605,21 @@ pub async fn find_tombstone(
 }
 
 /// Load an item's comments, oldest first — a log is read forwards.
+///
+/// ★ **Ties on the stamp break on the comment's IRI, which is mint order** (ledger #813). A
+/// bulk importer files comments back to back, and two in one millisecond carry one
+/// `dcterms:created`; ordered by the stamp alone they came back in whatever order the
+/// evaluator produced (twenty in one millisecond listed exactly reversed). The id after the
+/// millisecond is the process's mint SEQUENCE plus a per-process nonce (see `mint_id` in
+/// `endpoints.rs`), so ids minted by one process in one millisecond sort in the order they
+/// were minted, and a store has one writer process. ⚠ Two limits, both stated rather than
+/// hidden: ids minted by two processes in one millisecond sort by their nonces, and a
+/// sequence that wraps past `u64::MAX` (once in 2^64 mints) sorts its two sides backwards.
+/// Either way the order is deterministic, which is what a listing owes its reader.
+/// `load_comments_for` breaks the tie the same way.
 pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Comment>> {
     let query = format!(
-        "SELECT ?comment ?body ?author ?created WHERE {{ {} }} ORDER BY ?created",
+        "SELECT ?comment ?body ?author ?created WHERE {{ {} }} ORDER BY ?created ?comment",
         client.in_graph(&format!(
             "?comment <{on_item}> {subject} ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
              OPTIONAL {{ ?comment <{author}> ?author }}",
