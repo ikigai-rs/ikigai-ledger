@@ -36,7 +36,7 @@ mod common;
 use common::*;
 use std::sync::Arc;
 
-use ikigai_conformance::{Fixture, Suite};
+use ikigai_conformance::{Check, Fixture, Suite};
 use ikigai_core::{space_iri, Kernel, Verb};
 use ikigai_ledger::policy::Leverage;
 use ikigai_ledger::SpaceConfig;
@@ -185,6 +185,13 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-doctor")
         .pure("ledger-policy")
         .pure("ledger-lifecycle")
+        // RECOMPUTE (conformance 0.9, ledger #1567 — decided 2026-10-15): the doctor's text
+        // face records when the check ran, so a forced recomputation differs by design.
+        .opt_out_check(
+            "ledger-doctor",
+            Check::Recompute,
+            "the text face records when the check ran",
+        )
         // SPACE-NAME (ledger #987). `space()` takes no configuration and reads nothing while
         // it is built, so it names itself. The two configured constructors bind a host's own
         // policies, lifecycles and claim stamper behind the same IRIs, so they claim nothing
@@ -206,6 +213,17 @@ fn conforms() {
     let report = suite(&a, &b, &c).run_blocking(&kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+    // FAILURES (conformance 0.10) is off unless a suite opts in (`check_failures()`, the
+    // next wave); it is the only check allowed to be skipped.
+    assert_eq!(
+        report
+            .checks
+            .skipped()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>(),
+        ["FAILURES"],
+        "every check but FAILURES runs: {report}"
+    );
     assert_eq!(space_iri("ledger").as_str(), ikigai_ledger::SPACE_ID);
 }
 

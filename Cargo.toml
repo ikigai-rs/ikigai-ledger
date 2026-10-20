@@ -104,12 +104,15 @@ futures = "0.3"
 # build, to show the `http-client` build really does fetch. The same oxigraph the store
 # resolves (it pins 0.5.1 as its floor); default features off so this adds no backend.
 oxigraph = { version = "0.5.1", default-features = false }
-# The module recipe as one test. 0.8.0 is the floor: REQUIRED, which drops each required
+# The module recipe as one test. 0.8.0 brought REQUIRED, which drops each required
 # by-value input and expects a typed refusal, and `Suite::own` (ledger #329, #328); 0.6.0
-# brought SPACE-NAME (ledger #987). ⚠ `"0.8.0"` is a range `>=0.8.0, <0.9.0`: `"0.6.0"`
-# was a CEILING that froze this crate out of 0.7 (VALIDATE) and 0.8 while it still
-# reported green against the old definition of "done". Re-read it as a range when 0.9 lands.
-ikigai-conformance = "0.8.0"
+# brought SPACE-NAME (ledger #987). 0.9.0 added core 0.1.105's contract-shape checks
+# (REQUIRED probes input groups, OUTPUTS honors output_from, PIPELINE's named-only line,
+# VALIDATE refuses a default on a binding) and RECOMPUTE; 0.10.0 added FAILURES, OFF unless
+# a suite opts in (`check_failures()`). ⚠ `"0.10.0"` is a range `>=0.10.0, <0.11.0`: a 0.x
+# caret is a CEILING too, and `"0.8.0"` froze this crate below 0.9 while it still reported
+# green against the old definition of "done". Re-read it as a range when 0.11 lands.
+ikigai-conformance = "0.10.0"
 # The store this ledger is written against, with the durable backend ON — so
 # `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
