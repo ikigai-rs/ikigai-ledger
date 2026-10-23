@@ -117,8 +117,10 @@ ikigai-conformance = "0.10.0"
 # `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
 # `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
-# costs an `oxrocksdb-sys` compile once per cache. The same 0.2.21 security floor as above.
-ikigai-store = { version = "0.2.21", features = ["persistent"] }
+# costs an `oxrocksdb-sys` compile once per cache. 0.2.24 here, above the library's 0.2.21 floor:
+# `tests/conformance.rs` names the inherited store doors exactly, and 0.2.24 adds `store-graph-info`
+# and `store-dump` (ledger #2111). ⚠ `"0.2.24"` is `<0.3.0`.
+ikigai-store = { version = "0.2.24", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
