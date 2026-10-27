@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-ledger"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -24,12 +24,9 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 # and where", states exactly which half is which.
 
 [dependencies]
-# 0.1.93 is the true minimum: it is where a principal becomes a capability scope
-# (`Capability::principal` and `acts_as`, ledger #1077), which a claim records as its holder's
-# principal and a release checks (ledger #1199). (0.1.89 was the floor before: `space_iri`,
-# so `space()` names itself `urn:iki:space:ledger`, ledger #987; and 0.1.80 before that:
-# `Error::Conflict`.) ⚠ `"0.1.93"` is a range `>=0.1.93, <0.2.0`.
-ikigai-core = "0.1.93"
+# 0.2.0 is the streams release (ledger #2261). The old 0.1.93 pin meant
+# >=0.1.93, <0.2.0 under 0.x rules and excluded that release.
+ikigai-core = "0.2.0"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's
@@ -53,9 +50,8 @@ ikigai-core = "0.1.93"
 # Caret alone admits 0.2.21 but does not REQUIRE it: a consumer's lock could keep an older
 # store under a fresh ledger. This crate uses no API newer than 0.2.10. Default features only:
 # the RocksDB backend is the HOST's choice, taken in the host's manifest, and nothing in this
-# library needs it. ⚠ `"0.2.21"` is a range `>=0.2.21, <0.3.0`; when the store reaches 0.3 this
-# line must move or this crate freezes out of it.
-ikigai-store = { version = "0.2.21", default-features = false }
+# library needs it. 0.3.0 carries these fixes onto core 0.2.0 (the streams release).
+ikigai-store = { version = "0.3.0", default-features = false }
 
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
@@ -104,24 +100,20 @@ futures = "0.3"
 # build, to show the `http-client` build really does fetch. The same oxigraph the store
 # resolves (it pins 0.5.1 as its floor); default features off so this adds no backend.
 oxigraph = { version = "0.5.1", default-features = false }
-# The module recipe as one test. 0.8.0 brought REQUIRED, which drops each required
-# by-value input and expects a typed refusal, and `Suite::own` (ledger #329, #328); 0.6.0
-# brought SPACE-NAME (ledger #987). 0.9.0 added core 0.1.105's contract-shape checks
-# (REQUIRED probes input groups, OUTPUTS honors output_from, PIPELINE's named-only line,
-# VALIDATE refuses a default on a binding) and RECOMPUTE; 0.10.0 added FAILURES, OFF unless
-# a suite opts in (`check_failures()`). ⚠ `"0.10.0"` is a range `>=0.10.0, <0.11.0`: a 0.x
-# caret is a CEILING too, and `"0.8.0"` froze this crate below 0.9 while it still reported
-# green against the old definition of "done". Re-read it as a range when 0.11 lands.
-ikigai-conformance = "0.10.0"
+# The module recipe as one test. 0.11.0 uses core 0.2.0 and enables DATATYPES
+# and FAILURES by default; FAILURES probes actions that declare failure classes.
+ikigai-conformance = "0.11.0"
 # The store this ledger is written against, with the durable backend ON — so
 # `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
 # `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
-# costs an `oxrocksdb-sys` compile once per cache. 0.2.24 here, above the library's 0.2.21 floor:
+# costs an `oxrocksdb-sys` compile once per cache. Since store 0.2.24:
 # `tests/conformance.rs` names the inherited store doors exactly, and 0.2.24 adds `store-graph-info`
-# and `store-dump` (ledger #2111). ⚠ `"0.2.24"` is `<0.3.0`.
-ikigai-store = { version = "0.2.24", features = ["persistent"] }
+# and `store-dump` (ledger #2111). 0.3.0 moves the store onto core 0.2.0.
+ikigai-store = { version = "0.3.0", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
-ikigai-vocab = "0.1"
+# 0.2.0 is the streams release (ledger #2261). The old 0.1 pin meant
+# >=0.1.0, <0.2.0 under 0.x rules.
+ikigai-vocab = "0.2.0"
