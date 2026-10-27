@@ -252,6 +252,8 @@ term! {
     CLAIM_PRINCIPAL => "claimPrincipal";
     /// `ledger:awaiting` — who the item waits on after a hand-back (ledger #1199).
     AWAITING => "awaiting";
+    /// `ledger:awaitingAt` — when the latest hand-back decision set or cleared awaiting.
+    AWAITING_AT => "awaitingAt";
 }
 
 /// The `@prefix` header every Turtle face this module emits carries.

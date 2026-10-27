@@ -1,0 +1,36 @@
+# Candidates for AWAITING-STALE. Rust compares age to the requested duration and
+# uses younger candidates to bound the cache at the moment they become stale.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+SELECT ?item ?number ?since ?inferred WHERE {
+  GRAPH $GRAPH {
+    ?item a ledger:Item ; ledger:number ?number ; ledger:status ledger:open .
+    {
+      ?item ledger:awaiting <urn:iki:ledger:awaiting:dispatcher> ; ledger:awaitingAt ?since .
+      BIND(false AS ?inferred)
+    } UNION {
+      # Older markers lack a timestamp. The newest comment is a conservative
+      # lower bound on the wait, never the item's mutable modified timestamp.
+      ?item ledger:awaiting <urn:iki:ledger:awaiting:dispatcher> .
+      FILTER NOT EXISTS { ?item ledger:awaitingAt ?at }
+      ?comment ledger:onItem ?item ; dcterms:created ?since .
+      FILTER NOT EXISTS {
+        ?later ledger:onItem ?item ; dcterms:created ?laterAt .
+        FILTER(?laterAt > ?since || (?laterAt = ?since && STR(?later) > STR(?comment)))
+      }
+      BIND(true AS ?inferred)
+    } UNION {
+      # The pre-marker convention documented in tests/awaiting.rs. Prose is only
+      # a possible hand-back, not an attestation of the caller's role.
+      FILTER NOT EXISTS { ?item ledger:awaiting ?whom }
+      ?comment ledger:onItem ?item ; ledger:body ?body ; dcterms:created ?since .
+      FILTER(STRSTARTS(LCASE(STR(?body)), "evidence:"))
+      FILTER NOT EXISTS {
+        ?later ledger:onItem ?item ; dcterms:created ?laterAt .
+        FILTER(?laterAt > ?since || (?laterAt = ?since && STR(?later) > STR(?comment)))
+      }
+      FILTER NOT EXISTS { ?item ledger:awaitingAt ?answered FILTER(?answered >= ?since) }
+      BIND(true AS ?inferred)
+    }
+  }
+} ORDER BY ?number

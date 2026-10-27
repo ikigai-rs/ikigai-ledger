@@ -698,7 +698,7 @@ impl Endpoint for LifecycleEndpoint {
 
 /// The doctor's stored queries, in the order they run and report. Each is a SELECT over one
 /// ledger's graph with `$GRAPH`, `$IN_FLIGHT`, `$STATES` and `$NOW` filled in as RDF terms.
-const CHECKS: [(&str, &str); 6] = [
+const CHECKS: [(&str, &str); 7] = [
     ("orphaned", include_str!("../doctor/orphaned.rq")),
     ("abandoned", include_str!("../doctor/abandoned.rq")),
     ("lease-expired", include_str!("../doctor/lease_expired.rq")),
@@ -707,6 +707,10 @@ const CHECKS: [(&str, &str); 6] = [
     (
         "awaiting-closed",
         include_str!("../doctor/awaiting_closed.rq"),
+    ),
+    (
+        "awaiting-stale",
+        include_str!("../doctor/awaiting_stale.rq"),
     ),
 ];
 
@@ -766,6 +770,17 @@ impl Endpoint for DoctorEndpoint {
         let want = wanted_face(inv, &STATE_FACES)?;
         let lifecycle = self.lifecycles.for_ledger(client.ledger());
         let now = now_ms(inv)?;
+        let awaiting_age =
+            crate::claim::parse_lease(inv.inline_str("awaiting-age").unwrap_or("24h"))
+                .map_err(|error| match error {
+                    Error::InvalidArgument { detail, .. } => Error::InvalidArgument {
+                        name: "awaiting-age".to_string(),
+                        detail,
+                    },
+                    other => other,
+                })?
+                .millis;
+        let mut awaiting_deadline: Option<u64> = None;
         let ledger = client.ledger().clone();
         let claim = ledger.resource("claim");
         let name_of = |value: &str| match lifecycle.state_by_iri(value) {
@@ -781,6 +796,23 @@ impl Endpoint for DoctorEndpoint {
             // One problem per item: a query row per state, folded.
             let mut by_item: Vec<(String, i64, Vec<sparql::Row>)> = Vec::new();
             for row in rows {
+                if check == "awaiting-stale" {
+                    let Some(since) = row.get("since").and_then(|b| model::millis(&b.value)) else {
+                        continue;
+                    };
+                    // Strictly older than the threshold. Saturation also keeps future
+                    // stamps from becoming overdue through unsigned subtraction.
+                    if now.saturating_sub(since) <= awaiting_age {
+                        if let Some(deadline) = since
+                            .checked_add(awaiting_age)
+                            .and_then(|t| t.checked_add(1))
+                        {
+                            awaiting_deadline =
+                                Some(awaiting_deadline.map_or(deadline, |was| was.min(deadline)));
+                        }
+                        continue;
+                    }
+                }
                 let (Some(item), Some(number)) = (
                     row.get("item").map(|b| b.value.clone()),
                     row.get("number").and_then(|b| b.as_i64()),
@@ -864,6 +896,28 @@ impl Endpoint for DoctorEndpoint {
                             ledger.graph()
                         ),
                     ),
+                    "awaiting-stale" => {
+                        let since = rows[0]
+                            .get("since")
+                            .and_then(|b| model::millis(&b.value))
+                            .expect("candidate timestamp checked above");
+                        let seconds = now.saturating_sub(since) / 1_000;
+                        let waited = format!(
+                            "{}h {}m {}s",
+                            seconds / 3_600,
+                            seconds / 60 % 60,
+                            seconds % 60
+                        );
+                        let inferred = rows[0].get("inferred").is_some_and(|b| b.value == "true");
+                        (
+                            format!("{short} {} its dispatcher for {}{waited} (since {}){}",
+                                if inferred { "appears to have awaited" } else { "has awaited" },
+                                if inferred { "at least " } else { "" },
+                                iso8601(since),
+                                if inferred { "; inferred from the newest comment" } else { "" }),
+                            format!("check the evidence, then close (`sink {} item={number}`) or reject (`sink {} item={number} rejects=true content=<reason>`)", ledger.resource("close"), ledger.resource("comment")),
+                        )
+                    }
                     "awaiting-closed" => (
                         format!(
                             "{short} is closed and still awaiting {}; a close answers a \
@@ -948,13 +1002,15 @@ impl Endpoint for DoctorEndpoint {
 
         // ★ Cached under the store's write threads AND until the earliest running lease ends:
         // that moment adds a `lease-expired` problem with nothing written, and reading the
-        // clock records no dependency. `next` has the same horizon for the same reason.
+        // clock records no dependency. Hand-backs also expire the cache when their wait
+        // exceeds awaiting-age, even if no lease is running.
         let next = client
             .select(&fill(NEXT_EXPIRY, &client, lifecycle, now)?)
             .await?
             .first()
             .and_then(|row| row.get("next"))
             .and_then(|b| model::millis(&b.value));
+        let next = next.into_iter().chain(awaiting_deadline).min();
         let repr = match next {
             None => repr.cacheable(),
             Some(deadline) if deadline > now => {
@@ -981,12 +1037,17 @@ impl Endpoint for DoctorEndpoint {
                      agent's claim and no in-flight state (orphaned), an in-flight state, no claim and no hand-back \
                      awaiting its dispatcher (abandoned), an expired lease, a state the \
                      ledger's lifecycle does not declare, two states, or a closed item still \
-                     awaiting someone (awaiting-closed) — all at once, each with a remedy. Each \
+                     awaiting someone (awaiting-closed), or an open hand-back waiting longer than \
+                     awaiting-age (awaiting-stale) — all at once, each with a remedy. Each \
                      check is a stored SPARQL query over the ledger's graph.",
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)
                 .input(ledger_arg("doctor"))
+                .input(ArgSpec::new("awaiting-age")
+                    .default_value("24h")
+                    .class(v::ext::XSD_STRING)
+                    .summary("Report hand-backs waiting strictly longer than this duration: 30m, 24h, 3d or PT24H. Default 24h; positive, at most 366d. Legacy newest Evidence: comments are reported as inferred hand-backs."))
                 .input(as_arg(&STATE_FACES))
                 .output(PLAIN)
                 .output(JSON),
