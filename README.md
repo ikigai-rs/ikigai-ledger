@@ -100,7 +100,7 @@ lexical forms (`2026-07-21`, `2026-09-16T02:03:13.608Z`) sort correctly as strin
 Every read here is a SPARQL query issued at `urn:iki:store:graph-select`, and every write is
 a SPARQL UPDATE at `urn:iki:store:graph-update` — the **narrow** doors, each naming one
 ledger's graph and gated by a grant for that graph.
-[`ikigai-store`](https://crates.io/crates/ikigai-store) (**0.2.21 or later**: the doors
+[`ikigai-store`](https://crates.io/crates/ikigai-store) (**0.3.0 or later**: the doors
 arrived in 0.2.2, 0.2.10 is where they stopped being network egress (see "SPARQL never
 leaves the process" below), and 0.2.21 is where a query inside every bound stopped planning
 uncancellably for minutes) owns the dataset, the write lock and the golden threads; this
@@ -1209,6 +1209,15 @@ All twenty-two resources are bound, tested, and walked clean by `ikigai-conforma
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### 0.13.0 (2026-10-26): core 0.2.0 streams release (ledger #2261, #2347)
+
+A breaking minor: public API types now come from `ikigai-core` 0.2.0, the streams
+release. The old 0.1 requirements excluded 0.2.0 under Cargo's 0.x compatibility rules.
+Both store dependencies move to 0.3.0, and the vocabulary to 0.2.0, keeping one core
+across normal and development dependencies. Conformance 0.11.0 enables DATATYPES and
+FAILURES by default; the suite now requires every check to run instead of expecting
+FAILURES to be skipped. No endpoint changes or datatype waivers were needed.
 
 ### 0.12.0 (2026-10-13): `labels=` at any length, a goal's children, the hand-back reason (ledger #1452, #1454, #1455)
 

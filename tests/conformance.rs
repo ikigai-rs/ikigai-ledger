@@ -213,16 +213,11 @@ fn conforms() {
     let report = suite(&a, &b, &c).run_blocking(&kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
-    // FAILURES (conformance 0.10) is off unless a suite opts in (`check_failures()`, the
-    // next wave); it is the only check allowed to be skipped.
-    assert_eq!(
-        report
-            .checks
-            .skipped()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>(),
-        ["FAILURES"],
-        "every check but FAILURES runs: {report}"
+    // Conformance 0.11 enables DATATYPES and FAILURES by default. Require every
+    // check to run so a future default change cannot silently reduce coverage.
+    assert!(
+        report.checks.skipped().next().is_none(),
+        "every check runs: {report}"
     );
     assert_eq!(space_iri("ledger").as_str(), ikigai_ledger::SPACE_ID);
 }
