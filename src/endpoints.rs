@@ -871,7 +871,8 @@ fn handback_update(
         v::AWAITING_AT
     ));
     let optional = client.in_graph(&format!(
-        "OPTIONAL {{ <{item}> <{}> ?awaiting }} OPTIONAL {{ <{item}> <{}> ?at }}",
+        "{} OPTIONAL {{ <{item}> <{}> ?awaiting }} OPTIONAL {{ <{item}> <{}> ?at }}",
+        live(item),
         v::AWAITING,
         v::AWAITING_AT
     ));
