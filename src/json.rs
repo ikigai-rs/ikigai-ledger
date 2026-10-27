@@ -453,10 +453,11 @@ pub struct DoctorDocument {
     pub ledger: String,
     /// The lifecycle the checks judged states against.
     pub lifecycle: String,
-    /// The moment the lease check judged expiry at (the kernel's clock).
+    /// The kernel clock time used for lease expiry and hand-back age checks.
     pub checked_at: String,
     /// The checks that ran, in order: `orphaned`, `abandoned`, `lease-expired`,
-    /// `unknown-state`, `two-states`, `awaiting-closed` (since 0.8.0).
+    /// `unknown-state`, `two-states`, `awaiting-closed` (since 0.8.0),
+    /// `awaiting-stale` (since 0.13.1).
     pub checks: Vec<String>,
     /// What they found, check by check; empty is a clean bill.
     pub problems: Vec<Problem>,

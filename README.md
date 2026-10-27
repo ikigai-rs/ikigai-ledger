@@ -880,7 +880,7 @@ doctor: default (lifecycle kata-flight): 2 problem(s)
                  remedy: take it over (`sink urn:iki:ledger:claim item=7 takeover=true from=kata-ship/9fff`), …
 ```
 
-Six checks, each a **stored SPARQL query** (`src/doctor/*.rq`) over the ledger's graph, with the
+Seven checks, each a **stored SPARQL query** (`src/doctor/*.rq`) over the ledger's graph, with the
 ledger's lifecycle filled in as terms:
 
 | check | what it finds |
@@ -891,6 +891,23 @@ ledger's lifecycle filled in as terms:
 | `unknown-state` | a `ledger:state` the ledger's lifecycle does not declare (a hand edit, an import, a ledger whose lifecycle changed) |
 | `two-states` | an item holding more than one state, which only a raw store write can produce |
 | `awaiting-closed` | a closed item still marked `ledger:awaiting` (since 0.8.0): a close clears a hand-back, so only a raw store write leaves one |
+| `awaiting-stale` | an open hand-back waiting strictly longer than `awaiting-age` (default `24h`, since 0.13.1); names its wait and asks the dispatcher to check the evidence, then close or reject |
+
+`source urn:iki:ledger:doctor awaiting-age=3d` changes the wait threshold. It accepts
+positive durations (`30m`, `24h`, `3d`, `PT24H`) up to 366 days, like `lease=`. The age
+comes from `ledger:awaitingAt`, written with the hand-back; ordinary worker comments,
+claim releases and other item edits do not reset it. A new hand-back does. A keyed replay
+does not. The cache expires when a wait crosses the threshold even with no intervening write.
+
+For older awaiting markers without a timestamp, the newest comment's time is a conservative
+lower bound. For an unmarked item, a newest comment beginning `Evidence:` (the old worker
+convention) is a possible hand-back. These findings explicitly say **inferred**: historical
+comments record text and an optional author, not the caller's dispatcher grants, so the
+ledger cannot establish the author's role or recover an unrecorded hand-back flag. A later
+comment suppresses this unmarked fallback. New dispatcher comments, rejections, closes and
+reopens record an `awaitingAt` decision even when clearing the state, preventing earlier
+legacy evidence from resurfacing. The doctor reports candidates for human review and never
+sets an awaiting marker itself.
 
 It is a read under the ledger's read grant, it reports every problem in one answer with a
 remedy for each, and it **never repairs**: what to do about an orphan is a judgment, and a
@@ -1209,6 +1226,15 @@ All twenty-two resources are bound, tested, and walked clean by `ikigai-conforma
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### 0.13.1 (2026-10-27): overdue dispatcher hand-backs (ledger #2395)
+
+- Doctor adds `awaiting-stale`, with `awaiting-age=24h` by default and a remedy to check the
+  evidence, then close or reject. Hand-backs now stamp `ledger:awaitingAt` atomically; cache
+  validity ends when the threshold is crossed.
+- Old awaiting markers and unmarked newest `Evidence:` comments have a conservative,
+  explicitly inferred fallback. Dispatcher answers, rejections, close and reopen record the
+  decision time so older evidence does not reappear after an answer.
 
 ### 0.13.0 (2026-10-26): core 0.2.0 streams release (ledger #2261, #2347)
 

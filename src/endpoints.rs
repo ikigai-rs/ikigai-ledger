@@ -861,23 +861,35 @@ fn handback_update(
     item: &str,
     handback: Handback,
     guard: &str,
+    now: u64,
 ) -> String {
-    let was = client.in_graph(&format!("<{item}> <{}> ?awaiting", v::AWAITING));
+    // Keep the latest decision even after clearing: legacy evidence before an answer
+    // must not reappear after a close/reopen or a rejection.
+    let was = client.in_graph(&format!(
+        "<{item}> <{}> ?awaiting . <{item}> <{}> ?at",
+        v::AWAITING,
+        v::AWAITING_AT
+    ));
+    let optional = client.in_graph(&format!(
+        "OPTIONAL {{ <{item}> <{}> ?awaiting }} OPTIONAL {{ <{item}> <{}> ?at }}",
+        v::AWAITING,
+        v::AWAITING_AT
+    ));
+    let stamp = format!("<{item}> <{}> {}", v::AWAITING_AT, datetime(now));
     match handback {
         Handback::Unchanged => String::new(),
         Handback::Set => format!(
-            "DELETE {{ {was} }} INSERT {{ {} }} WHERE {{ {} {guard} }}",
+            "DELETE {{ {was} }} INSERT {{ {} }} WHERE {{ {optional} {guard} }}",
             client.in_graph(&format!(
-                "<{item}> <{}> <{}>",
+                "<{item}> <{}> <{}> . {stamp}",
                 v::AWAITING,
                 v::iri::AWAITING_DISPATCHER
             )),
-            client.in_graph(&format!(
-                "OPTIONAL {{ <{item}> <{}> ?awaiting }}",
-                v::AWAITING
-            )),
         ),
-        Handback::Clear => format!("DELETE {{ {was} }} WHERE {{ {was} {guard} }}"),
+        Handback::Clear => format!(
+            "DELETE {{ {was} }} INSERT {{ {} }} WHERE {{ {optional} {guard} }}",
+            client.in_graph(&stamp),
+        ),
     }
 }
 
@@ -927,7 +939,7 @@ async fn write_keyed_comment(
             &batch(&[
                 insert_on_live(client, &[item], &triples),
                 touch(client, item, now),
-                handback_update(client, item, handback, ""),
+                handback_update(client, item, handback, "", now),
             ]),
         )
         .await?;
@@ -974,7 +986,7 @@ async fn write_keyed_comment(
                     v::ext::MODIFIED
                 )),
             ),
-            handback_update(client, item, handback, &free),
+            handback_update(client, item, handback, &free, now),
             format!(
                 "INSERT {{ {} }} WHERE {{ {free} }}",
                 client.in_graph(&triples)
@@ -2991,6 +3003,12 @@ impl Endpoint for CloseEndpoint {
         );
         // And a hand-back is answered: closed work awaits nobody (ledger #1199).
         ops.push(retract(&client, &item.iri, v::AWAITING));
+        ops.push(replace_one(
+            &client,
+            &item.iri,
+            v::AWAITING_AT,
+            &datetime(now),
+        ));
         guarded_update(&client, &[&item.iri], &batch(&ops)).await?;
         let author = inv.inline_str("author").ok();
         let released = item.claimed_by.clone();
@@ -3104,6 +3122,7 @@ impl Endpoint for ReopenEndpoint {
                 // A reopened item starts from "not awaiting": whatever hand-back preceded
                 // the close was answered by it (ledger #1199).
                 retract(&client, &item.iri, v::AWAITING),
+                replace_one(&client, &item.iri, v::AWAITING_AT, &datetime(now)),
                 touch(&client, &item.iri, now),
             ]),
         )

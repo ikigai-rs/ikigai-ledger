@@ -481,3 +481,9 @@ ledger:awaiting a rdf:Property ;
 <urn:iki:ledger:awaiting:dispatcher>
     rdfs:label "dispatcher" ;
     rdfs:comment "The value of ledger:awaiting for an item handed back to whoever dispatched it, to check the evidence and close it, or reject it." .
+
+ledger:awaitingAt a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "awaiting decision at" ;
+    rdfs:comment "The kernel time of the latest hand-back decision (since 0.13.1). Written atomically with handback=true, rejects=true, a dispatcher comment, close or reopen. While awaiting the dispatcher, this is when the hand-back set that state; ordinary worker comments do not reset it. Retained when cleared so the doctor does not mistake older legacy Evidence: comments for unanswered hand-backs." .

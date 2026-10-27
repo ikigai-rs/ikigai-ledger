@@ -627,7 +627,8 @@ fn a_clean_ledger_has_a_clean_bill() {
             "lease-expired",
             "unknown-state",
             "two-states",
-            "awaiting-closed"
+            "awaiting-closed",
+            "awaiting-stale"
         ])
     );
     let plain = source(&kernel, "urn:iki:ledger:doctor", &[]);
@@ -799,4 +800,276 @@ fn the_doctor_needs_only_a_read_grant() {
         graph_read("default"),
     ]);
     assert!(try_as(&kernel, &reader, Verb::Source, "urn:iki:ledger:doctor", &[]).is_ok());
+}
+
+/// Regression for #2395: the doctor used to report a three-day hand-back as clean.
+#[test]
+fn the_doctor_reports_a_stale_handback_but_not_a_recent_one() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Old hand-back", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:comment",
+        &[
+            ("item", "1"),
+            ("content", "Evidence: fix ready"),
+            ("handback", "true"),
+        ],
+    );
+    clock.advance(71 * 60 * MINUTE);
+    append(&kernel, "Recent hand-back", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:comment",
+        &[
+            ("item", "2"),
+            ("content", "Evidence: recent fix"),
+            ("handback", "true"),
+        ],
+    );
+    clock.advance(60 * MINUTE);
+    assert_eq!(findings(&kernel), [("awaiting-stale".to_string(), 1)]);
+}
+
+#[test]
+fn an_unmarked_legacy_evidence_comment_is_not_a_clean_bill() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Legacy hand-back", &[]);
+    worker_comment(
+        &kernel,
+        &[
+            ("item", "1"),
+            ("content", "Evidence: https://example.test/fix CI green"),
+            ("author", "worker-1"),
+        ],
+    );
+    clock.advance(3 * 24 * 60 * MINUTE);
+    assert_eq!(findings(&kernel), [("awaiting-stale".to_string(), 1)]);
+}
+
+fn worker_comment(kernel: &Kernel, args: &[(&str, &str)]) {
+    let grant = Capability::scoped([
+        "urn:cap:ledger:read:default".to_string(),
+        "urn:cap:ledger:comment:default".to_string(),
+        graph_read("default"),
+        graph_write("default"),
+    ]);
+    try_as(kernel, &grant, Verb::Sink, "urn:iki:ledger:comment", args).unwrap();
+}
+
+#[test]
+fn worker_chatter_does_not_reset_the_handback_clock_but_a_new_handback_does() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Waiting", &[]);
+    worker_comment(
+        &kernel,
+        &[
+            ("item", "1"),
+            ("content", "Fix ready"),
+            ("handback", "true"),
+        ],
+    );
+    clock.advance(3 * 24 * 60 * MINUTE);
+    worker_comment(&kernel, &[("item", "1"), ("content", "Still waiting")]);
+    let report = doctor(&kernel);
+    assert_eq!(findings(&kernel), [("awaiting-stale".to_string(), 1)]);
+    assert!(report["problems"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("72h"));
+    assert!(report["problems"][0]["remedy"]
+        .as_str()
+        .unwrap()
+        .contains("evidence"));
+    assert!(source(&kernel, "urn:iki:ledger:doctor", &[]).contains("awaiting-stale"));
+    worker_comment(
+        &kernel,
+        &[
+            ("item", "1"),
+            ("content", "Updated fix ready"),
+            ("handback", "true"),
+        ],
+    );
+    assert!(findings(&kernel).is_empty());
+}
+
+#[test]
+fn a_cached_doctor_expires_when_a_handback_becomes_stale() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Waiting", &[]);
+    worker_comment(
+        &kernel,
+        &[
+            ("item", "1"),
+            ("content", "Fix ready"),
+            ("handback", "true"),
+        ],
+    );
+    assert!(findings(&kernel).is_empty());
+    clock.advance(24 * 60 * MINUTE);
+    // Strictly longer than the threshold, not equal to it.
+    assert!(findings(&kernel).is_empty());
+    clock.advance(1);
+    assert_eq!(findings(&kernel), [("awaiting-stale".to_string(), 1)]);
+}
+
+#[test]
+fn the_doctor_accepts_a_duration_threshold_and_refuses_invalid_values() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Waiting", &[]);
+    worker_comment(
+        &kernel,
+        &[
+            ("item", "1"),
+            ("content", "Fix ready"),
+            ("handback", "true"),
+        ],
+    );
+    clock.advance(60 * MINUTE);
+    assert!(findings(&kernel).is_empty());
+    let report: serde_json::Value = serde_json::from_str(&source(
+        &kernel,
+        "urn:iki:ledger:doctor",
+        &[("as", "application/json"), ("awaiting-age", "30m")],
+    ))
+    .unwrap();
+    assert_eq!(report["problems"][0]["check"], "awaiting-stale");
+    for value in ["", "yesterday", "-1h", "18446744073709551615h"] {
+        assert!(
+            try_verb(
+                &kernel,
+                Verb::Source,
+                "urn:iki:ledger:doctor",
+                &[("awaiting-age", value)]
+            )
+            .is_err(),
+            "accepted {value:?}"
+        );
+    }
+}
+
+#[test]
+fn answered_handbacks_do_not_reappear_as_legacy_findings() {
+    for action in ["reply", "reject", "close-reopen"] {
+        let (kernel, clock) = hand_kernel();
+        append(&kernel, "Legacy", &[]);
+        worker_comment(&kernel, &[("item", "1"), ("content", "Evidence: old fix")]);
+        clock.advance(3 * 24 * 60 * MINUTE);
+        match action {
+            "reply" => {
+                sink(
+                    &kernel,
+                    "urn:iki:ledger:comment",
+                    &[
+                        ("item", "1"),
+                        ("content", "Evidence: checked; needs more work"),
+                    ],
+                );
+            }
+            "reject" => {
+                worker_comment(
+                    &kernel,
+                    &[
+                        ("item", "1"),
+                        ("content", "Evidence: withdrawn"),
+                        ("rejects", "true"),
+                    ],
+                );
+            }
+            _ => {
+                sink(&kernel, "urn:iki:ledger:close", &[("item", "1")]);
+                sink(&kernel, "urn:iki:ledger:reopen", &[("item", "1")]);
+            }
+        }
+        clock.advance(3 * 24 * 60 * MINUTE);
+        assert!(findings(&kernel).is_empty(), "{action}");
+    }
+}
+
+#[test]
+fn legacy_detection_only_uses_the_newest_comment() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Legacy", &[]);
+    worker_comment(&kernel, &[("item", "1"), ("content", "Evidence: old fix")]);
+    clock.advance(1);
+    worker_comment(&kernel, &[("item", "1"), ("content", "Still working")]);
+    clock.advance(3 * 24 * 60 * MINUTE);
+    assert!(findings(&kernel).is_empty());
+}
+
+#[test]
+fn a_keyed_replay_does_not_reset_the_wait() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Waiting", &[]);
+    let args = [
+        ("item", "1"),
+        ("content", "Ready"),
+        ("handback", "true"),
+        ("key", "handoff:1"),
+    ];
+    worker_comment(&kernel, &args);
+    clock.advance(3 * 24 * 60 * MINUTE);
+    worker_comment(&kernel, &args);
+    assert_eq!(findings(&kernel), [("awaiting-stale".to_string(), 1)]);
+}
+
+#[test]
+fn pre_timestamp_awaiting_items_use_the_latest_comment_as_a_lower_bound() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Old marker", &[]);
+    worker_comment(&kernel, &[("item", "1"), ("content", "Ready for review")]);
+    let iri = item_json(&kernel, 1)["item"]["iri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    raw(&kernel, &format!("<{iri}> <https://ikigai-rs.dev/ns/ledger#awaiting> <urn:iki:ledger:awaiting:dispatcher> ."));
+    clock.advance(3 * 24 * 60 * MINUTE);
+    assert_eq!(findings(&kernel), [("awaiting-stale".to_string(), 1)]);
+    assert!(doctor(&kernel)["problems"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("inferred"));
+}
+
+#[test]
+fn stale_handbacks_are_scoped_to_the_requested_ledger() {
+    let (kernel, clock) = hand_kernel();
+    sink(
+        &kernel,
+        "urn:iki:ledger:other:append",
+        &[("content", "Other")],
+    );
+    sink(
+        &kernel,
+        "urn:iki:ledger:other:comment",
+        &[("item", "1"), ("content", "Ready"), ("handback", "true")],
+    );
+    clock.advance(3 * 24 * 60 * MINUTE);
+    assert!(findings(&kernel).is_empty());
+    let report: serde_json::Value = serde_json::from_str(&source(
+        &kernel,
+        "urn:iki:ledger:other:doctor",
+        &[("as", "application/json")],
+    ))
+    .unwrap();
+    assert_eq!(report["problems"][0]["check"], "awaiting-stale");
+    assert_eq!(report["problems"][0]["item"]["display"], "other#1");
+}
+
+#[test]
+fn a_new_legacy_handback_after_an_answer_is_still_detected() {
+    let (kernel, clock) = hand_kernel();
+    append(&kernel, "Legacy", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:comment",
+        &[("item", "1"), ("content", "Please revise")],
+    );
+    clock.advance(1);
+    worker_comment(
+        &kernel,
+        &[("item", "1"), ("content", "Evidence: revised fix")],
+    );
+    clock.advance(3 * 24 * 60 * MINUTE);
+    assert_eq!(findings(&kernel), [("awaiting-stale".to_string(), 1)]);
 }
