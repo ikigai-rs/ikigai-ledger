@@ -401,3 +401,168 @@ fn shared_properties_do_not_infer_items_comments_or_ledgers() {
         );
     }
 }
+
+#[test]
+fn bulk_backfill_dates_every_legacy_close_once() {
+    let (k, clock) = dated_kernel();
+    let items: Vec<_> = (0..4)
+        .map(|n| append_iri(&k, &format!("Legacy {n}"), &[]))
+        .collect();
+    let open = append_iri(&k, "Still open", &[]);
+    day(&clock, 1);
+    for item in &items {
+        legacy_close(&k, item);
+        sink(&k, item, &[("content", "Updated legacy")]);
+    }
+    sink(
+        &k,
+        "urn:iki:ledger:backfill-closed-at",
+        &[("content", &items[0])],
+    );
+    let preserved = close_time(&k, &items[0]);
+    let updated = select(&k, "SELECT ?item ?at WHERE { GRAPH <urn:iki:ledger:graph:default> { ?item <http://purl.org/dc/terms/modified> ?at } } ORDER BY ?item");
+    assert!(try_verb(&k, Verb::Source, "urn:iki:ledger:counts", &[]).is_err());
+    let reader = Capability::scoped([
+        "urn:cap:ledger:read:default".to_string(),
+        graph_read("default"),
+        graph_write("default"),
+    ]);
+    assert!(matches!(
+        try_as(
+            &k,
+            &reader,
+            Verb::Sink,
+            "urn:iki:ledger:backfill-closed-at",
+            &[("content", "all")]
+        ),
+        Err(ikigai_core::Error::Denied(_))
+    ));
+    assert_eq!(
+        sink(
+            &k,
+            "urn:iki:ledger:backfill-closed-at",
+            &[("content", "all")]
+        ),
+        "backfilled 3 items\n"
+    );
+    for item in &items {
+        let at = close_time(&k, item);
+        assert!(at.contains("2026-09-16") && at.contains("backfill"), "{at}");
+    }
+    assert_eq!(close_time(&k, &items[0]), preserved);
+    assert_eq!(select(&k, "SELECT ?item ?at WHERE { GRAPH <urn:iki:ledger:graph:default> { ?item <http://purl.org/dc/terms/modified> ?at } } ORDER BY ?item"), updated);
+    assert!(!close_time(&k, &open).contains("backfill"));
+    assert_eq!(
+        source(&k, "urn:iki:ledger:counts", &[]),
+        "date,open,closed\n2026-09-15,5,0\n2026-09-16,1,4\n"
+    );
+    let before = select(&k, "SELECT ?s ?p ?o WHERE { GRAPH <urn:iki:ledger:graph:default> { ?s ?p ?o } } ORDER BY ?s ?p ?o");
+    assert_eq!(
+        sink(
+            &k,
+            "urn:iki:ledger:backfill-closed-at",
+            &[("content", "all")]
+        ),
+        "backfilled 0 items (unchanged)\n"
+    );
+    assert_eq!(select(&k, "SELECT ?s ?p ?o WHERE { GRAPH <urn:iki:ledger:graph:default> { ?s ?p ?o } } ORDER BY ?s ?p ?o"), before);
+    day(&clock, 2);
+    let ttl = source(&k, "urn:iki:ledger:counts", &[("as", "text/turtle")]);
+    let quads: Vec<_> = oxrdfio::RdfParser::from_format(oxrdfio::RdfFormat::Turtle)
+        .for_reader(ttl.as_bytes())
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for date in ["2026-09-15", "2026-09-16", "2026-09-17"] {
+        assert_eq!(
+            quads.iter().any(|q| q.subject.to_string()
+                == format!("<urn:iki:ledger:default:counts:{date}>")
+                && q.predicate.as_str().ends_with("#closedAtSource")),
+            date != "2026-09-17"
+        );
+    }
+}
+
+#[test]
+fn bulk_backfill_is_ledger_local_and_rejects_ambiguous_options() {
+    let k = kernel();
+    let item = append_iri(&k, "Default legacy", &[]);
+    legacy_close(&k, &item);
+    sink(
+        &k,
+        "urn:iki:ledger:acme:append",
+        &[("content", "Other legacy")],
+    );
+    sink(&k, "urn:iki:ledger:acme:close", &[("item", "acme#1")]);
+    sink(&k, "urn:iki:store:graph-update", &[("graph", "urn:iki:ledger:graph:acme"), ("content", "DELETE WHERE { GRAPH <urn:iki:ledger:graph:acme> { ?item <https://ikigai-rs.dev/ns/ledger#closedAt> ?at } }")]);
+    assert!(try_verb(
+        &k,
+        Verb::Sink,
+        "urn:iki:ledger:backfill-closed-at",
+        &[("content", "all"), ("comment", "urn:test:comment")]
+    )
+    .is_err());
+    assert_eq!(
+        sink(
+            &k,
+            "urn:iki:ledger:acme:backfill-closed-at",
+            &[("content", "all")]
+        ),
+        "backfilled 1 items\n"
+    );
+    assert!(!close_time(&k, &item).contains("backfill"));
+    assert!(try_verb(&k, Verb::Source, "urn:iki:ledger:counts", &[]).is_err());
+    assert!(source(&k, "urn:iki:ledger:acme:counts", &[]).ends_with(",0,1\n"));
+}
+
+#[test]
+fn bulk_backfill_validates_all_dates_before_writing() {
+    let k = kernel();
+    let a = append_iri(&k, "Valid legacy", &[]);
+    let b = append_iri(&k, "Invalid legacy", &[]);
+    legacy_close(&k, &a);
+    legacy_close(&k, &b);
+    update(&k, &format!("DELETE WHERE {{ GRAPH <urn:iki:ledger:graph:default> {{ <{b}> <http://purl.org/dc/terms/modified> ?at }} }}"));
+    assert!(try_verb(
+        &k,
+        Verb::Sink,
+        "urn:iki:ledger:backfill-closed-at",
+        &[("content", "all")]
+    )
+    .is_err());
+    assert!(!close_time(&k, &a).contains("backfill"));
+    assert!(!close_time(&k, &b).contains("backfill"));
+}
+
+#[test]
+fn bulk_backfill_handles_a_2400_item_ledger() {
+    let k = kernel();
+    let mut triples = String::new();
+    for n in 1..=2400 {
+        triples.push_str(&format!("<urn:iki:ledger:default:item:legacy-{n}> a <https://ikigai-rs.dev/ns/ledger#Item> ; <https://ikigai-rs.dev/ns/ledger#status> <https://ikigai-rs.dev/ns/ledger#closed> ; <http://purl.org/dc/terms/created> \"2026-09-15T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> ; <http://purl.org/dc/terms/modified> \"2026-09-15T01:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .\n"));
+    }
+    update(
+        &k,
+        &format!("INSERT DATA {{ GRAPH <urn:iki:ledger:graph:default> {{ {triples} }} }}"),
+    );
+    assert!(try_verb(&k, Verb::Source, "urn:iki:ledger:counts", &[]).is_err());
+    assert_eq!(
+        sink(
+            &k,
+            "urn:iki:ledger:backfill-closed-at",
+            &[("content", "all")]
+        ),
+        "backfilled 2400 items\n"
+    );
+    assert_eq!(
+        source(&k, "urn:iki:ledger:counts", &[]),
+        "date,open,closed\n2026-09-15,0,2400\n"
+    );
+    assert_eq!(
+        sink(
+            &k,
+            "urn:iki:ledger:backfill-closed-at",
+            &[("content", "all")]
+        ),
+        "backfilled 0 items (unchanged)\n"
+    );
+}

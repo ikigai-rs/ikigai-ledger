@@ -78,8 +78,25 @@ current UTC date range; it does not scan comments or guess close dates on a read
 ### Explicit one-time backfill (never at startup)
 
 Old closed items have no reliable close timestamp. Counts refuses them until the operator
-runs `backfill-closed-at` for each one, under `urn:cap:ledger:write:{name}` and that
-ledger's store graph read/write grants. Review the item's comments first. When its close
+runs `backfill-closed-at`, under `urn:cap:ledger:write:{name}` and that
+ledger's store graph read/write grants. To date every undated closed item in one command:
+
+```text
+$ sink urn:iki:ledger:backfill-closed-at <<< all
+$ sink urn:iki:ledger:acme:backfill-closed-at <<< all
+```
+
+`content=all` uses each item's `updated` (`dcterms:modified`) as its estimated
+`closedAt`, marks the item and close event `closedAtSource "backfill"`, and reports
+`backfilled N items`. A second run reports `backfilled 0 items (unchanged)` and writes
+nothing. Existing close dates (including dates selected by the per-item command) and
+open items are left alone; `updated` is never changed. The command validates all candidate
+timestamps before writing; missing, unreadable, multiple or pre-filing dates abort the
+command without changes. Items concurrently edited, dated, reopened or deleted are
+skipped by the write guard and excluded from the reported count; rerun to pick up
+remaining undated closes. A `comment` argument with `all` is refused.
+
+For a reviewed per-item estimate, inspect the item's comments first. When its close
 posted a comment, supply **that close's own comment IRI**, not a later comment:
 
 ```text
@@ -87,10 +104,12 @@ $ sink urn:iki:ledger:backfill-closed-at comment=urn:iki:ledger:default:comment:
 $ sink urn:iki:ledger:acme:backfill-closed-at <<< 'acme#7'
 ```
 
-The second form is for a close with no comment: it uses the item's `updated`
+The per-item form without `comment` is for a close with no comment: it uses the item's `updated`
 (`dcterms:modified`). Legacy comments have no originating-action marker, so the command
 cannot identify the close's own comment automatically; the operator supplies that
-association. It checks that the supplied comment belongs to the item and has a readable
+association. There is no `prefer=last-comment` mode: the newest comment can be an
+unrelated note or edit after the close, so that heuristic cannot identify a closing
+comment reliably. It checks that the supplied comment belongs to the item and has a readable
 time. Both paths write `ledger:closedAtSource "backfill"` on the item and its close event,
 leave `updated` untouched, and preserve any existing `closedAt` on reruns. Open items,
 invalid timestamps, and comments on another item are refused. No migration runs merely
@@ -210,7 +229,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | --- | --- | --- | --- |
 | `…:{ledger}:items` | Source | the list, filtered | `read:{ledger}` |
 | `…:{ledger}:counts` | Source | daily open/closed history, CSV or Turtle | `read:{ledger}` |
-| `…:{ledger}:backfill-closed-at` | Sink | explicitly migrate one legacy close time | `write:{ledger}` |
+| `…:{ledger}:backfill-closed-at` | Sink | explicitly migrate one or all legacy close times | `write:{ledger}` |
 | `…:{ledger}:count` | Source | how many items the same filter admits, and nothing else | `read:{ledger}` |
 | `…:{ledger}:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` of `{ledger}` |
 | `…:{ledger}:append` | Sink | file a new item | `write:{ledger}` |
@@ -1301,7 +1320,8 @@ Minor release: additive vocabulary terms, dated status events, `counts` CSV/Turt
 resources, and the explicit `backfill-closed-at` migration command. Reopen removes the
 item's current close timestamp while preserving history in events. New bare resource
 names `counts` and `backfill-closed-at` are reserved ledger names. No publication is part
-of this change.
+of this change. The ledger #2602 follow-up adds `content=all` to migrate every
+undated closed item from `updated` in one command, with a count and an idempotent rerun.
 
 ### 0.13.1 (2026-10-27): overdue dispatcher hand-backs (ledger #2395)
 
