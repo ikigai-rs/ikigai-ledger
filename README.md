@@ -94,7 +94,9 @@ open items are left alone; `updated` is never changed. The command validates all
 timestamps before writing; missing, unreadable, multiple or pre-filing dates abort the
 command without changes. Items concurrently edited, dated, reopened or deleted are
 skipped by the write guard and excluded from the reported count; rerun to pick up
-remaining undated closes. A `comment` argument with `all` is refused.
+remaining undated closes. Writes use bounded batches to stay below the store's SPARQL
+size limit; if a later store request fails, earlier batches remain dated and rerunning
+safely completes the migration. A `comment` argument with `all` is refused.
 
 For a reviewed per-item estimate, inspect the item's comments first. When its close
 posted a comment, supply **that close's own comment IRI**, not a later comment:

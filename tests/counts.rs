@@ -534,16 +534,19 @@ fn bulk_backfill_validates_all_dates_before_writing() {
 }
 
 #[test]
-fn bulk_backfill_handles_a_2400_item_ledger() {
+fn bulk_backfill_handles_a_5000_item_ledger() {
     let k = kernel();
     let mut triples = String::new();
-    for n in 1..=2400 {
-        triples.push_str(&format!("<urn:iki:ledger:default:item:legacy-{n}> a <https://ikigai-rs.dev/ns/ledger#Item> ; <https://ikigai-rs.dev/ns/ledger#status> <https://ikigai-rs.dev/ns/ledger#closed> ; <http://purl.org/dc/terms/created> \"2026-09-15T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> ; <http://purl.org/dc/terms/modified> \"2026-09-15T01:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .\n"));
+    for n in 1..=5000 {
+        triples.push_str(&format!("<urn:iki:ledger:default:item:bulk{n:06}0000000000000> a <https://ikigai-rs.dev/ns/ledger#Item> ; <https://ikigai-rs.dev/ns/ledger#status> <https://ikigai-rs.dev/ns/ledger#closed> ; <http://purl.org/dc/terms/created> \"2026-09-15T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> ; <http://purl.org/dc/terms/modified> \"2026-09-15T01:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .\n"));
+        if n % 400 == 0 || n == 5000 {
+            update(
+                &k,
+                &format!("INSERT DATA {{ GRAPH <urn:iki:ledger:graph:default> {{ {triples} }} }}"),
+            );
+            triples.clear();
+        }
     }
-    update(
-        &k,
-        &format!("INSERT DATA {{ GRAPH <urn:iki:ledger:graph:default> {{ {triples} }} }}"),
-    );
     assert!(try_verb(&k, Verb::Source, "urn:iki:ledger:counts", &[]).is_err());
     assert_eq!(
         sink(
@@ -551,11 +554,11 @@ fn bulk_backfill_handles_a_2400_item_ledger() {
             "urn:iki:ledger:backfill-closed-at",
             &[("content", "all")]
         ),
-        "backfilled 2400 items\n"
+        "backfilled 5000 items\n"
     );
     assert_eq!(
         source(&k, "urn:iki:ledger:counts", &[]),
-        "date,open,closed\n2026-09-15,0,2400\n"
+        "date,open,closed\n2026-09-15,0,5000\n"
     );
     assert_eq!(
         sink(

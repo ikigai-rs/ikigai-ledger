@@ -272,8 +272,8 @@ impl Endpoint for CountsEndpoint {
     }
 }
 
-/// Validate the whole snapshot before writing, then migrate it in one guarded store
-/// update. VALUES bounds the write to the reviewed snapshot; a concurrent edit, close,
+/// Validate the whole snapshot before writing, then migrate it in bounded guarded store
+/// updates. VALUES bounds the write to the reviewed snapshot; a concurrent edit, close,
 /// reopen or delete cannot make us stamp a different state of an item.
 async fn backfill_all(
     client: &StoreClient<'_, '_>,
@@ -305,7 +305,7 @@ async fn backfill_all(
     }
     let suffix = format!(":status:backfill:{}", mint_id(now_ms(inv)?)?);
     let mut seen = BTreeSet::new();
-    let mut values = String::new();
+    let mut values = Vec::new();
     for row in rows {
         let item = &row["item"].value;
         let at = row.get("at").and_then(|b| model::millis(&b.value));
@@ -318,7 +318,7 @@ async fn backfill_all(
         if !seen.insert(item.clone()) || at < filed {
             return Err(Error::Endpoint(format!("backfill refuses multiple timestamps or updated before filing for {item}; nothing changed")));
         }
-        values.push_str(&format!(
+        values.push(format!(
             "({} {} {} {} <{item}{suffix}>)\n",
             row["item"].term("item")?,
             datetime(at),
@@ -351,7 +351,12 @@ async fn backfill_all(
         v::ext::CREATED,
         v::CLOSED_AT
     ));
-    client.update(&format!("INSERT {{ {triples} }} WHERE {{ VALUES (?item ?at ?updated ?created ?event) {{ {values} }} {guard} }}")).await?;
+    // Keep each request below the store's SPARQL byte bound, just as bulk item
+    // reads do. This is still one operator Sink, with no per-item sub-invocations.
+    for chunk in values.chunks(400) {
+        let values = chunk.concat();
+        client.update(&format!("INSERT {{ {triples} }} WHERE {{ VALUES (?item ?at ?updated ?created ?event) {{ {values} }} {guard} }}")).await?;
+    }
     // Count this invocation's events, rather than claiming every candidate was written
     // when another writer may have changed an item between our read and update.
     let dated = client
