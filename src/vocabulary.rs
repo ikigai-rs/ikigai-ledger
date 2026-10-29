@@ -96,6 +96,21 @@ macro_rules! term {
 }
 
 term! {
+    /// `ledger:eventSequence`
+    EVENT_SEQUENCE => "eventSequence";
+    /// `ledger:closedAt`
+    CLOSED_AT => "closedAt";
+    /// `ledger:closedAtSource`
+    CLOSED_AT_SOURCE => "closedAtSource";
+    /// `ledger:StatusEvent`
+    STATUS_EVENT_CLASS => "StatusEvent";
+    /// `ledger:DailyCounts`
+    DAILY_COUNTS_CLASS => "DailyCounts";
+    /// `ledger:date`
+    DATE => "date";
+    /// `ledger:closedCount`
+    CLOSED_COUNT => "closedCount";
+
     /// `ledger:Item`
     ITEM_CLASS => "Item";
     /// `ledger:Comment`

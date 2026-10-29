@@ -287,6 +287,7 @@ const READ_FACES: [&str; 3] = [PLAIN, TURTLE, JSON];
 /// answer is a receipt, not a graph, and the graph is one read away.
 const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 
+mod counts;
 mod flight;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
@@ -396,6 +397,11 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
         )
         .bind(LedgerGrammar::action("items"), ItemsEndpoint)
         .bind(LedgerGrammar::action("count"), CountEndpoint)
+        .bind(LedgerGrammar::action("counts"), counts::CountsEndpoint)
+        .bind(
+            LedgerGrammar::action("backfill-closed-at"),
+            counts::BackfillEndpoint,
+        )
         // ⚠ The item PARTS go ahead of `item:{id}`, whose `{id}` takes the rest of the IRI:
         // bound after it, `item:12:state` would be read as an item whose id is `12:state`.
         .bind(
@@ -2997,6 +3003,14 @@ impl Endpoint for CloseEndpoint {
             replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
             touch(&client, &item.iri, now),
         ];
+        // Editing the verdict of an already closed item must not move its close time.
+        if item.open {
+            ops.extend([
+                replace_one(&client, &item.iri, v::CLOSED_AT, &datetime(now)),
+                retract(&client, &item.iri, v::CLOSED_AT_SOURCE),
+                counts::status_event(&client, &item.iri, v::CLOSED, now)?,
+            ]);
+        }
         ops.extend(
             CLAIM_FIELDS
                 .iter()
@@ -3118,8 +3132,12 @@ impl Endpoint for ReopenEndpoint {
             &client,
             &[&item.iri],
             &batch(&[
+                counts::preserve_close(&client, &item.iri, now)?,
                 replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::OPEN)),
                 retract(&client, &item.iri, v::CLOSED_REASON),
+                retract(&client, &item.iri, v::CLOSED_AT),
+                retract(&client, &item.iri, v::CLOSED_AT_SOURCE),
+                counts::status_event(&client, &item.iri, v::OPEN, now)?,
                 // A reopened item starts from "not awaiting": whatever hand-back preceded
                 // the close was answered by it (ledger #1199).
                 retract(&client, &item.iri, v::AWAITING),

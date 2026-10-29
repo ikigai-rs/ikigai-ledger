@@ -40,6 +40,72 @@ acme                          1 open      1 total  urn:iki:ledger:graph:acme
 2 ledger(s)
 ```
 
+## Daily counts and legacy close times
+
+`urn:iki:ledger:{name}:counts` (bare `urn:iki:ledger:counts` means `default`)
+serves `text/csv` by default and `text/turtle` with `as=text/turtle`:
+
+```text
+$ source urn:iki:ledger:acme:counts days=3
+date,open,closed
+2026-10-27,12,5
+2026-10-28,10,8
+2026-10-29,11,8
+```
+
+Each UTC date runs from the first filed item
+through today; `days=N` keeps only the most recent N calendar days, for positive N.
+An empty ledger returns only the CSV header (an empty Turtle graph). A same-day close
+counts as closed that day. `all = open + closed`: only items filed by that day count.
+Today's row is provisional. Turtle has one `ledger:DailyCounts` observation per day at
+`urn:iki:ledger:{name}:counts:YYYY-MM-DD`, with `ledger:date`, `ledger:openCount` and
+`ledger:closedCount`, and no blank nodes.
+
+Close now records `ledger:closedAt` from the kernel clock beside its reason. Editing an
+already closed verdict preserves the original close time. Reopen removes the item's
+`closedAt` and `closedAtSource`; dated `ledger:StatusEvent` nodes retain close/reopen
+history, including the backfill provenance. Events carry `onItem`, `status`,
+`dcterms:created` and `eventSequence` (ordering transitions at the same millisecond).
+Deleting/archiving/purging an item includes its events. The series describes the current
+ledger graph: deleted items leave the series, just as they leave the ledger's listing.
+
+Counts requires `urn:cap:ledger:read:{name}` and the same graph-read grant as `items`.
+Reads are cached under the store's write threads; a write invalidates the answer and
+the next read recomputes it. The cache also expires at the next UTC midnight, so an idle
+ledger still extends through today. This is the graph's dated history projected onto the
+current UTC date range; it does not scan comments or guess close dates on a read.
+
+### Explicit one-time backfill (never at startup)
+
+Old closed items have no reliable close timestamp. Counts refuses them until the operator
+runs `backfill-closed-at` for each one, under `urn:cap:ledger:write:{name}` and that
+ledger's store graph read/write grants. Review the item's comments first. When its close
+posted a comment, supply **that close's own comment IRI**, not a later comment:
+
+```text
+$ sink urn:iki:ledger:backfill-closed-at comment=urn:iki:ledger:default:comment:THE_CLOSE_COMMENT <<< '#12'
+$ sink urn:iki:ledger:acme:backfill-closed-at <<< 'acme#7'
+```
+
+The second form is for a close with no comment: it uses the item's `updated`
+(`dcterms:modified`). Legacy comments have no originating-action marker, so the command
+cannot identify the close's own comment automatically; the operator supplies that
+association. It checks that the supplied comment belongs to the item and has a readable
+time. Both paths write `ledger:closedAtSource "backfill"` on the item and its close event,
+leave `updated` untouched, and preserve any existing `closedAt` on reruns. Open items,
+invalid timestamps, and comments on another item are refused. No migration runs merely
+by binding the space or reading counts.
+
+These values are **estimates**, even when a closing note exists. Turtle observations
+through the latest estimated backfilled close day carry `closedAtSource "backfill"`,
+so a chart can label that historical interval approximate. Item and event markers retain
+the provenance too; CSV intentionally retains exactly its three columns. Record the
+migration date with the deployment to label the interval “approximate before <migration date>”. Close/reopen history before
+this release cannot be recovered from legacy snapshots: backfill assumes an item was
+open from filing until its estimated current close. An item already reopened before the
+migration is treated as open throughout its legacy history. New transitions retain the
+history needed to avoid that limitation going forward.
+
 ## Why an RDF ledger and not a table
 
 Because the questions people actually ask cross tools. *What is open against this file?*
@@ -143,6 +209,8 @@ called `default`. The capability column names the grant for **that** ledger.
 | resource | verbs | what it does | capability |
 | --- | --- | --- | --- |
 | `…:{ledger}:items` | Source | the list, filtered | `read:{ledger}` |
+| `…:{ledger}:counts` | Source | daily open/closed history, CSV or Turtle | `read:{ledger}` |
+| `…:{ledger}:backfill-closed-at` | Sink | explicitly migrate one legacy close time | `write:{ledger}` |
 | `…:{ledger}:count` | Source | how many items the same filter admits, and nothing else | `read:{ledger}` |
 | `…:{ledger}:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` of `{ledger}` |
 | `…:{ledger}:append` | Sink | file a new item | `write:{ledger}` |
@@ -1071,8 +1139,8 @@ are these — **per ledger, and a grant for `acme` is worth nothing at `bosatsu`
 
 | to do this in ledger `L` | grant at this module | …and at the store |
 | --- | --- | --- |
-| read (`items`, `count`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
-| write (`append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, editing an item) | `urn:cap:ledger:write:L` | the read grant above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L` |
+| read (`items`, `count`, `counts`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
+| write (`append`, `backfill-closed-at`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, editing an item) | `urn:cap:ledger:write:L` | the read grant above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L` |
 | claim, comment, or close and reopen, alone | `urn:cap:ledger:claim:L`, `…:comment:L` or `…:close:L` | the same two as write |
 | delete (`Delete` on an item) | `urn:cap:ledger:delete:L` | both of the above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` |
 | purge | `urn:cap:ledger:purge:L` | the same three as delete **and** `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` |
@@ -1220,12 +1288,20 @@ one graph.
 
 ## Status
 
-All twenty-two resources are bound, tested, and walked clean by `ikigai-conformance`
+All twenty-four resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces).
 
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### 0.14.0 (unpublished): close timestamps and daily count series (ledger #2541)
+
+Minor release: additive vocabulary terms, dated status events, `counts` CSV/Turtle
+resources, and the explicit `backfill-closed-at` migration command. Reopen removes the
+item's current close timestamp while preserving history in events. New bare resource
+names `counts` and `backfill-closed-at` are reserved ledger names. No publication is part
+of this change.
 
 ### 0.13.1 (2026-10-27): overdue dispatcher hand-backs (ledger #2395)
 
