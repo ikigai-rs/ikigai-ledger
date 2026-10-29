@@ -47,6 +47,12 @@ fn seeded() -> (Kernel, String, String, String) {
     let a = append_iri(&kernel, "The fixture item\n\nWhat the walk writes to.", &[]);
     let b = append_iri(&kernel, "A link target", &[]);
     let c = append_iri(&kernel, "A purge target", &[]);
+    let migration = append_iri(
+        &kernel,
+        "Migration fixture",
+        &[("key", "urn:test:backfill")],
+    );
+    sink(&kernel, "urn:iki:ledger:close", &[("item", &migration)]);
     let id = |iri: &str| {
         iri.rsplit(':')
             .next()
@@ -173,9 +179,14 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .arg("content", "conformance"),
         )
         .fixture(Fixture::new("ledger-purge", Verb::Delete).arg("content", &purge_target))
+        .fixture(
+            Fixture::new("ledger-backfill-closed-at", Verb::Sink)
+                .arg("content", "key:urn:test:backfill"),
+        )
         // What the reads promise.
         .cacheable("ledger-items")
         .cacheable("ledger-count")
+        .cacheable("ledger-counts")
         .cacheable("ledger-item")
         .cacheable("ledger-next")
         .cacheable("ledger-item-state")
@@ -236,10 +247,12 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
         walked,
         vec![
             "ledger-append",
+            "ledger-backfill-closed-at",
             "ledger-claim",
             "ledger-close",
             "ledger-comment",
             "ledger-count",
+            "ledger-counts",
             "ledger-defer",
             "ledger-doctor",
             "ledger-item",

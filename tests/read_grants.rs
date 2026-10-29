@@ -106,6 +106,7 @@ fn read_script() -> Vec<(&'static str, Verb, String)> {
     vec![
         ("ledger-items", Verb::Source, at("items")),
         ("ledger-count", Verb::Source, at("count")),
+        ("ledger-counts", Verb::Source, at("counts")),
         ("ledger-next", Verb::Source, at("next")),
         ("ledger-item", Verb::Source, at("item:1")),
         ("ledger-item", Verb::Exists, at("item:1")),

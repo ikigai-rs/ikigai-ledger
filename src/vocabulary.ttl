@@ -133,9 +133,9 @@ ledger:body a rdf:Property ;
     rdfs:comment "The prose of an item or a comment. An item's title is dcterms:title and its body is everything after the first blank line of what was filed." .
 
 ledger:status a rdf:Property ;
-    rdfs:domain ledger:Item ;
     rdfs:range ledger:Status ;
-    rdfs:label "status" .
+    rdfs:label "status" ;
+    rdfs:comment "An item's current status, or a StatusEvent's resulting status. No domain: a dated event must not become an inferred Item." .
 
 ledger:closedReason a rdf:Property ;
     rdfs:domain ledger:Item ;
@@ -212,10 +212,9 @@ ledger:purpose a rdf:Property ;
     rdfs:comment "Why the holder took the claim — kata's `purpose` column, and our brief name. Free text, for a human reading `items`." .
 
 ledger:onItem a rdf:Property ;
-    rdfs:domain ledger:Comment ;
     rdfs:range ledger:Item ;
     rdfs:label "onItem" ;
-    rdfs:comment "The item a comment is on. The edge points from the comment so appending one is a pure INSERT that touches no existing triple." .
+    rdfs:comment "The item a comment or StatusEvent belongs to. The edge points from the owned node so appending it is a pure INSERT; deletion includes every node with this edge. No domain: an event must not become an inferred Comment." .
 
 # ---- links between items ----------------------------------------------------
 # Typed predicates rather than a link node with a type column: an edge is one
@@ -319,10 +318,9 @@ ledger:itemCount a rdf:Property ;
     rdfs:comment "How many items the ledger holds, open and closed together." .
 
 ledger:openCount a rdf:Property ;
-    rdfs:domain ledger:Ledger ;
     rdfs:range xsd:integer ;
     rdfs:label "openCount" ;
-    rdfs:comment "How many of them are still open — the number an operator actually reads." .
+    rdfs:comment "How many items are open, on a ledger summary or a DailyCounts observation. No domain: an observation must not become an inferred Ledger." .
 
 ledger:readyCount a rdf:Property ;
     rdfs:domain ledger:Selection ;
@@ -487,3 +485,24 @@ ledger:awaitingAt a rdf:Property ;
     rdfs:range xsd:dateTime ;
     rdfs:label "awaiting decision at" ;
     rdfs:comment "The kernel time of the latest hand-back decision (since 0.13.1). Written atomically with handback=true, rejects=true, a dispatcher comment, close or reopen. While awaiting the dispatcher, this is when the hand-back set that state; ordinary worker comments do not reset it. Retained when cleared so the doctor does not mistake older legacy Evidence: comments for unanswered hand-backs." .
+
+ledger:closedAt a rdf:Property ;
+    rdfs:range xsd:dateTime ;
+    rdfs:comment "When the current close occurred, from the kernel clock. Removed on reopen; dated StatusEvent nodes retain subsequent history. Legacy values supplied by backfill are approximate and marked closedAtSource backfill." .
+ledger:closedAtSource a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:comment "The literal backfill marks an approximate legacy close time. Present on the item and its backfilled StatusEvent, which retains this provenance after reopen. DailyCounts observations through the latest estimated close day also carry this marker." .
+ledger:StatusEvent a rdfs:Class ;
+    rdfs:comment "A dated close or reopen: onItem names its item, status its resulting status, and dcterms:created its kernel time. Skolemized beneath the item. Retained across reopen so historical daily counts remain true." .
+ledger:DailyCounts a rdfs:Class ;
+    rdfs:comment "One UTC end-of-day observation, skolemized as urn:iki:ledger:{name}:counts:{date}. The current day's row is provisional. openCount plus closedCount is the number filed by that date." .
+ledger:date a rdf:Property ;
+    rdfs:range xsd:date ;
+    rdfs:comment "The UTC calendar date of a daily counts observation." .
+ledger:closedCount a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:comment "Items filed by this date whose latest recorded status at the end of the UTC day is closed." .
+
+ledger:eventSequence a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:comment "The graph-local ordering of an item's status events, disambiguating transitions at the same kernel-clock millisecond. Backfill starts at zero." .

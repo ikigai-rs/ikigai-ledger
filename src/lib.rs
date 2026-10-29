@@ -9,6 +9,8 @@
 //!
 //! ```text
 //! urn:iki:ledger:{ledger}:items      Source              the list, filtered         read
+//! urn:iki:ledger:{ledger}:counts     Source              daily open/closed series   read
+//! urn:iki:ledger:{ledger}:backfill-closed-at Sink           explicit legacy migration  write
 //! urn:iki:ledger:{ledger}:count      Source              how many match, alone      read
 //! urn:iki:ledger:{ledger}:item:{id}  Source Sink Delete  one item, edit, delete     read/write/delete
 //! urn:iki:ledger:{ledger}:append     Sink                file a new item            write

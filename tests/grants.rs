@@ -176,6 +176,7 @@ fn script() -> Vec<Step> {
         ),
         step("ledger-items", Verb::Source, at("items"), &[]),
         step("ledger-count", Verb::Source, at("count"), &[]),
+        step("ledger-counts", Verb::Source, at("counts"), &[]),
         step("ledger-item", Verb::Source, at("item:1"), &[]),
         step("ledger-item", Verb::Exists, at("item:1"), &[]),
         step(
@@ -271,6 +272,12 @@ fn script() -> Vec<Step> {
                 ("reason", "done"),
                 ("content", "Finished it."),
             ],
+        ),
+        step(
+            "ledger-backfill-closed-at",
+            Verb::Sink,
+            at("backfill-closed-at"),
+            &[("content", "#1")],
         ),
         step("ledger-reopen", Verb::Sink, at("reopen"), &[("item", "#1")]),
         step("ledger-next", Verb::Source, at("next"), &[]),
