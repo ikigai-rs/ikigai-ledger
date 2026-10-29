@@ -318,10 +318,9 @@ ledger:itemCount a rdf:Property ;
     rdfs:comment "How many items the ledger holds, open and closed together." .
 
 ledger:openCount a rdf:Property ;
-    rdfs:domain ledger:Ledger ;
     rdfs:range xsd:integer ;
     rdfs:label "openCount" ;
-    rdfs:comment "How many of them are still open — the number an operator actually reads." .
+    rdfs:comment "How many items are open, on a ledger summary or a DailyCounts observation. No domain: an observation must not become an inferred Ledger." .
 
 ledger:readyCount a rdf:Property ;
     rdfs:domain ledger:Selection ;

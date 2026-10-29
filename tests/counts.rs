@@ -387,17 +387,17 @@ fn backfill_refuses_wrong_comment_and_readers_cannot_migrate() {
 }
 
 #[test]
-fn event_properties_do_not_infer_items_or_comments() {
+fn shared_properties_do_not_infer_items_comments_or_ledgers() {
     let vocabulary: Vec<_> = oxrdfio::RdfParser::from_format(oxrdfio::RdfFormat::Turtle)
         .for_reader(ikigai_ledger::VOCABULARY_TTL.as_bytes())
         .collect::<Result<_, _>>()
         .unwrap();
-    for shared in ["status", "onItem"] {
+    for shared in ["status", "onItem", "openCount"] {
         let property = format!("<https://ikigai-rs.dev/ns/ledger#{shared}>");
         assert!(
             !vocabulary.iter().any(|q| q.subject.to_string() == property
                 && q.predicate.as_str() == "http://www.w3.org/2000/01/rdf-schema#domain"),
-            "{shared} is shared by status events: a domain would misclassify them"
+            "{shared} is shared by events or observations: a domain would misclassify them"
         );
     }
 }
