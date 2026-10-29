@@ -328,3 +328,47 @@ fn a_second_delete_landing_after_the_first_writes_no_second_tombstone_state() {
         }
     }
 }
+
+/// Bulk migration counts only its guarded writes when another request changes an item.
+#[test]
+fn bulk_backfill_skips_concurrently_changed_items() {
+    for (verb, target, args) in [
+        (Verb::Delete, "urn:iki:ledger:item:1", vec![]),
+        (Verb::Sink, "urn:iki:ledger:reopen", vec![("item", "#1")]),
+        (
+            Verb::Sink,
+            "urn:iki:ledger:backfill-closed-at",
+            vec![("content", "#1")],
+        ),
+        (
+            Verb::Sink,
+            "urn:iki:ledger:item:1",
+            vec![("content", "edited")],
+        ),
+    ] {
+        let (cell, armed) = interleaved();
+        let k = cell.get().unwrap();
+        let item = append_iri(k, "Legacy", &[]);
+        sink(k, "urn:iki:store:graph-update", &[("graph", LIVE), ("content", &format!(
+            "DELETE {{ GRAPH <{LIVE}> {{ <{item}> <https://ikigai-rs.dev/ns/ledger#status> ?old }} }} INSERT {{ GRAPH <{LIVE}> {{ <{item}> <https://ikigai-rs.dev/ns/ledger#status> <https://ikigai-rs.dev/ns/ledger#closed> }} }} WHERE {{ GRAPH <{LIVE}> {{ <{item}> <https://ikigai-rs.dev/ns/ledger#status> ?old }} }}"
+        ))]);
+        *armed.lock().unwrap() = Some(request(verb, target, &args));
+        assert_eq!(
+            sink(
+                k,
+                "urn:iki:ledger:backfill-closed-at",
+                &[("content", "all")]
+            ),
+            "backfilled 0 items (unchanged)\n"
+        );
+        assert!(armed.lock().unwrap().is_none());
+        if verb == Verb::Delete {
+            assert!(leftovers(k, &item).is_empty());
+        }
+        let events = select(k, &format!("SELECT ?event WHERE {{ GRAPH <{LIVE}> {{ ?event a <https://ikigai-rs.dev/ns/ledger#StatusEvent> . FILTER(CONTAINS(STR(?event), \"status:backfill:\")) }} }}"));
+        assert!(
+            !events.contains(":status:backfill:"),
+            "bulk migration wrote despite {target}: {events}"
+        );
+    }
+}

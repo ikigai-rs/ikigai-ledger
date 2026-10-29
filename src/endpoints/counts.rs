@@ -264,12 +264,117 @@ impl Endpoint for CountsEndpoint {
     fn describe(&self) -> Description {
         read_scopes(Description::new("ledger-counts")
             .title("Daily open and closed item counts")
-            .summary("UTC end-of-day counts from the first filed item through today (today is provisional). Closed items without closedAt require the explicit backfill command. all = open + closed. Reopen history is retained from this release onward.")
+            .summary("UTC end-of-day counts from the first filed item through today (today is provisional). Closed items without closedAt require the explicit backfill command. Turtle observations through the latest backfilled close day carry closedAtSource backfill (approximate). all = open + closed. Reopen history is retained from this release onward.")
             .verb(Verb::Source).verb(Verb::Meta)
             .input(ledger_arg("counts"))
             .input(ArgSpec::new("days").summary("Only the most recent N UTC days; a positive integer.").class(v::ext::XSD_INTEGER).optional())
             .input(ArgSpec::new("as").summary("Representation media type.").class(v::ext::XSD_STRING).one_of(FACES).default_value(CSV).optional()).output(CSV).output(TURTLE))
     }
+}
+
+/// Validate the whole snapshot before writing, then migrate it in bounded guarded store
+/// updates. VALUES bounds the write to the reviewed snapshot; a concurrent edit, close,
+/// reopen or delete cannot make us stamp a different state of an item.
+async fn backfill_all(
+    client: &StoreClient<'_, '_>,
+    inv: &Invocation<'_>,
+) -> Result<Representation> {
+    if inv.inline_str("comment").is_ok() {
+        return Err(Error::InvalidArgument {
+            name: "comment".into(),
+            detail: "comment is only supported for a single item; content=all uses updated".into(),
+        });
+    }
+    let candidates = client.in_graph(&format!(
+        "?item <{}> <{}> ; <{}> <{}> . \
+         FILTER NOT EXISTS {{ ?item <{}> ?existing }} \
+         OPTIONAL {{ ?item <{}> ?at }} OPTIONAL {{ ?item <{}> ?filed }}",
+        v::ext::TYPE,
+        v::ITEM_CLASS,
+        v::STATUS,
+        v::CLOSED,
+        v::CLOSED_AT,
+        v::ext::MODIFIED,
+        v::ext::CREATED
+    ));
+    let rows = client
+        .select(&format!("SELECT ?item ?at ?filed WHERE {{ {candidates} }}"))
+        .await?;
+    if rows.is_empty() {
+        return Ok(plain("backfilled 0 items (unchanged)\n"));
+    }
+    let suffix = format!(":status:backfill:{}", mint_id(now_ms(inv)?)?);
+    let mut seen = BTreeSet::new();
+    let mut values = Vec::new();
+    for row in rows {
+        let item = &row["item"].value;
+        let at = row.get("at").and_then(|b| model::millis(&b.value));
+        let filed = row.get("filed").and_then(|b| model::millis(&b.value));
+        let (Some(at), Some(filed)) = (at, filed) else {
+            return Err(Error::Endpoint(format!(
+                "backfill requires one readable updated and filed time for {item}; nothing changed"
+            )));
+        };
+        if !seen.insert(item.clone()) || at < filed {
+            return Err(Error::Endpoint(format!("backfill refuses multiple timestamps or updated before filing for {item}; nothing changed")));
+        }
+        values.push(format!(
+            "({} {} {} {} <{item}{suffix}>)\n",
+            row["item"].term("item")?,
+            datetime(at),
+            row["at"].term("updated")?,
+            row["filed"].term("filed")?
+        ));
+    }
+    let triples = client.in_graph(&format!(
+        "?item <{}> ?at ; <{}> \"backfill\" . \
+         ?event <{}> <{}> ; <{}> ?item ; <{}> <{}> ; <{}> ?at ; <{}> 0 ; <{}> \"backfill\" .",
+        v::CLOSED_AT,
+        v::CLOSED_AT_SOURCE,
+        v::ext::TYPE,
+        v::STATUS_EVENT_CLASS,
+        v::ON_ITEM,
+        v::STATUS,
+        v::CLOSED,
+        v::ext::CREATED,
+        v::EVENT_SEQUENCE,
+        v::CLOSED_AT_SOURCE
+    ));
+    let guard = client.in_graph(&format!(
+        "?item <{}> <{}> ; <{}> <{}> ; <{}> ?updated ; <{}> ?created . \
+         FILTER NOT EXISTS {{ ?item <{}> ?existing }}",
+        v::ext::TYPE,
+        v::ITEM_CLASS,
+        v::STATUS,
+        v::CLOSED,
+        v::ext::MODIFIED,
+        v::ext::CREATED,
+        v::CLOSED_AT
+    ));
+    // Keep each request below the store's SPARQL byte bound, just as bulk item
+    // reads do. This is still one operator Sink, with no per-item sub-invocations.
+    for chunk in values.chunks(400) {
+        let values = chunk.concat();
+        client.update(&format!("INSERT {{ {triples} }} WHERE {{ VALUES (?item ?at ?updated ?created ?event) {{ {values} }} {guard} }}")).await?;
+    }
+    // Count this invocation's events, rather than claiming every candidate was written
+    // when another writer may have changed an item between our read and update.
+    let dated = client
+        .select(&format!(
+            "SELECT ?event WHERE {{ {} FILTER(STRENDS(STR(?event), {})) }}",
+            client.in_graph(&format!(
+                "?event <{}> <{}>",
+                v::ext::TYPE,
+                v::STATUS_EVENT_CLASS
+            )),
+            crate::sparql::literal(&suffix)
+        ))
+        .await?
+        .len();
+    Ok(plain(format!(
+        "backfilled {dated} items{}\n",
+        if dated == 0 { " (unchanged)" } else { "" }
+    )))
 }
 
 pub(super) struct BackfillEndpoint;
@@ -281,6 +386,9 @@ impl Endpoint for BackfillEndpoint {
             return Err(unsupported("ledger-backfill-closed-at", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        if inv.inline_str("content")? == "all" {
+            return backfill_all(&client, inv).await;
+        }
         let item = require_item(&client, inv.inline_str("content")?).await?;
         if item.open {
             return Err(Error::InvalidArgument {
@@ -401,12 +509,12 @@ impl Endpoint for BackfillEndpoint {
     }
     fn describe(&self) -> Description {
         Description::new("ledger-backfill-closed-at")
-            .title("Explicitly backfill one legacy close time")
-            .summary("One-time migration, never run at startup. Supply the close's own comment IRI when one exists; otherwise uses updated. Both are approximate and marked closedAtSource backfill. Existing closedAt values are preserved; updated is untouched.")
+            .title("Explicitly backfill legacy close times")
+            .summary("One-time migration, never run at startup. content=all dates every undated closed item from updated and reports how many changed. For one item, supply the close's own comment IRI when one exists; otherwise uses updated. Both are approximate and marked closedAtSource backfill. Existing closedAt values are preserved; updated is untouched.")
             .verb(Verb::Meta)
             .action(write_scopes(ikigai_core::ActionSpec::new(Verb::Sink)
                 .input(ledger_arg("backfill-closed-at"))
-                .input(ArgSpec::new("content").summary("The currently closed legacy item reference (#number, key, or IRI).").class(v::ext::XSD_STRING))
+                .input(ArgSpec::new("content").summary("A currently closed legacy item reference (#number, key, or IRI), or all to migrate this ledger using updated.").class(v::ext::XSD_STRING))
                 .input(ArgSpec::new("comment").summary("The reviewed closing comment IRI, if the close posted one. Legacy data cannot identify this automatically.").class(v::ext::XSD_ANY_URI).optional())
                 .output(PLAIN), CAP_WRITE))
     }
