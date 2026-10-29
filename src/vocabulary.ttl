@@ -133,9 +133,9 @@ ledger:body a rdf:Property ;
     rdfs:comment "The prose of an item or a comment. An item's title is dcterms:title and its body is everything after the first blank line of what was filed." .
 
 ledger:status a rdf:Property ;
-    rdfs:domain ledger:Item ;
     rdfs:range ledger:Status ;
-    rdfs:label "status" .
+    rdfs:label "status" ;
+    rdfs:comment "An item's current status, or a StatusEvent's resulting status. No domain: a dated event must not become an inferred Item." .
 
 ledger:closedReason a rdf:Property ;
     rdfs:domain ledger:Item ;
@@ -212,10 +212,9 @@ ledger:purpose a rdf:Property ;
     rdfs:comment "Why the holder took the claim — kata's `purpose` column, and our brief name. Free text, for a human reading `items`." .
 
 ledger:onItem a rdf:Property ;
-    rdfs:domain ledger:Comment ;
     rdfs:range ledger:Item ;
     rdfs:label "onItem" ;
-    rdfs:comment "The item a comment is on. The edge points from the comment so appending one is a pure INSERT that touches no existing triple." .
+    rdfs:comment "The item a comment or StatusEvent belongs to. The edge points from the owned node so appending it is a pure INSERT; deletion includes every node with this edge. No domain: an event must not become an inferred Comment." .
 
 # ---- links between items ----------------------------------------------------
 # Typed predicates rather than a link node with a type column: an edge is one
