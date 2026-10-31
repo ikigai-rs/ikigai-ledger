@@ -1307,6 +1307,12 @@ one graph.
   cache with no golden thread to cut it, so resuming is an act rather than the passage of
   time.
 
+## Accessibility
+
+The ledger's default face is plain text people read in a terminal: item lines, `next`, write
+answers, the doctor and every refusal. [ACCESSIBILITY.md](ACCESSIBILITY.md) says what that text
+is, the rules it follows, what is not tested, and how to report a barrier.
+
 ## Status
 
 All twenty-four resources are bound, tested, and walked clean by `ikigai-conformance`
