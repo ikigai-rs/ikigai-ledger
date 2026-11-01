@@ -887,7 +887,7 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   <holder>; the claim is released.` (attributed to the closer's `author`), `released <holder>`
   at the end of the plain answer, and `"released": "<holder>"` in JSON. Reopening does not
   restore it; whoever picks the work up again claims it.
-- ★ **And the close's update decides what it did, not the read before it** (since 0.14.0,
+- ★ **And the close's update decides what it did, not the read before it** (since 0.14.1,
   ledger #2764). Only the update that finds the item open records the close (its
   `ledger:StatusEvent` and `closedAt`), and only one that finds a claim records the release,
   naming the claim it found. Concurrent closes of one claimed item record one close and one
@@ -1332,14 +1332,19 @@ All twenty-four resources are bound, tested, and walked clean by `ikigai-conform
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Unreleased: closed items cannot enter flight (ledger #2765)
+### 0.14.1: one close per item, and closed items cannot enter flight (ledger #2764, #2765)
+
+A close decides inside its own update: only the update that finds the item open records the
+close (its status event and `closedAt`), and only one that finds a claim records the release,
+so concurrent closes of one claimed item record one close and one release; the others are
+verdict edits and say so (`"already_closed": true` in JSON).
 
 The state Sink now requires open status in its compare-and-set guard when the destination
 is in flight. A closed item, including one closed between the read and write, receives a
 `Conflict` naming its close reason and time. Transitions to states outside flight still
 succeed on closed items. Regression tests pin the refusal and force the close/write race.
 
-### 0.14.0 (unpublished): close timestamps and daily count series (ledger #2541)
+### 0.14.0 (published 2026-10-29): close timestamps and daily count series (ledger #2541)
 
 Minor release: additive vocabulary terms, dated status events, `counts` CSV/Turtle
 resources, and the explicit `backfill-closed-at` migration command. Reopen removes the
