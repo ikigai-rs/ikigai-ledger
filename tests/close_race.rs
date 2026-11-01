@@ -11,6 +11,10 @@
 //! Both schedules are forced, not hoped for: the store is wrapped so that a close's update
 //! to the live graph waits until every close has read (the concurrent case), or so that a
 //! whole claim runs and commits just before it (the late claim).
+//!
+//! `reopen` had the same shape with no condition at all (ledger #2766): it required its item
+//! and wrote, so reopening an open item appended an `open` status event, and concurrent
+//! reopens of one closed item each appended one. The same schedules force those too.
 
 mod common;
 
@@ -353,4 +357,156 @@ fn closing_a_closed_item_edits_the_verdict_and_says_so() {
         source(&kernel, "urn:iki:ledger:item:1", &[]).contains("(done)"),
         "the verdict is the latest"
     );
+}
+
+// --------------------------------------------------------------------- reopen (#2766)
+
+/// The status of every status event of `item`, in the order the ledger sequenced them.
+fn history(kernel: &Kernel, item: &str) -> Vec<String> {
+    values(
+        kernel,
+        &format!(
+            "SELECT ?v WHERE {{ GRAPH <{LIVE}> {{ ?e a <{NS}StatusEvent> ; \
+             <{NS}onItem> <{item}> ; <{NS}status> ?v ; <{NS}eventSequence> ?n }} }} ORDER BY ?n"
+        ),
+    )
+    .into_iter()
+    .map(|status| status.trim_start_matches(NS).to_string())
+    .collect()
+}
+
+/// Every `awaitingAt` of `item`.
+fn awaiting_at(kernel: &Kernel, item: &str) -> Vec<String> {
+    values(
+        kernel,
+        &format!("SELECT ?v WHERE {{ GRAPH <{LIVE}> {{ <{item}> <{NS}awaitingAt> ?v }} }}"),
+    )
+}
+
+/// ★ Reopening an item that is already open changes nothing and says so (ledger #2766). On
+/// 0.14.1 it appended an `open` status event to an item that was never closed, and reset
+/// its hand-back decision time.
+#[test]
+fn reopening_an_open_item_changes_nothing_and_says_so() {
+    let kernel = kernel();
+    let item = append_iri(&kernel, "probe", &[]);
+    let before = awaiting_at(&kernel, &item);
+    let answer = sink(&kernel, "urn:iki:ledger:reopen", &[("item", "#1")]);
+    assert_eq!(
+        history(&kernel, &item),
+        Vec::<String>::new(),
+        "no status event"
+    );
+    assert_eq!(awaiting_at(&kernel, &item), before, "no hand-back decision");
+    assert_eq!(
+        answer,
+        "#1 was already open, so the reopen changed nothing\n"
+    );
+
+    // And after a real close and reopen, a second reopen adds nothing either.
+    sink(&kernel, "urn:iki:ledger:close", &[("item", "#1")]);
+    assert_eq!(
+        sink(&kernel, "urn:iki:ledger:reopen", &[("item", "#1")]),
+        "reopened #1\n"
+    );
+    assert_eq!(
+        sink(&kernel, "urn:iki:ledger:reopen", &[("item", "#1")]),
+        "#1 was already open, so the reopen changed nothing\n"
+    );
+    assert_eq!(history(&kernel, &item), ["closed", "open"]);
+    assert_eq!(
+        sink(
+            &kernel,
+            "urn:iki:ledger:reopen",
+            &[("item", "#1"), ("content", "still open")]
+        ),
+        "#1 was already open, so the reopen only added the note\n"
+    );
+    assert!(comments(&kernel, &item).contains(&"still open".to_string()));
+    assert_eq!(history(&kernel, &item), ["closed", "open"]);
+}
+
+/// ★ Four reopens of one closed item, every one of them reading it before any writes:
+/// exactly one records the reopen. On 0.14.1 each appended an `open` status event.
+#[test]
+fn concurrent_reopens_of_a_closed_item_record_one_reopen() {
+    const REOPENS: usize = 4;
+    let (cell, schedule) = scheduled();
+    let kernel = cell.get().unwrap();
+    let item = append_iri(kernel, "probe", &[]);
+    sink(kernel, "urn:iki:ledger:close", &[("item", "#1")]);
+    schedule.width.store(REOPENS, Ordering::SeqCst);
+    *schedule.gated.lock().unwrap() = REOPENS;
+    let root = Capability::root();
+    let answers = block_on(futures::future::join_all((0..REOPENS).map(|_| {
+        kernel.issue(
+            request(Verb::Sink, "urn:iki:ledger:reopen", &[("item", "#1")]),
+            &root,
+        )
+    })));
+    assert_eq!(
+        schedule.arrived.load(Ordering::SeqCst),
+        REOPENS,
+        "every reopen reached its update before any wrote"
+    );
+    let mut answers: Vec<String> = answers
+        .into_iter()
+        .map(|a| String::from_utf8_lossy(&a.expect("every reopen succeeds").bytes).into_owned())
+        .collect();
+    assert_eq!(history(kernel, &item), ["closed", "open"], "{answers:?}");
+    answers.sort();
+    let mut want = vec!["#1 was already open, so the reopen changed nothing\n"; REOPENS - 1];
+    want.push("reopened #1\n");
+    want.sort();
+    assert_eq!(answers, want);
+}
+
+/// ★ A reopen landing between a close's read and its update: the item was open, so the
+/// reopen changes nothing and the close records the one transition. On 0.14.1 the history
+/// was `open, closed`, an `open` event for an item that had never been closed.
+#[test]
+fn a_reopen_landing_inside_a_close_leaves_one_order() {
+    let (cell, schedule) = scheduled();
+    let kernel = cell.get().unwrap();
+    let item = append_iri(kernel, "probe", &[]);
+    *schedule.armed.lock().unwrap() = Some(request(
+        Verb::Sink,
+        "urn:iki:ledger:reopen",
+        &[("item", "#1")],
+    ));
+    assert_eq!(
+        sink(kernel, "urn:iki:ledger:close", &[("item", "#1")]),
+        "closed #1 (done)\n"
+    );
+    assert!(
+        schedule.armed.lock().unwrap().is_none(),
+        "the reopen never ran"
+    );
+    assert_eq!(history(kernel, &item), ["closed"]);
+    assert_eq!(closed_at(kernel, &item).len(), 1);
+}
+
+/// And the other way round: a close landing between a reopen's read and its update edits the
+/// verdict of the closed item, and the reopen then records the one reopen.
+#[test]
+fn a_close_landing_inside_a_reopen_leaves_one_order() {
+    let (cell, schedule) = scheduled();
+    let kernel = cell.get().unwrap();
+    let item = append_iri(kernel, "probe", &[]);
+    sink(kernel, "urn:iki:ledger:close", &[("item", "#1")]);
+    *schedule.armed.lock().unwrap() = Some(request(
+        Verb::Sink,
+        "urn:iki:ledger:close",
+        &[("item", "#1"), ("reason", "wontfix")],
+    ));
+    assert_eq!(
+        sink(kernel, "urn:iki:ledger:reopen", &[("item", "#1")]),
+        "reopened #1\n"
+    );
+    assert!(
+        schedule.armed.lock().unwrap().is_none(),
+        "the close never ran"
+    );
+    assert_eq!(history(kernel, &item), ["closed", "open"]);
+    assert!(closed_at(kernel, &item).is_empty(), "the reopen removed it");
 }

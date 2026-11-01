@@ -9,18 +9,10 @@ const FACES: [&str; 2] = [CSV, TURTLE];
 
 /// A status event belongs to the item via onItem, so delete/archive/purge owns it.
 /// A graph-local sequence orders transitions even when the kernel clock is frozen.
-pub(super) fn status_event(
-    client: &StoreClient<'_, '_>,
-    item: &str,
-    status: &str,
-    now: u64,
-) -> Result<String> {
-    Ok(status_event_when(client, item, status, now, "")?.0)
-}
-
-/// [`status_event`], written only while `guard` (a pattern over the ledger's graph) also
-/// holds; with the minted event's IRI, so the caller can read back whether this update wrote
-/// it (ledger #2764).
+///
+/// It is written only while `guard` (a pattern over the ledger's graph) also holds, and it
+/// comes with the minted event's IRI, so the caller can read back whether this update wrote
+/// it (ledger #2764, #2766).
 pub(super) fn status_event_when(
     client: &StoreClient<'_, '_>,
     item: &str,
