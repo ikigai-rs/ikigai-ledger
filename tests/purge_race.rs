@@ -48,7 +48,13 @@ impl Space for BeforeGraveyardWrite {
         let (kernel, armed) = (Arc::clone(&self.kernel), Arc::clone(&self.armed));
         self.inner
             .resolve(request, scope)
-            .map_endpoint(move |inner| Arc::new(Gate { inner, kernel, armed }) as Arc<dyn Endpoint>)
+            .map_endpoint(move |inner| {
+                Arc::new(Gate {
+                    inner,
+                    kernel,
+                    armed,
+                }) as Arc<dyn Endpoint>
+            })
     }
 }
 
@@ -56,7 +62,10 @@ impl Space for BeforeGraveyardWrite {
 impl Endpoint for Gate {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let to_graveyard = inv.request.target.as_str() == "urn:iki:store:graph-update"
-            && inv.inline_str("graph").map(|g| g == GRAVEYARD).unwrap_or(false);
+            && inv
+                .inline_str("graph")
+                .map(|g| g == GRAVEYARD)
+                .unwrap_or(false);
         if to_graveyard {
             let first = self.armed.lock().unwrap().take();
             if let Some(first) = first {
@@ -169,7 +178,10 @@ fn a_purge_inside_a_deletes_window_leaves_nothing_in_the_graveyard_forced() {
         request(Verb::Delete, "urn:iki:ledger:item:1", &[]),
         &Capability::root(),
     ));
-    assert!(armed.lock().unwrap().is_none(), "the purge ran in the window");
+    assert!(
+        armed.lock().unwrap().is_none(),
+        "the purge ran in the window"
+    );
 
     let left = archived(kernel, &item);
     assert!(
@@ -181,7 +193,10 @@ fn a_purge_inside_a_deletes_window_leaves_nothing_in_the_graveyard_forced() {
     let holding = graphs_holding_secret(kernel);
     assert!(!holding.contains("urn:iki:ledger:graph"), "{holding}");
     let state = recoverable(kernel, &item);
-    assert!(state.contains("false") && !state.contains("true"), "{state}");
+    assert!(
+        state.contains("false") && !state.contains("true"),
+        "{state}"
+    );
 }
 
 /// The same race, unforced: a delete and a purge released together, three hundred times.
