@@ -894,6 +894,12 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   release; the others are verdict edits, answered `closed #12 (done); it was already closed,
   so only the verdict changed` and `"already_closed": true` in JSON. A claim that lands
   between a close's read and its update is released and recorded like any other.
+- ★ **And so does the reopen's** (ledger #2766). Only the update that finds the item closed
+  records the reopen (its `open` status event), clears the close fields and the hand-back,
+  and sets it open. Reopening an open item changes nothing and says so: `#12 was already
+  open, so the reopen changed nothing` (or `…, so the reopen only added the note` when it
+  carried one). Concurrent reopens of one closed item record one reopen, and a close and a
+  reopen at once leave one of the two orders.
 - ★ **And a closed item cannot be claimed** (since 0.11.1, ledger #1419). A claim, a renewal
   and a takeover on a closed item are each refused with a `Conflict` naming the item and its
   state; until 0.11.1 a claim took it, and the held-closed state the close had just removed
@@ -1331,6 +1337,17 @@ All twenty-four resources are bound, tested, and walked clean by `ikigai-conform
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### Unreleased: one reopen per close (ledger #2766)
+
+`reopen` required its item and then wrote unconditionally. Reopening an item that was
+already open appended an `open` status event for a close that never happened and reset its
+hand-back decision time; concurrent reopens of one closed item each appended an `open`
+event; and a reopen landing inside a close's read and update put an `open` event ahead of
+the close. Every write of a reopen now carries "the item is closed" in its own `WHERE`, and
+the reopen reads back the event it minted to learn whether it was the one. A reopen of an
+open item answers `#12 was already open, so the reopen changed nothing`.
+`tests/close_race.rs` forces each schedule.
 
 ### 0.14.1: one close per item, and closed items cannot enter flight (ledger #2764, #2765)
 

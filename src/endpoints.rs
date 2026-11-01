@@ -747,8 +747,17 @@ fn batch(operations: &[String]) -> String {
 
 /// Remove every value of a property.
 fn retract(client: &StoreClient<'_, '_>, item: &str, predicate: &str) -> String {
-    let pattern = client.in_graph(&format!("<{item}> <{predicate}> ?was"));
-    format!("DELETE {{ {pattern} }} WHERE {{ {pattern} }}")
+    retract_when(client, item, predicate, "")
+}
+
+/// [`retract`], only while `guard` (a pattern over the ledger's graph) also holds.
+fn retract_when(client: &StoreClient<'_, '_>, item: &str, predicate: &str, guard: &str) -> String {
+    let pattern = format!("<{item}> <{predicate}> ?was");
+    format!(
+        "DELETE {{ {} }} WHERE {{ {} }}",
+        client.in_graph(&pattern),
+        client.in_graph(&format!("{pattern} . {guard}"))
+    )
 }
 
 /// The pattern "`item` is a live item": the condition every write on an item carries in its
@@ -811,6 +820,11 @@ async fn still_live(client: &StoreClient<'_, '_>, item: &str) -> Result<()> {
 /// Stamp an item as modified, as part of the same update that changed it — only while it is
 /// a live item ([`live`]), so a late write never stamps a deleted IRI.
 fn touch(client: &StoreClient<'_, '_>, item: &str, now: u64) -> String {
+    touch_when(client, item, now, "")
+}
+
+/// [`touch`], only while `guard` (a pattern over the ledger's graph) also holds.
+fn touch_when(client: &StoreClient<'_, '_>, item: &str, now: u64, guard: &str) -> String {
     format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
         client.in_graph(&format!("<{item}> <{}> ?was", v::ext::MODIFIED)),
@@ -820,7 +834,7 @@ fn touch(client: &StoreClient<'_, '_>, item: &str, now: u64) -> String {
             datetime(now)
         )),
         client.in_graph(&format!(
-            "{} OPTIONAL {{ <{item}> <{}> ?was }}",
+            "{} {guard} OPTIONAL {{ <{item}> <{}> ?was }}",
             live(item),
             v::ext::MODIFIED
         ))
@@ -3182,24 +3196,53 @@ impl Endpoint for ReopenEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
+        // ★ THE UPDATE DECIDES, AS IT DOES FOR CLOSE (ledger #2766, after #2764). Until
+        // 0.14.1 the reopen required the item and then wrote unconditionally, so reopening an
+        // open item appended an `open` status event for a close that never happened, and
+        // concurrent reopens of one closed item each appended one. Now every write carries
+        // "the item is closed" in its own `WHERE`, ahead of the operation that sets it open:
+        // under the store's write lock exactly one update finds it closed. Reading back the
+        // event IRI minted here is how this request learns whether it was that one.
+        let still_closed = format!("<{}> <{}> <{}> .", item.iri, v::STATUS, v::CLOSED);
+        let (event, event_iri) =
+            counts::status_event_when(&client, &item.iri, v::OPEN, now, &still_closed)?;
         guarded_update(
             &client,
             &[&item.iri],
             &batch(&[
                 counts::preserve_close(&client, &item.iri, now)?,
-                replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::OPEN)),
-                retract(&client, &item.iri, v::CLOSED_REASON),
-                retract(&client, &item.iri, v::CLOSED_AT),
-                retract(&client, &item.iri, v::CLOSED_AT_SOURCE),
-                counts::status_event(&client, &item.iri, v::OPEN, now)?,
+                event,
+                retract_when(&client, &item.iri, v::CLOSED_REASON, &still_closed),
+                retract_when(&client, &item.iri, v::CLOSED_AT, &still_closed),
+                retract_when(&client, &item.iri, v::CLOSED_AT_SOURCE, &still_closed),
                 // A reopened item starts from "not awaiting": whatever hand-back preceded
                 // the close was answered by it (ledger #1199).
-                retract(&client, &item.iri, v::AWAITING),
-                replace_one(&client, &item.iri, v::AWAITING_AT, &datetime(now)),
-                touch(&client, &item.iri, now),
+                retract_when(&client, &item.iri, v::AWAITING, &still_closed),
+                replace_one_when(
+                    &client,
+                    &item.iri,
+                    v::AWAITING_AT,
+                    &datetime(now),
+                    &still_closed,
+                ),
+                touch_when(&client, &item.iri, now, &still_closed),
+                replace_one_when(
+                    &client,
+                    &item.iri,
+                    v::STATUS,
+                    &format!("<{}>", v::OPEN),
+                    &still_closed,
+                ),
             ]),
         )
         .await?;
+        let reopened_here = client
+            .ask(&format!(
+                "ASK {{ {} }}",
+                client.in_graph(&format!("<{event_iri}> <{}> ?any", v::ext::TYPE))
+            ))
+            .await?;
+        let mut noted = false;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
                 write_comment(
@@ -3210,9 +3253,20 @@ impl Endpoint for ReopenEndpoint {
                     now,
                 )
                 .await?;
+                noted = true;
             }
         }
-        Ok(plain(format!("reopened {}\n", item.short())))
+        Ok(plain(match (reopened_here, noted) {
+            (true, _) => format!("reopened {}\n", item.short()),
+            (false, false) => format!(
+                "{} was already open, so the reopen changed nothing\n",
+                item.short()
+            ),
+            (false, true) => format!(
+                "{} was already open, so the reopen only added the note\n",
+                item.short()
+            ),
+        }))
     }
 
     fn name(&self) -> &str {
@@ -3224,7 +3278,7 @@ impl Endpoint for ReopenEndpoint {
             .title("Reopen a ledger item")
             .summary(
                 "Undo a close: the status goes back to open, and the reason and any hand-back \
-                 are dropped.",
+                 are dropped. Reopening an item that is already open changes nothing.",
             )
             .verb(Verb::Meta)
             .action(write_scopes(
