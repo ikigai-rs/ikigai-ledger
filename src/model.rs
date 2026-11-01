@@ -155,6 +155,20 @@ pub struct Item {
     /// [`AWAITING_DISPATCHER`](crate::vocabulary::iri::AWAITING_DISPATCHER) after
     /// `comment handback=true`. `next` does not offer an item that has one (ledger #1199).
     pub awaiting: Option<String>,
+    /// How [`author`](Item::author) was admitted (`ledger:authorSource`, ledger #2827):
+    /// `committer` (verified), `delegate` or `import` (claimed). `None` for a free-text
+    /// author, which is a claim nobody checked. See [`crate::attribution`].
+    pub author_source: Option<String>,
+    /// The principal that filed the item (`ledger:committer`), as its door minted it. `None`
+    /// for a write without a principal, or an item filed before 0.15.0.
+    pub committer: Option<String>,
+    /// When the filing landed (`ledger:committedAt`), from the kernel clock.
+    pub committed_at: Option<u64>,
+    /// Whether [`created`](Item::created) is an authored date an import principal claimed.
+    pub created_claimed: bool,
+    /// Whether [`modified`](Item::modified) is still an authored date an import principal
+    /// claimed: true only until the next write stamps the kernel's time.
+    pub modified_claimed: bool,
     /// Milliseconds since the epoch.
     ///
     /// ⚠ **A stand-in when [`defects`](Item::defects) names `dcterms:created`**: the item's
@@ -278,14 +292,36 @@ impl Item {
             out.push_str(&format!("  kind:     {kind}\n"));
         }
         out.push_str(&format!(
-            "  filed:    {}{}\n",
+            "  filed:    {}{}{}\n",
             sparql::iso8601(self.created),
+            claimed_date(self.created_claimed),
             self.author
                 .as_ref()
                 .map(|a| format!(" by {a}"))
                 .unwrap_or_default()
         ));
-        out.push_str(&format!("  updated:  {}\n", sparql::iso8601(self.modified)));
+        out.push_str(&format!(
+            "  updated:  {}{}\n",
+            sparql::iso8601(self.modified),
+            claimed_date(self.modified_claimed)
+        ));
+        // Who, the git way (ledger #2827): the author verified or claimed, and the committer
+        // the door stamped. Each only when there is one, so an item filed without either
+        // renders as it did before.
+        if let Some(author) = &self.author {
+            out.push_str(&format!(
+                "  author:   {author} ({})\n",
+                crate::attribution::author_status(self.author_source.as_deref())
+            ));
+        }
+        if let Some(committer) = &self.committer {
+            out.push_str(&format!(
+                "  committer: {committer}{}\n",
+                self.committed_at
+                    .map(|at| format!(" at {}", sparql::iso8601(at)))
+                    .unwrap_or_default()
+            ));
+        }
         // Only when there is one, so an item written through the Sink renders exactly as
         // before. The sentence says which line above is a stand-in, not merely that one is.
         for defect in &self.defects {
@@ -393,8 +429,18 @@ impl Item {
         if self.deferred {
             push(v::DEFERRED, typed("true", v::ext::XSD_BOOLEAN));
         }
-        if let Some(author) = &self.author {
-            push(v::AUTHOR, plain(author));
+        provenance(
+            &mut push,
+            &self.author,
+            &self.author_source,
+            &self.committer,
+            self.committed_at,
+        );
+        if self.created_claimed {
+            push(v::CREATED_SOURCE, plain(crate::attribution::IMPORT));
+        }
+        if self.modified_claimed {
+            push(v::MODIFIED_SOURCE, plain(crate::attribution::IMPORT));
         }
         if let Some(revision) = &self.revision {
             push(v::REVISION, plain(revision));
@@ -512,6 +558,14 @@ pub struct Comment {
     pub body: String,
     /// Who wrote it.
     pub author: Option<String>,
+    /// How [`author`](Comment::author) was admitted, as on an item (ledger #2827).
+    pub author_source: Option<String>,
+    /// The principal that wrote it (`ledger:committer`).
+    pub committer: Option<String>,
+    /// When the write landed (`ledger:committedAt`).
+    pub committed_at: Option<u64>,
+    /// Whether [`created`](Comment::created) is an authored date an importer claimed.
+    pub created_claimed: bool,
     /// Milliseconds since the epoch.
     pub created: u64,
 }
@@ -519,10 +573,22 @@ pub struct Comment {
 impl Comment {
     /// One block of text, stamped and attributed.
     pub fn render(&self) -> String {
+        let author = match &self.author {
+            Some(author) => format!(
+                "{author} ({})",
+                crate::attribution::author_status(self.author_source.as_deref())
+            ),
+            None => "(unattributed)".to_string(),
+        };
+        // The committer only when it is not the author: a verified author IS the committer.
+        let committer = match &self.committer {
+            Some(c) if self.author.as_deref() != Some(c) => format!(", committed by {c}"),
+            _ => String::new(),
+        };
         format!(
-            "  {} {}\n{}\n",
+            "  {}{} {author}{committer}\n{}\n",
             sparql::iso8601(self.created),
-            self.author.as_deref().unwrap_or("(unattributed)"),
+            claimed_date(self.created_claimed),
             self.body
                 .lines()
                 .map(|l| format!("    {l}"))
@@ -545,12 +611,57 @@ impl Comment {
         push(v::ext::TYPE, named(v::COMMENT_CLASS));
         push(v::ON_ITEM, item.into());
         push(v::BODY, plain(&self.body));
-        if let Some(author) = &self.author {
-            push(v::AUTHOR, plain(author));
+        provenance(
+            &mut push,
+            &self.author,
+            &self.author_source,
+            &self.committer,
+            self.committed_at,
+        );
+        if self.created_claimed {
+            push(v::CREATED_SOURCE, plain(crate::attribution::IMPORT));
         }
         push(
             v::ext::CREATED,
             typed(&sparql::iso8601(self.created), v::ext::XSD_DATETIME),
+        );
+    }
+}
+
+/// ` (claimed)` after a date an import principal claimed, and nothing after the kernel's.
+fn claimed_date(claimed: bool) -> &'static str {
+    if claimed {
+        " (claimed)"
+    } else {
+        ""
+    }
+}
+
+/// The author, its source, the committer and the commit time as the Turtle face writes
+/// them: an author with a source is a principal's IRI, and one without is free text.
+fn provenance(
+    push: &mut impl FnMut(&str, oxrdf::Term),
+    author: &Option<String>,
+    source: &Option<String>,
+    committer: &Option<String>,
+    committed_at: Option<u64>,
+) {
+    if let Some(author) = author {
+        match (source, NamedNode::new(author)) {
+            (Some(source), Ok(node)) => {
+                push(v::AUTHOR, node.into());
+                push(v::AUTHOR_SOURCE, plain(source));
+            }
+            _ => push(v::AUTHOR, plain(author)),
+        }
+    }
+    if let Some(node) = committer.as_deref().and_then(|c| NamedNode::new(c).ok()) {
+        push(v::COMMITTER, node.into());
+    }
+    if let Some(at) = committed_at {
+        push(
+            v::COMMITTED_AT,
+            typed(&sparql::iso8601(at), v::ext::XSD_DATETIME),
         );
     }
 }
@@ -1027,7 +1138,8 @@ async fn load(
         format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
-         ?principal ?awaiting WHERE {{ {} }} \
+         ?principal ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
+         ?modifiedSource WHERE {{ {} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
             "{values}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -1050,7 +1162,12 @@ async fn load(
              OPTIONAL {{ ?item <{lease}> ?lease }}\n\
              OPTIONAL {{ ?item <{expires}> ?expires }}\n\
              OPTIONAL {{ ?item <{principal}> ?principal }}\n\
-             OPTIONAL {{ ?item <{awaiting}> ?awaiting }}\n{filters}",
+             OPTIONAL {{ ?item <{awaiting}> ?awaiting }}\n\
+             OPTIONAL {{ ?item <{author_source}> ?authorSource }}\n\
+             OPTIONAL {{ ?item <{committer}> ?committer }}\n\
+             OPTIONAL {{ ?item <{committed_at}> ?committedAt }}\n\
+             OPTIONAL {{ ?item <{created_source}> ?createdSource }}\n\
+             OPTIONAL {{ ?item <{modified_source}> ?modifiedSource }}\n{filters}",
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
             number = v::NUMBER,
@@ -1074,6 +1191,11 @@ async fn load(
             expires = v::LEASE_EXPIRES,
             principal = v::CLAIM_PRINCIPAL,
             awaiting = v::AWAITING,
+            author_source = v::AUTHOR_SOURCE,
+            committer = v::COMMITTER,
+            committed_at = v::COMMITTED_AT,
+            created_source = v::CREATED_SOURCE,
+            modified_source = v::MODIFIED_SOURCE,
         ))
         )
     };
@@ -1133,7 +1255,8 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
-         ?principal ?awaiting WHERE {{ {} }} \
+         ?principal ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
+         ?modifiedSource WHERE {{ {} }} \
          ORDER BY DESC({RECENCY})",
         client.in_graph(&format!(
             "BIND({subject} AS ?item)\n\
@@ -1157,7 +1280,12 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{lease}> ?lease }}\n\
              OPTIONAL {{ ?item <{expires}> ?expires }}\n\
              OPTIONAL {{ ?item <{principal}> ?principal }}\n\
-             OPTIONAL {{ ?item <{awaiting}> ?awaiting }}",
+             OPTIONAL {{ ?item <{awaiting}> ?awaiting }}\n\
+             OPTIONAL {{ ?item <{author_source}> ?authorSource }}\n\
+             OPTIONAL {{ ?item <{committer}> ?committer }}\n\
+             OPTIONAL {{ ?item <{committed_at}> ?committedAt }}\n\
+             OPTIONAL {{ ?item <{created_source}> ?createdSource }}\n\
+             OPTIONAL {{ ?item <{modified_source}> ?modifiedSource }}",
             subject = sparql::iri(iri, "item")?,
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
@@ -1182,6 +1310,11 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
             expires = v::LEASE_EXPIRES,
             principal = v::CLAIM_PRINCIPAL,
             awaiting = v::AWAITING,
+            author_source = v::AUTHOR_SOURCE,
+            committer = v::COMMITTER,
+            committed_at = v::COMMITTED_AT,
+            created_source = v::CREATED_SOURCE,
+            modified_source = v::MODIFIED_SOURCE,
         ))
     );
     let rows = client.select(&query).await?;
@@ -1365,10 +1498,11 @@ pub async fn find_comment_by_key(
     key: &str,
 ) -> Result<Option<Comment>> {
     let query = format!(
-        "SELECT ?c ?item ?body ?author ?created WHERE {{ {} }} ORDER BY ?c LIMIT 1",
+        "SELECT ?c ?item ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource WHERE {{ {} }} ORDER BY ?c LIMIT 1",
         client.in_graph(&format!(
             "?c <{key_p}> {key} ; <{type_}> <{class}> ; <{on}> ?item ; <{body}> ?body ; \
-             <{created}> ?created .\nOPTIONAL {{ ?c <{author}> ?author }}",
+             <{created}> ?created .\nOPTIONAL {{ ?c <{author}> ?author }}\n{provenance}",
+            provenance = comment_provenance("?c"),
             key_p = v::COMMENT_KEY,
             key = literal(key),
             type_ = v::ext::TYPE,
@@ -1386,6 +1520,10 @@ pub async fn find_comment_by_key(
             body: row.get("body")?.value.clone(),
             author: row.get("author").map(|b| b.value.clone()),
             created: millis(row.get("created")?.value.as_str())?,
+            author_source: row.get("authorSource").map(|b| b.value.clone()),
+            committer: row.get("committer").map(|b| b.value.clone()),
+            committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
+            created_claimed: row.contains_key("createdSource"),
         })
     }))
 }
@@ -1437,11 +1575,12 @@ pub async fn load_comments_for(
     let mut rows = Vec::new();
     for values in values_lists(items)? {
         let query = format!(
-            "SELECT ?item ?comment ?body ?author ?created WHERE {{ {} }} ORDER BY ?created ?comment",
+            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource WHERE {{ {} }} ORDER BY ?created ?comment",
             client.in_graph(&format!(
                 "VALUES ?item {{ {values} }}\n\
                  ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
-                 OPTIONAL {{ ?comment <{author}> ?author }}",
+                 OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}",
+                provenance = comment_provenance("?comment"),
                 on_item = v::ON_ITEM,
                 body = v::BODY,
                 created = v::ext::CREATED,
@@ -1458,6 +1597,10 @@ pub async fn load_comments_for(
                 body: row.get("body")?.value.clone(),
                 author: row.get("author").map(|b| b.value.clone()),
                 created: millis(row.get("created")?.value.as_str())?,
+                author_source: row.get("authorSource").map(|b| b.value.clone()),
+                committer: row.get("committer").map(|b| b.value.clone()),
+                committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
+                created_claimed: row.contains_key("createdSource"),
             })
         })() else {
             continue;
@@ -1633,10 +1776,11 @@ pub async fn find_tombstone(
 /// `load_comments_for` breaks the tie the same way.
 pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Comment>> {
     let query = format!(
-        "SELECT ?comment ?body ?author ?created WHERE {{ {} }} ORDER BY ?created ?comment",
+        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource WHERE {{ {} }} ORDER BY ?created ?comment",
         client.in_graph(&format!(
             "?comment <{on_item}> {subject} ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
-             OPTIONAL {{ ?comment <{author}> ?author }}",
+             OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}",
+            provenance = comment_provenance("?comment"),
             on_item = v::ON_ITEM,
             subject = sparql::iri(item, "item")?,
             body = v::BODY,
@@ -1655,9 +1799,28 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
                 body: row.get("body")?.value.clone(),
                 author: row.get("author").map(|b| b.value.clone()),
                 created: millis(row.get("created")?.value.as_str())?,
+                author_source: row.get("authorSource").map(|b| b.value.clone()),
+                committer: row.get("committer").map(|b| b.value.clone()),
+                committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
+                created_claimed: row.contains_key("createdSource"),
             })
         })
         .collect())
+}
+
+/// The OPTIONALs that read a comment's committer, its author's source and a claimed
+/// `created` (ledger #2827), over the comment variable `var`.
+fn comment_provenance(var: &str) -> String {
+    format!(
+        "OPTIONAL {{ {var} <{}> ?authorSource }}\n\
+         OPTIONAL {{ {var} <{}> ?committer }}\n\
+         OPTIONAL {{ {var} <{}> ?committedAt }}\n\
+         OPTIONAL {{ {var} <{}> ?createdSource }}",
+        v::AUTHOR_SOURCE,
+        v::COMMITTER,
+        v::COMMITTED_AT,
+        v::CREATED_SOURCE
+    )
 }
 
 /// Fill in labels, about, blocks, parent, related and the children for a loaded set.
@@ -1850,6 +2013,7 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         .map(|b| crate::lifecycle::state_name(&b.value))
         .collect();
     states.sort();
+    let committed_at = row.get("committedAt").and_then(|b| millis(&b.value));
     Some(Item {
         iri: row.get("item")?.value.clone(),
         kind: row.get("kind").map(|b| b.value.clone()),
@@ -1884,6 +2048,14 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
             .max(),
         claim_principal: row.get("principal").map(|b| b.value.clone()),
         awaiting: row.get("awaiting").map(|b| b.value.clone()),
+        author_source: row.get("authorSource").map(|b| b.value.clone()),
+        committer: row.get("committer").map(|b| b.value.clone()),
+        committed_at,
+        created_claimed: row.contains_key("createdSource"),
+        // ★ A claimed `modified` holds only while it is earlier than the commit: any later
+        // write stamps the kernel's time, which is not (see `ledger:modifiedSource`).
+        modified_claimed: row.contains_key("modifiedSource")
+            && matches!((modified, committed_at), (Some(m), Some(c)) if m < c),
         // Each stands in for the other: created ≤ modified, so a missing `created` is at
         // most the `modified`, and a missing `modified` is at least the `created`. Neither
         // is invented, and with neither readable there is no true time to show.
@@ -1996,6 +2168,11 @@ mod tests {
             lease_expires: None,
             claim_principal: None,
             awaiting: None,
+            author_source: None,
+            committer: None,
+            committed_at: None,
+            created_claimed: false,
+            modified_claimed: false,
             created: 1_757_700_000_000,
             modified: 1_757_700_000_000,
             labels: vec!["module".to_string()],

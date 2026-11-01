@@ -149,6 +149,10 @@ pub struct Comment {
     pub time: String,
     /// What it says.
     pub text: String,
+    /// Who wrote it, the git way; absent with neither an author nor a committer. Added in
+    /// 0.15.0 (ledger #2827).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<Attribution>,
 }
 
 /// One item, the same object wherever it appears — `item:{id}`, each row of `items`, each
@@ -227,6 +231,62 @@ pub struct Item {
     /// its place; `#[serde(default)]`, so an earlier document reads with `null`.
     #[serde(default)]
     pub raised: Option<String>,
+    /// Who filed it, the git way: see [`Attribution`]. Absent for an item with neither an
+    /// author nor a committer. Added in 0.15.0 (ledger #2827).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<Attribution>,
+}
+
+/// Who wrote an item or a comment (ledger #2827): the author, verified or claimed, and the
+/// committer the door stamped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Attribution {
+    /// The author, as `author` beside it says it: a principal's IRI, or free text.
+    pub author: Option<String>,
+    /// `verified` when the author is the committer, `claimed` otherwise (a delegate, an
+    /// import, or free text nobody checked).
+    pub author_status: Option<String>,
+    /// How the author was admitted: `committer`, `delegate` or `import`; `null` for free text.
+    pub author_source: Option<String>,
+    /// The principal that made the write, as its door minted it; `null` when it carried none.
+    pub committer: Option<String>,
+    /// When the write landed, from the kernel clock; `null` before 0.15.0.
+    pub committed: Option<String>,
+    /// Which of the dates beside it are authored dates an import principal claimed, rather
+    /// than the kernel's: `created`, `modified`. Empty when none is.
+    pub claimed_dates: Vec<String>,
+}
+
+/// The [`Attribution`] of one entry, or `None` when it has neither author nor committer.
+fn attribution(
+    author: &Option<String>,
+    source: &Option<String>,
+    committer: &Option<String>,
+    committed_at: Option<u64>,
+    claimed: &[(&str, bool)],
+) -> Option<Attribution> {
+    if author.is_none() && committer.is_none() {
+        return None;
+    }
+    Some(Attribution {
+        author: author.clone(),
+        author_status: author.as_ref().map(|_| {
+            if source.as_deref() == Some(crate::attribution::AuthorSource::Committer.as_str()) {
+                "verified".to_string()
+            } else {
+                "claimed".to_string()
+            }
+        }),
+        author_source: source.clone(),
+        committer: committer.clone(),
+        committed: committed_at.map(sparql::iso8601),
+        claimed_dates: claimed
+            .iter()
+            .filter(|(_, is)| *is)
+            .map(|(name, _)| name.to_string())
+            .collect(),
+    })
 }
 
 /// `item:{id}`.
@@ -514,6 +574,13 @@ pub(crate) fn comment(comment: &model::Comment) -> Comment {
         author: comment.author.clone(),
         time: sparql::iso8601(comment.created),
         text: comment.body.clone(),
+        attribution: attribution(
+            &comment.author,
+            &comment.author_source,
+            &comment.committer,
+            comment.committed_at,
+            &[("created", comment.created_claimed)],
+        ),
     }
 }
 
@@ -583,6 +650,16 @@ pub(crate) fn item(
             .awaiting
             .as_deref()
             .map(|a| model::awaiting_name(a).to_string()),
+        attribution: attribution(
+            &item.author,
+            &item.author_source,
+            &item.committer,
+            item.committed_at,
+            &[
+                ("created", item.created_claimed),
+                ("modified", item.modified_claimed),
+            ],
+        ),
     }
 }
 

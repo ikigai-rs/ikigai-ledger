@@ -58,6 +58,9 @@ pub mod ext {
     pub const GENERATED_AT: &str = "http://www.w3.org/ns/prov#generatedAtTime";
     /// `prov:invalidatedAtTime`
     pub const INVALIDATED_AT: &str = "http://www.w3.org/ns/prov#invalidatedAtTime";
+    /// `prov:actedOnBehalfOf` — read, never written: the enrollment in a host's participants
+    /// graph that lets a committer claim another principal as an author (ledger #2827).
+    pub const ACTED_ON_BEHALF_OF: &str = "http://www.w3.org/ns/prov#actedOnBehalfOf";
     /// `sig:contentHash` — ikigai-sign's term, and the tagged-digest convention with it,
     /// so a tombstone's hash joins with a signature graph instead of colliding with one.
     /// Named rather than depended on: one `&str` does not justify pulling
@@ -269,6 +272,18 @@ term! {
     AWAITING => "awaiting";
     /// `ledger:awaitingAt` — when the latest hand-back decision set or cleared awaiting.
     AWAITING_AT => "awaitingAt";
+    /// `ledger:committer` — the principal the door minted for the write (ledger #2827).
+    COMMITTER => "committer";
+    /// `ledger:committedAt` — when the write landed, from the kernel clock (ledger #2827).
+    COMMITTED_AT => "committedAt";
+    /// `ledger:authorSource` — how an author was admitted (ledger #2827).
+    AUTHOR_SOURCE => "authorSource";
+    /// `ledger:createdSource` — `import` when `dcterms:created` is a claimed date.
+    CREATED_SOURCE => "createdSource";
+    /// `ledger:modifiedSource` — `import` when `dcterms:modified` is a claimed date.
+    MODIFIED_SOURCE => "modifiedSource";
+    /// `ledger:Importer` — an import or sync principal, read from the participants graph.
+    IMPORTER_CLASS => "Importer";
 }
 
 /// The `@prefix` header every Turtle face this module emits carries.
@@ -282,7 +297,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 13] = [
+pub const STRUCTURAL_CLASSES: [&str; 14] = [
     COMMENT_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
@@ -296,6 +311,7 @@ pub const STRUCTURAL_CLASSES: [&str; 13] = [
     LIFECYCLE_CLASS,
     LIFECYCLE_STATE_CLASS,
     CLAIM_KIND_CLASS,
+    IMPORTER_CLASS,
 ];
 
 /// The close reasons, as `(short name, IRI)` — the `one_of` an ArgSpec declares and the

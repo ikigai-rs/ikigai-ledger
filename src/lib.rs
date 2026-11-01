@@ -138,6 +138,7 @@
 
 #![deny(missing_docs)]
 
+pub mod attribution;
 pub mod claim;
 pub mod endpoints;
 pub mod json;

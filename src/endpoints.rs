@@ -107,6 +107,7 @@ use ikigai_core::{
 use oxrdf::Graph;
 use sha2::{Digest, Sha256};
 
+use crate::attribution::{self, Attribution, Dates};
 use crate::json;
 use crate::ledger::{ItemPartGrammar, Ledger, LedgerGrammar};
 use crate::lifecycle::Lifecycles;
@@ -320,6 +321,7 @@ pub struct SpaceConfig {
     policies: Vec<Arc<dyn OrderingPolicy>>,
     lifecycles: Lifecycles,
     claim_kind: crate::claim::ClaimKindStamper,
+    participants: Option<String>,
 }
 
 impl Default for SpaceConfig {
@@ -328,6 +330,7 @@ impl Default for SpaceConfig {
             policies: Policies::default().all().to_vec(),
             lifecycles: Lifecycles::default(),
             claim_kind: crate::claim::machine_by_default(),
+            participants: None,
         }
     }
 }
@@ -353,6 +356,15 @@ impl SpaceConfig {
         self.claim_kind = stamper;
         self
     }
+
+    /// The host's participants graph (ledger #2827): where a committer is enrolled to act for
+    /// another principal (`prov:actedOnBehalfOf`) and where an import or sync principal is
+    /// typed `ledger:Importer`. With none, the only author a principal may name is itself, and
+    /// nobody may claim an authored date. See [`crate::attribution`].
+    pub fn participants(mut self, graph: impl Into<String>) -> Self {
+        self.participants = Some(graph.into());
+        self
+    }
 }
 
 /// Bind the ledger with a host's own ordering policies. **The first is the default.**
@@ -376,6 +388,7 @@ pub fn space_with_policies(policies: Vec<Arc<dyn OrderingPolicy>>) -> EndpointSp
 /// On an empty policy list, as [`space_with_policies`] does.
 pub fn space_with(config: SpaceConfig) -> EndpointSpace {
     let policies = Arc::new(Policies::new(config.policies));
+    let participants: Participants = config.participants.map(Arc::from);
     let lifecycles = Arc::new(config.lifecycles);
     // ⚠ **Bind order is resolution order** (`EndpointSpace` takes the first grammar that
     // matches), and the two ledger-less resources go FIRST. `urn:iki:ledger:policy:next`
@@ -409,6 +422,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             ItemPartGrammar::part("state"),
             flight::StateEndpoint {
                 lifecycles: Arc::clone(&lifecycles),
+                participants: participants.clone(),
             },
         )
         .bind(
@@ -433,11 +447,36 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             },
         )
         .bind(ItemPartGrammar::part("about"), AboutEndpoint)
-        .bind(LedgerGrammar::with_id("item"), ItemEndpoint)
-        .bind(LedgerGrammar::action("append"), AppendEndpoint)
-        .bind(LedgerGrammar::action("comment"), CommentEndpoint)
-        .bind(LedgerGrammar::action("close"), CloseEndpoint)
-        .bind(LedgerGrammar::action("reopen"), ReopenEndpoint)
+        .bind(
+            LedgerGrammar::with_id("item"),
+            ItemEndpoint {
+                participants: participants.clone(),
+            },
+        )
+        .bind(
+            LedgerGrammar::action("append"),
+            AppendEndpoint {
+                participants: participants.clone(),
+            },
+        )
+        .bind(
+            LedgerGrammar::action("comment"),
+            CommentEndpoint {
+                participants: participants.clone(),
+            },
+        )
+        .bind(
+            LedgerGrammar::action("close"),
+            CloseEndpoint {
+                participants: participants.clone(),
+            },
+        )
+        .bind(
+            LedgerGrammar::action("reopen"),
+            ReopenEndpoint {
+                participants: participants.clone(),
+            },
+        )
         .bind(
             LedgerGrammar::action("claim"),
             ClaimEndpoint {
@@ -447,7 +486,12 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
         .bind(LedgerGrammar::action("defer"), DeferEndpoint)
         .bind(LedgerGrammar::action("link"), LinkEndpoint)
         .bind(LedgerGrammar::action("label"), LabelEndpoint)
-        .bind(LedgerGrammar::action("purge"), PurgeEndpoint)
+        .bind(
+            LedgerGrammar::action("purge"),
+            PurgeEndpoint {
+                participants: participants.clone(),
+            },
+        )
         .bind(
             LedgerGrammar::action("doctor"),
             flight::DoctorEndpoint {
@@ -458,6 +502,10 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
 }
 
 // ------------------------------------------------------------------------- helpers
+
+/// The host's participants graph, shared by every endpoint that writes an author
+/// ([`SpaceConfig::participants`]).
+pub(crate) type Participants = Option<Arc<str>>;
 
 /// A `text/plain` representation.
 fn plain(text: impl Into<String>) -> Representation {
@@ -850,10 +898,10 @@ async fn write_comment(
     client: &StoreClient<'_, '_>,
     item: &str,
     text: &str,
-    author: Option<&str>,
+    who: &Attribution,
     now: u64,
 ) -> Result<String> {
-    write_keyed_comment(client, item, text, author, now, None, Handback::Unchanged).await
+    write_keyed_comment(client, item, text, who, now, None, Handback::Unchanged).await
 }
 
 /// What a comment does to its item's hand-back state (`ledger:awaiting`, ledger #1199).
@@ -929,7 +977,7 @@ async fn write_keyed_comment(
     client: &StoreClient<'_, '_>,
     item: &str,
     text: &str,
-    author: Option<&str>,
+    who: &Attribution,
     now: u64,
     key: Option<&str>,
     handback: Handback,
@@ -944,15 +992,10 @@ async fn write_keyed_comment(
         body = v::BODY,
         text = literal(text),
         created = v::ext::CREATED,
-        when = datetime(now),
+        when = datetime(who.created_or(now)),
     );
-    if let Some(author) = author {
-        triples.push_str(&format!(
-            "\n<{comment}> <{}> {} .",
-            v::AUTHOR,
-            literal(author)
-        ));
-    }
+    triples.push_str(&who.triples(&comment, now));
+    triples.push_str(&who.date_sources(&comment));
     // ★ The hand-back is in the SAME update as the comment (ledger #1199), so the evidence
     // and the state it puts the item in land together or not at all.
     if key.is_none() && handback != Handback::Set {
@@ -1022,13 +1065,17 @@ async fn write_keyed_comment(
 
 /// The comment [`write_comment`] just wrote, as the JSON face carries it — built from what
 /// was written rather than read back, because the write is the authority on what it said.
-fn written(iri: &str, item: &str, text: &str, author: Option<&str>, now: u64) -> json::Comment {
+fn written(iri: &str, item: &str, text: &str, who: &Attribution, now: u64) -> json::Comment {
     json::comment(&model::Comment {
         iri: iri.to_string(),
         on_item: item.to_string(),
         body: text.to_string(),
-        author: author.map(str::to_string),
-        created: now,
+        author: who.author.clone(),
+        author_source: who.source.map(|s| s.as_str().to_string()),
+        committer: who.committer.clone(),
+        committed_at: Some(now),
+        created_claimed: who.created.is_some(),
+        created: who.created_or(now),
     })
 }
 
@@ -1575,7 +1622,9 @@ fn split_labels(value: Option<&str>) -> Vec<String> {
 // ---------------------------------------------------------------------------- item
 
 #[derive(Clone)]
-struct ItemEndpoint;
+struct ItemEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for ItemEndpoint {
@@ -1715,9 +1764,15 @@ impl Endpoint for ItemEndpoint {
                 let now = now_ms(inv)?;
                 let item = require_item(&client, id).await?;
                 let reason = inv.inline_str("reason").unwrap_or("").to_string();
-                let author = inv.inline_str("author").ok().map(str::to_string);
-                let Some(removed) =
-                    delete_item(&client, &item, &reason, author.as_deref(), now, false).await?
+                let who = attribution::resolve(
+                    inv,
+                    &client,
+                    self.participants.as_deref(),
+                    Dates::None,
+                    now,
+                )
+                .await?;
+                let Some(removed) = delete_item(&client, &item, &reason, &who, now, false).await?
                 else {
                     return Err(Error::NotFound(format!(
                         "no ledger item at `{}`: another delete removed it while this one was \
@@ -1841,7 +1896,9 @@ impl Endpoint for ItemEndpoint {
                     )
                     .input(
                         ArgSpec::new("author")
-                            .summary("Who deleted it.")
+                            .summary(
+                                "Who deleted it. Optional: the committer, the principal this capability carries, is the author by default. Otherwise a principal's IRI the committer acts for in the host's participants graph, or, for an import principal, any actor; recorded as claimed (ledger #2827).",
+                            )
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
@@ -2129,7 +2186,7 @@ async fn delete_item(
     client: &StoreClient<'_, '_>,
     item: &Item,
     reason: &str,
-    author: Option<&str>,
+    who: &Attribution,
     now: u64,
     destroy: bool,
 ) -> Result<Option<Removed>> {
@@ -2259,13 +2316,7 @@ async fn delete_item(
                 literal(reason)
             ));
         }
-        if let Some(author) = author {
-            triples.push_str(&format!(
-                "\n<{tombstone}> <{}> {} .",
-                v::AUTHOR,
-                literal(author)
-            ));
-        }
+        triples.push_str(&who.triples(&tombstone, now));
         // ★ The key goes onto the tombstone, in the same update that removes it from the item,
         // so there is no instant at which the key is free: a keyed append replayed after a
         // delete answers the deleted item instead of filing it again. Kept through a purge as
@@ -2393,7 +2444,7 @@ async fn purge_archived(
     client: &StoreClient<'_, '_>,
     found: &model::Tombstone,
     reason: &str,
-    author: Option<&str>,
+    who: &Attribution,
     now: u64,
 ) -> Result<usize> {
     let subject = sparql::iri(&found.item, "item")?;
@@ -2433,7 +2484,7 @@ async fn purge_archived(
             &literal(reason),
         ));
     }
-    if let Some(author) = author {
+    if let Some(author) = &who.author {
         operations.push(replace_one_of(
             client,
             &found.iri,
@@ -2466,7 +2517,9 @@ async fn clear_archive(client: &StoreClient<'_, '_>, selector: &str) -> Result<(
 // -------------------------------------------------------------------------- append
 
 #[derive(Clone)]
-struct AppendEndpoint;
+struct AppendEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for AppendEndpoint {
@@ -2486,13 +2539,22 @@ impl Endpoint for AppendEndpoint {
         let raised = inv.inline_str("raised").ok().map(parse_date).transpose()?;
         let now = now_ms(inv)?;
         let (title, body) = split_content(inv.inline_str("content")?)?;
-        let author = inv.inline_str("author").ok();
+        // ★ Who is writing is checked before anything is written (ledger #2827): a refused
+        // author or date files nothing.
+        let who = attribution::resolve(
+            inv,
+            &client,
+            self.participants.as_deref(),
+            Dates::CreatedAndModified,
+            now,
+        )
+        .await?;
         let id = mint_id(now)?;
         let iri = client.ledger().item(&id);
 
         let mut triples = format!(
             "<{iri}> <{type_}> <{class}> ; <{number}> ?new ; <{title_p}> {title_v} ; \
-             <{status}> <{open}> ; <{created}> {when} ; <{modified}> {when} .",
+             <{status}> <{open}> ; <{created}> {filed} ; <{modified}> {changed} .",
             type_ = v::ext::TYPE,
             class = v::ITEM_CLASS,
             number = v::NUMBER,
@@ -2502,8 +2564,11 @@ impl Endpoint for AppendEndpoint {
             open = v::OPEN,
             created = v::ext::CREATED,
             modified = v::ext::MODIFIED,
-            when = datetime(now),
+            filed = datetime(who.created_or(now)),
+            changed = datetime(who.modified_or(now)),
         );
+        triples.push_str(&who.triples(&iri, now));
+        triples.push_str(&who.date_sources(&iri));
         if let Ok(kind) = inv.inline_str("kind") {
             // ⚠ A LEVEL is a subclass of `ledger:Item`, never one of this crate's own
             // bookkeeping classes. An item typed `ledger:Counter` was a second counter
@@ -2534,9 +2599,6 @@ impl Endpoint for AppendEndpoint {
                 v::PRIORITY,
                 integer(parse_priority(priority)?)
             ));
-        }
-        if let Some(author) = author {
-            triples.push_str(&format!("\n<{iri}> <{}> {} .", v::AUTHOR, literal(author)));
         }
         if let Ok(revision) = inv.inline_str("revision") {
             triples.push_str(&format!(
@@ -2742,8 +2804,29 @@ impl Endpoint for AppendEndpoint {
                 )
                 .input(
                     ArgSpec::new("author")
-                        .summary("Who is filing it.")
+                        .summary(
+                                "Who is filing it. Optional: the committer, the principal this capability carries, is the author by default. Otherwise a principal's IRI the committer acts for in the host's participants graph, or, for an import principal, any actor; recorded as claimed (ledger #2827).",
+                            )
                         .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("created")
+                        .summary(
+                            "An import principal's authored filing time (`xsd:dateTime`, no \
+                             later than now), recorded as claimed. Refused from anyone else \
+                             (ledger #2827).",
+                        )
+                        .class(v::ext::XSD_DATETIME)
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("modified")
+                        .summary(
+                            "An import principal's authored last-change time, recorded as \
+                             claimed; ranking reads it. Refused from anyone else (ledger #2827).",
+                        )
+                        .class(v::ext::XSD_DATETIME)
                         .optional(),
                 )
                 .input(
@@ -2866,7 +2949,9 @@ async fn comment_written(client: &StoreClient<'_, '_>, comment: &str) -> Result<
 // ------------------------------------------------------------------------- comment
 
 #[derive(Clone)]
-struct CommentEndpoint;
+struct CommentEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for CommentEndpoint {
@@ -2902,7 +2987,14 @@ impl Endpoint for CommentEndpoint {
                 detail: "an empty comment says nothing and cannot be edited afterwards".to_string(),
             });
         }
-        let author = inv.inline_str("author").ok();
+        let who = attribution::resolve(
+            inv,
+            &client,
+            self.participants.as_deref(),
+            Dates::Created,
+            now,
+        )
+        .await?;
         // ★ A hand-back asks the dispatcher to check work that is still open; closed work
         // awaits nobody (ledger #1418). Until 0.11.1 this wrote `awaiting` on a closed item,
         // the state the doctor's `awaiting-closed` says only a write around the ledger leaves.
@@ -2938,7 +3030,7 @@ impl Endpoint for CommentEndpoint {
             &client,
             &item.iri,
             text.trim(),
-            author,
+            &who,
             now,
             key.as_deref(),
             change,
@@ -2983,7 +3075,7 @@ impl Endpoint for CommentEndpoint {
                 "commented",
                 json::item_ref(ledger, item.number, &item.iri),
             );
-            answer.comment = Some(written(&comment, &item.iri, text.trim(), author, now));
+            answer.comment = Some(written(&comment, &item.iri, text.trim(), &who, now));
             answer.key = key;
             answer.handback = match change {
                 Handback::Set => Some("set".to_string()),
@@ -3031,8 +3123,20 @@ impl Endpoint for CommentEndpoint {
                     )
                     .input(
                         ArgSpec::new("author")
-                            .summary("Who is commenting.")
+                            .summary(
+                                "Who is commenting. Optional: the committer, the principal this capability carries, is the author by default. Otherwise a principal's IRI the committer acts for in the host's participants graph, or, for an import principal, any actor; recorded as claimed (ledger #2827).",
+                            )
                             .class(v::ext::XSD_STRING)
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("created")
+                            .summary(
+                                "An import principal's authored time for this comment \
+                                 (`xsd:dateTime`, no later than now), recorded as claimed. \
+                                 Refused from anyone else (ledger #2827).",
+                            )
+                            .class(v::ext::XSD_DATETIME)
                             .optional(),
                     )
                     .input(
@@ -3132,7 +3236,9 @@ async fn existing_comment(
 // --------------------------------------------------------------------- close/reopen
 
 #[derive(Clone)]
-struct CloseEndpoint;
+struct CloseEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for CloseEndpoint {
@@ -3180,7 +3286,9 @@ impl Endpoint for CloseEndpoint {
         );
         let (event, event_iri) =
             counts::status_event_when(&client, &item.iri, v::CLOSED, now, &still_open)?;
-        let author = inv.inline_str("author").ok();
+        let who =
+            attribution::resolve(inv, &client, self.participants.as_deref(), Dates::None, now)
+                .await?;
         let record = client.ledger().comment(&mint_id(now)?);
         let mut ops = vec![
             // Editing the verdict of an already closed item must not move its close time.
@@ -3201,7 +3309,7 @@ impl Endpoint for CloseEndpoint {
                     v::CLOSED_AT_SOURCE
                 ))
             ),
-            release_record(&client, &item.iri, &record, author, now),
+            release_record(&client, &item.iri, &record, &who, now),
             replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
             replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
             touch(&client, &item.iri, now),
@@ -3230,8 +3338,8 @@ impl Endpoint for CloseEndpoint {
         let mut note_written = None;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
-                let comment = write_comment(&client, &item.iri, note.trim(), author, now).await?;
-                note_written = Some(written(&comment, &item.iri, note.trim(), author, now));
+                let comment = write_comment(&client, &item.iri, note.trim(), &who, now).await?;
+                note_written = Some(written(&comment, &item.iri, note.trim(), &who, now));
             }
         }
         if want == JSON {
@@ -3302,7 +3410,9 @@ impl Endpoint for CloseEndpoint {
                     )
                     .input(
                         ArgSpec::new("author")
-                            .summary("Who is closing it.")
+                            .summary(
+                                "Who is closing it. Optional: the committer, the principal this capability carries, is the author by default. Otherwise a principal's IRI the committer acts for in the host's participants graph, or, for an import principal, any actor; recorded as claimed (ledger #2827).",
+                            )
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
@@ -3315,7 +3425,9 @@ impl Endpoint for CloseEndpoint {
 }
 
 #[derive(Clone)]
-struct ReopenEndpoint;
+struct ReopenEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for ReopenEndpoint {
@@ -3326,6 +3438,9 @@ impl Endpoint for ReopenEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
+        let who =
+            attribution::resolve(inv, &client, self.participants.as_deref(), Dates::None, now)
+                .await?;
         // ★ THE UPDATE DECIDES, AS IT DOES FOR CLOSE (ledger #2766, after #2764). Until
         // 0.14.1 the reopen required the item and then wrote unconditionally, so reopening an
         // open item appended an `open` status event for a close that never happened, and
@@ -3375,14 +3490,7 @@ impl Endpoint for ReopenEndpoint {
         let mut noted = false;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
-                write_comment(
-                    &client,
-                    &item.iri,
-                    note.trim(),
-                    inv.inline_str("author").ok(),
-                    now,
-                )
-                .await?;
+                write_comment(&client, &item.iri, note.trim(), &who, now).await?;
                 noted = true;
             }
         }
@@ -3424,7 +3532,9 @@ impl Endpoint for ReopenEndpoint {
                     )
                     .input(
                         ArgSpec::new("author")
-                            .summary("Who is reopening it.")
+                            .summary(
+                                "Who is reopening it. Optional: the committer, the principal this capability carries, is the author by default. Otherwise a principal's IRI the committer acts for in the host's participants graph, or, for an import principal, any actor; recorded as claimed (ledger #2827).",
+                            )
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
@@ -3518,7 +3628,7 @@ fn release_record(
     client: &StoreClient<'_, '_>,
     item: &str,
     record: &str,
-    author: Option<&str>,
+    who: &Attribution,
     now: u64,
 ) -> String {
     let mut triples = format!(
@@ -3530,13 +3640,7 @@ fn release_record(
         created = v::ext::CREATED,
         when = datetime(now),
     );
-    if let Some(author) = author {
-        triples.push_str(&format!(
-            "\n<{record}> <{}> {} .",
-            v::AUTHOR,
-            literal(author)
-        ));
-    }
+    triples.push_str(&who.triples(record, now));
     format!(
         "INSERT {{ {} }} WHERE {{ {} }}",
         client.in_graph(&triples),
@@ -4121,7 +4225,14 @@ impl Endpoint for ClaimEndpoint {
                 }
                 if let Ok(note) = inv.inline_str("content") {
                     if !note.trim().is_empty() {
-                        write_comment(&client, &item.iri, note.trim(), None, now).await?;
+                        write_comment(
+                            &client,
+                            &item.iri,
+                            note.trim(),
+                            &Attribution::committer(inv)?,
+                            now,
+                        )
+                        .await?;
                     }
                 }
                 Ok(plain(format!("{} released\n", item.short())))
@@ -4283,7 +4394,14 @@ impl Endpoint for DeferEndpoint {
         .await?;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
-                write_comment(&client, &item.iri, note.trim(), None, now).await?;
+                write_comment(
+                    &client,
+                    &item.iri,
+                    note.trim(),
+                    &Attribution::committer(inv)?,
+                    now,
+                )
+                .await?;
             }
         }
         Ok(plain(format!("{} {said}\n", item.short())))
@@ -4675,7 +4793,9 @@ impl Endpoint for AboutEndpoint {
 // --------------------------------------------------------------------------- purge
 
 #[derive(Clone)]
-struct PurgeEndpoint;
+struct PurgeEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for PurgeEndpoint {
@@ -4713,7 +4833,10 @@ impl Endpoint for PurgeEndpoint {
         }
         let reference = inv.inline_str("content")?;
         let reason = inv.inline_str("reason").unwrap_or("");
-        let author = inv.inline_str("author").ok();
+        let who =
+            attribution::resolve(inv, &client, self.participants.as_deref(), Dates::None, now)
+                .await?;
+        let author = &who;
         // Not live: it may have been deleted, and then the content is in the graveyard,
         // findable through the tombstone the delete left in the live graph.
         let client = &client;
@@ -4794,7 +4917,9 @@ impl Endpoint for PurgeEndpoint {
                     )
                     .input(
                         ArgSpec::new("author")
-                            .summary("Who purged it.")
+                            .summary(
+                                "Who purged it. Optional: the committer, the principal this capability carries, is the author by default. Otherwise a principal's IRI the committer acts for in the host's participants graph, or, for an import principal, any actor; recorded as claimed (ledger #2827).",
+                            )
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )

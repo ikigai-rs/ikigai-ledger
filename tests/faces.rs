@@ -134,6 +134,7 @@ fn the_plain_item_detail_is_unchanged() {
          \x20 iri:      urn:iki:ledger:default:item:{a}\n\
          \x20 filed:    2026-09-15T00:00:00.000Z by brian\n\
          \x20 updated:  2026-09-15T00:00:00.000Z\n\
+         \x20 author:   brian (claimed, free text)\n\
          \x20 revision: f41a333\n\
          \x20 about:    urn:repo:file:x/src/a.rs\n\
          \x20 blocks:   urn:iki:ledger:default:item:{b}\n\
@@ -143,7 +144,7 @@ fn the_plain_item_detail_is_unchanged() {
          \x20 Badly.\n\
          \n\
          1 comment(s):\n\
-         \x20 2026-09-15T00:00:00.000Z chris\n\
+         \x20 2026-09-15T00:00:00.000Z chris (claimed, free text)\n\
          \x20   looked at it\n"
     );
 }
@@ -297,13 +298,29 @@ fn the_json_item_document_is_schema_1() {
         "id": "urn:iki:ledger:default:comment:{c}",
         "author": "chris",
         "time": "2026-09-15T00:00:00.000Z",
-        "text": "looked at it"
+        "text": "looked at it",
+        "attribution": {
+          "author": "chris",
+          "author_status": "claimed",
+          "author_source": null,
+          "committer": null,
+          "committed": "2026-09-15T00:00:00.000Z",
+          "claimed_dates": []
+        }
       }
     ],
     "defects": [],
     "state": "filed",
     "awaiting": null,
-    "raised": null
+    "raised": null,
+    "attribution": {
+      "author": "brian",
+      "author_status": "claimed",
+      "author_source": null,
+      "committer": null,
+      "committed": "2026-09-15T00:00:00.000Z",
+      "claimed_dates": []
+    }
   }
 }"##
     );
@@ -565,13 +582,29 @@ fn the_json_next_document_is_schema_1() {
             "id": "urn:iki:ledger:default:comment:{d}",
             "author": "chris",
             "time": "2026-09-15T00:00:00.000Z",
-            "text": "looked at it"
+            "text": "looked at it",
+            "attribution": {
+              "author": "chris",
+              "author_status": "claimed",
+              "author_source": null,
+              "committer": null,
+              "committed": "2026-09-15T00:00:00.000Z",
+              "claimed_dates": []
+            }
           }
         ],
         "defects": [],
         "state": "filed",
         "awaiting": null,
-        "raised": null
+        "raised": null,
+        "attribution": {
+          "author": "brian",
+          "author_status": "claimed",
+          "author_source": null,
+          "committer": null,
+          "committed": "2026-09-15T00:00:00.000Z",
+          "claimed_dates": []
+        }
       }
     }
   ]
@@ -636,7 +669,15 @@ fn the_json_write_answers_are_schema_1() {
     "id": "urn:iki:ledger:default:comment:{b}",
     "author": "brian",
     "time": "2026-09-15T00:00:00.000Z",
-    "text": "hi"
+    "text": "hi",
+    "attribution": {
+      "author": "brian",
+      "author_status": "claimed",
+      "author_source": null,
+      "committer": null,
+      "committed": "2026-09-15T00:00:00.000Z",
+      "claimed_dates": []
+    }
   }
 }"##
     );

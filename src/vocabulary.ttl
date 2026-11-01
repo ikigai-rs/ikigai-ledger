@@ -190,9 +190,36 @@ ledger:label a rdf:Property ;
     rdfs:comment "A free tag. Filtering by label — must have ALL of these, must have NONE of those — belongs to the READY QUERY, not to an ordering policy; that is why kata's ranker can be six lines." .
 
 ledger:author a rdf:Property ;
-    rdfs:range xsd:string ;
     rdfs:label "author" ;
-    rdfs:comment "Who filed an item or a comment, as a plain name. ⚠ A string and not a prov:Agent IRI, knowingly: this ecosystem's identity story (signature graphs, per-identity grants, session ids) is real but not yet one IRI scheme, and minting urn:iki:ledger:agent:{slug} now would create a second, private identity namespace to migrate later. prov:wasAttributedTo wants an IRI, so it is deliberately NOT used here." .
+    rdfs:comment "Who an item, a comment or a tombstone is credited to. ★ Since 0.15.0 (ledger #2827) a write whose capability carries a principal records the author as that principal's IRI or one it was admitted to claim, and ledger:authorSource says how it was admitted: the committer itself (verified), a principal the committer acts for (claimed), or a foreign actor an import principal names (claimed). With no author argument the committer is the author. ⚠ A plain string with no ledger:authorSource is the older free-text form, and still what a write without a principal (root, a host whose door mints none) records: a claim nobody checked. prov:wasAttributedTo is still not used, because a free-text author cannot be its object." .
+
+ledger:committer a rdf:Property ;
+    rdfs:label "committer" ;
+    rdfs:comment "The principal that made the write: the one urn:cap:principal:<iri> the writer's capability carried, minted by the host's door (gonk names each QUIC client urn:iki:gonk:client:<fingerprint>; a participant is urn:collab:participant:{name}). Never an argument, so a caller cannot supply it. Stamped on every item, comment and tombstone a write creates, with ledger:committedAt (ledger #2827). Absent when the capability carried no principal: root, or a host whose door mints none." .
+
+ledger:committedAt a rdf:Property ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "committed at" ;
+    rdfs:comment "When the write that created this node landed, from the kernel clock and never from an argument. Equal to dcterms:created unless an import principal claimed an authored created date (ledger:createdSource import)." .
+
+ledger:authorSource a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "author source" ;
+    rdfs:comment "How ledger:author was admitted, as a literal in the ledger:closedAtSource shape: committer (the author IS the committer, so verified), delegate (a principal the committer acts for by prov:actedOnBehalfOf in the host's participants graph; claimed by the committer) or import (a foreign actor named by an import or sync principal, a ledger:Importer; claimed). Absent on a free-text author (see ledger:author)." .
+
+ledger:createdSource a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "created source" ;
+    rdfs:comment "The literal import when dcterms:created on an item or a comment is an authored date an import principal claimed, not the kernel time of the write (that is ledger:committedAt). Absent when the date is the kernel's." .
+
+ledger:modifiedSource a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "modified source" ;
+    rdfs:comment "The literal import when dcterms:modified on an item is an authored date an import principal claimed when filing it. Ranking reads dcterms:modified either way, so imported items tie-break as they did at their source. An authored date is never later than ledger:committedAt (one that is, is refused), and every later write stamps dcterms:modified from the kernel clock, at or after it; so the claim holds exactly while dcterms:modified is earlier than ledger:committedAt, and the faces read it that way." .
+
+ledger:Importer a rdfs:Class ;
+    rdfs:label "Importer" ;
+    rdfs:comment "An import or sync principal: a principal the host's participants graph types ledger:Importer. Read, never written, by this module. Only an Importer may name a foreign actor as an author, or claim an authored dcterms:created, dcterms:modified or ledger:closedAt (ledger #2827). Which principals are importers is enrollment data, not a capability." .
 
 ledger:claimedBy a rdf:Property ;
     rdfs:domain ledger:Item ;
