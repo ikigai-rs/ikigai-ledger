@@ -333,6 +333,7 @@ fn state_document(
 #[derive(Clone)]
 pub(super) struct StateEndpoint {
     pub(super) lifecycles: Arc<Lifecycles>,
+    pub(super) participants: super::Participants,
 }
 
 #[async_trait]
@@ -371,6 +372,14 @@ impl Endpoint for StateEndpoint {
                 let from = named_state(lifecycle, "from", inv.inline_str("from")?)?;
                 let now = now_ms(inv)?;
                 let item = require_item(&client, id).await?;
+                let who = attribution::resolve(
+                    inv,
+                    &client,
+                    self.participants.as_deref(),
+                    Dates::None,
+                    now,
+                )
+                .await?;
 
                 // The cheap half first: an item already somewhere else is refused without a
                 // write, because a no-op update still cuts every cached read of the ledger.
@@ -417,8 +426,7 @@ impl Endpoint for StateEndpoint {
 
                 if let Ok(note) = inv.inline_str("content") {
                     if !note.trim().is_empty() && outcome == "transitioned" {
-                        let author = inv.inline_str("author").ok();
-                        write_comment(&client, &item.iri, note.trim(), author, now).await?;
+                        write_comment(&client, &item.iri, note.trim(), &who, now).await?;
                     }
                 }
 

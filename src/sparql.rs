@@ -284,6 +284,18 @@ impl<'a, 'i> StoreClient<'a, 'i> {
             .ok_or_else(|| Error::Endpoint("the store's ASK answer has no `boolean`".to_string()))
     }
 
+    /// Evaluate a SPARQL ASK over ANOTHER graph than this ledger's: the host's participants
+    /// graph, which [`crate::attribution`] reads for enrollment. Through the same narrow
+    /// door, with the caller's capability, so the caller must hold that graph's read grant.
+    pub(crate) async fn ask_graph(&self, graph: &str, query: &str) -> Result<bool> {
+        let bytes = self.query(STORE_GRAPH_ASK, graph, query).await?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::Endpoint(format!("the store's ASK answer is not JSON: {e}")))?;
+        json.get("boolean")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| Error::Endpoint("the store's ASK answer has no `boolean`".to_string()))
+    }
+
     /// Apply a SPARQL UPDATE to this ledger's graph. The store cuts
     /// `urn:iki:store:graph-update` on success, which is what makes every cacheable read
     /// of this ledger recompute.

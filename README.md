@@ -974,6 +974,45 @@ door OVERWRITES that argument. A host whose door merely fills it in when absent 
 choice back to the caller. A claim taken before kinds existed carries no `ledger:claimKind`; the
 JSON face says `null` and the doctor reads it as a machine's.
 
+## Who wrote it: a committer and a verified or claimed author
+
+Every item, comment and tombstone a write creates records who made it the way git does (ledger
+#2827):
+
+- **`ledger:committer`**: the one principal (`urn:cap:principal:<iri>`) the writer's
+  capability carried, as the host's door minted it, and **`ledger:committedAt`**, the kernel
+  clock. Neither is an argument, so a caller cannot supply either. A capability with no
+  principal (root, a host whose door mints none) records the time and no committer.
+- **`ledger:author`**: optional. With no `author=` the committer is the author, and that
+  author is **verified**. An `author=` is accepted only when it names the committer, a
+  principal the committer acts for (`prov:actedOnBehalfOf` in the host's participants graph),
+  or, when the committer is an import or sync principal (typed `ledger:Importer` there), a
+  foreign actor. The last two are **claimed**. `ledger:authorSource` says which:
+  `committer`, `delegate` or `import`. Anything else is refused with the reason and the remedy.
+- **Authored dates**: only an import principal may send `created` and `modified` when filing,
+  and `created` on a comment, as `xsd:dateTime`s no later than the import. They go into
+  `dcterms:created` and `dcterms:modified`, so ranking tie-breaks imported items as their
+  source did, marked `ledger:createdSource` / `ledger:modifiedSource` `"import"` beside the
+  true `ledger:committedAt`. Any other caller that sends a date is refused, and told why.
+
+The host names the participants graph with `SpaceConfig::participants(graph)`. It is read
+through the store's narrow door with the caller's own capability, so a delegate or an importer
+needs that graph's read grant; writing as yourself reads nothing. Without one, the only author
+a principal may name is itself, and nobody may claim a date. Who may claim whom is enrollment
+data in that graph, not a capability per pair.
+
+```text
+  filed:    2020-01-02T03:04:05.000Z (claimed) by urn:example:github:user:octocat
+  updated:  2020-02-03T04:05:06.000Z (claimed)
+  author:   urn:example:github:user:octocat (claimed by an importer)
+  committer: urn:iki:gonk:client:importer at 2026-11-01T18:30:00.000Z
+```
+
+The JSON face carries the same as `attribution` on an item and on a comment (`author_status`
+`verified` or `claimed`, `author_source`, `committer`, `committed`, `claimed_dates`). ⚠ A
+write without a principal still records `author=` as the free text it always was; every face
+reads that as claimed (`claimed, free text`). `tests/attribution.rs` has one test per path.
+
 ## The doctor: everything wrong, at once, and nothing repaired
 
 ```text
@@ -1339,6 +1378,13 @@ All twenty-four resources are bound, tested, and walked clean by `ikigai-conform
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### Unreleased: a committer the door stamps, and a verified or claimed author (ledger #2827)
+
+Every item, comment and tombstone records `ledger:committer` and `ledger:committedAt`; an
+author is verified (the committer) or claimed (an enrolled delegate, or an import principal's
+foreign actor); an import principal may claim authored dates. A principal can no longer send a
+free-text `author=`, and every face tells verified from claimed. See "Who wrote it" above.
 
 ### 0.14.2: one reopen per close, and a delete or purge leaves nothing behind (ledger #2766, #2779, #2780)
 

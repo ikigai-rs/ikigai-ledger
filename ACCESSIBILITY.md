@@ -19,8 +19,10 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
 
 - **An item's line and detail** (`Item::line` and `Item::detail` in `src/model.rs`): one fixed
   line per item, `#12  open    p1  Title  [labels]  claimed:holder`, and under it, in the
-  detail, labeled lines (`iri:`, `filed:`, `updated:`, `about:`, `blocks:`, `child:` …), the
-  body, and the comments, each stamped with its time and author (`Comment::render`).
+  detail, labeled lines (`iri:`, `filed:`, `updated:`, `author:`, `committer:`, `about:`,
+  `blocks:`, `child:` …), the body, and the comments, each stamped with its time and author
+  (`Comment::render`). Whether an author or a date is verified or claimed is said in words in
+  parentheses (`(verified)`, `(claimed by a delegate)`, `(claimed)`), never by a sign alone.
 - **Listings** (`items`, `ledgers`, `count`): item lines and a total (`3 item(s)`); `count`
   answers a bare number.
 - **`urn:iki:ledger:next`** (`Selection::plain` in `src/select.rs`): ranked item lines, each
