@@ -2072,6 +2072,13 @@ fn rows_as_data(rows: &[sparql::Row]) -> Result<String> {
 /// hand-written blank node included (which `DELETE DATA` cannot name), so a write racing a
 /// purge is destroyed with it and is not in the tombstone's count.
 ///
+/// ⚠ A purge that runs whole inside a recoverable delete's window, between its read and its
+/// archive, empties the graveyard before the archive lands (ledger #2779). The delete cannot
+/// make its archive conditional on the graveyard, because it holds only the graveyard's write
+/// grant and a `WHERE` there is a read. So a purge clears the graveyard once more after its
+/// tombstone says purged, and a recoverable delete reads that mark after it archived and, if
+/// it is there, removes exactly what it archived. Whichever of the two comes second cleans up.
+///
 /// ⚠ The one wrinkle the re-runnability does not cover: if the item is *edited* between an
 /// interrupted delete and its retry, the graveyard ends up holding the union of both
 /// versions. The tombstone's hash then describes the retry's quads, which is what was
@@ -2114,6 +2121,7 @@ async fn delete_item(
     // belongs in the WHERE clause only. Putting it in both is a parse error at the store,
     // which is at least loud.
     let mut archived = 0;
+    let mut archive = None;
     let removal = if destroy {
         // Everything an earlier recoverable delete quarantined. Read first, so the answer
         // can say how much it destroyed — and so the graveyard's READ grant, which the
@@ -2126,13 +2134,7 @@ async fn delete_item(
             ))
             .await?
             .len();
-        client
-            .update_deleted(&format!(
-                "DELETE {{ {} }} WHERE {{ {} }}",
-                client.in_deleted_graph("?s ?p ?o"),
-                client.in_deleted_graph(&selector),
-            ))
-            .await?;
+        clear_archive(client, &selector).await?;
         // Only while the item is live: once another delete committed, the selector's
         // `?o = <item>` would take that delete's tombstone edge with it.
         format!(
@@ -2153,7 +2155,9 @@ async fn delete_item(
                 client.in_deleted_graph(&data)
             ))
             .await?;
-        format!("DELETE DATA {{ {} }}", client.in_graph(&data))
+        let removal = format!("DELETE DATA {{ {} }}", client.in_graph(&data));
+        archive = Some(data);
+        removal
     };
 
     let id = item.iri.rsplit(':').next().unwrap_or("unknown").to_string();
@@ -2228,6 +2232,36 @@ async fn delete_item(
             ),
         ]))
         .await?;
+    // ★ A purge that ran inside this delete's window (ledger #2779). A purge that read the
+    // item live, or found another delete's tombstone, between this delete's read and its
+    // archive cleared the graveyard BEFORE the archive landed, so the item's content would
+    // now sit in the graveyard under a tombstone saying it was destroyed. A delete holds no
+    // read grant on the graveyard, so its archive cannot be conditional there; instead every
+    // purge clears the graveyard again AFTER it marks the tombstone purged, and every
+    // recoverable delete looks for that mark AFTER it archived. One of the two always comes
+    // second: an archive that lands after a purge's last clear also lands after its mark, and
+    // then this read sees the mark and takes back exactly the quads it wrote.
+    if let Some(data) = &archive {
+        let purged = client
+            .ask(&format!(
+                "ASK {{ {} }}",
+                client.in_graph(&format!("<{tombstone}> <{}> ?at", v::PURGED_AT))
+            ))
+            .await?;
+        if purged {
+            client
+                .update_deleted(&format!(
+                    "DELETE DATA {{ {} }}",
+                    client.in_deleted_graph(data)
+                ))
+                .await?;
+        }
+    }
+    if destroy {
+        // The purge's half of the same handshake: a recoverable delete whose archive landed
+        // after the clear above, and before the commit, is removed here.
+        clear_archive(client, &selector).await?;
+    }
     // Whose tombstone it is: this delete's stamp and hash, or another delete's that committed
     // first. Two deletes in one millisecond over the same quads are indistinguishable here,
     // and then either answer is true.
@@ -2287,13 +2321,7 @@ async fn purge_archived(
         .await?
         .len();
     if archived > 0 {
-        client
-            .update_deleted(&format!(
-                "DELETE {{ {} }} WHERE {{ {} }}",
-                client.in_deleted_graph("?s ?p ?o"),
-                client.in_deleted_graph(&selector),
-            ))
-            .await?;
+        clear_archive(client, &selector).await?;
     }
     let mut operations = vec![
         replace_one_of(
@@ -2330,7 +2358,24 @@ async fn purge_archived(
         ));
     }
     client.update(&batch(&operations)).await?;
+    // ★ Again, now that the tombstone says purged (ledger #2779): a recoverable delete that
+    // read the item live before another delete committed may archive it after the clear
+    // above. If its archive lands before this clear, this clear removes it; if after, that
+    // delete sees the mark and removes it itself (see `delete_item`).
+    clear_archive(client, &selector).await?;
     Ok(archived)
+}
+
+/// Destroy every quad the `selector` matches in the graveyard.
+async fn clear_archive(client: &StoreClient<'_, '_>, selector: &str) -> Result<()> {
+    client
+        .update_deleted(&format!(
+            "DELETE {{ {} }} WHERE {{ {} }}",
+            client.in_deleted_graph("?s ?p ?o"),
+            client.in_deleted_graph(selector),
+        ))
+        .await?;
+    Ok(())
 }
 
 // -------------------------------------------------------------------------- append
