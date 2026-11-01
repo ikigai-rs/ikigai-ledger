@@ -1504,7 +1504,19 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### 0.15.0 (not yet published): who wrote it, and who worked on it (ledger #2827, #2819)
+### 0.16.0: aliases by scheme (ledger #2828)
+
+An item can be named by an external id: a `(scheme, value)` alias such as `kata:<uid>` or
+`gh:<owner>/<repo>#<n>`, unique per scheme across the deployment, resolved by every item reference
+(`item=`, the item IRI, and the alias's own IRI `urn:iki:alias:scheme:{scheme}:value:{value}`). A
+scheme is registered by one principal, its owner, and only the owner adds or removes its aliases; the
+owner check and uniqueness are decided inside the write. Resolution never names an item to a caller who
+cannot read its ledger. New: `alias::space()` (bind it beside `space()`), the grants
+`urn:cap:alias:scheme:{scheme}` and `urn:cap:ledger:alias:{ledger}` (which `write:{ledger}` covers), and
+the vocabulary terms `AliasScheme`, `Alias`, `schemeName`, `schemeOwner`, `aliasScheme`, `aliasValue`,
+`aliasOf`. See "Aliases" above. Not a replacement for `key`.
+
+### 0.15.0 (published 2026-11-01): who wrote it, and who worked on it (ledger #2827, #2819)
 
 **A committer the door stamps, and a verified or claimed author (#2827).** Every item, comment
 and tombstone records `ledger:committer` and `ledger:committedAt`; an author is verified (the
