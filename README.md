@@ -884,6 +884,13 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   <holder>; the claim is released.` (attributed to the closer's `author`), `released <holder>`
   at the end of the plain answer, and `"released": "<holder>"` in JSON. Reopening does not
   restore it; whoever picks the work up again claims it.
+- ★ **And the close's update decides what it did, not the read before it** (since 0.14.0,
+  ledger #2764). Only the update that finds the item open records the close (its
+  `ledger:StatusEvent` and `closedAt`), and only one that finds a claim records the release,
+  naming the claim it found. Concurrent closes of one claimed item record one close and one
+  release; the others are verdict edits, answered `closed #12 (done); it was already closed,
+  so only the verdict changed` and `"already_closed": true` in JSON. A claim that lands
+  between a close's read and its update is released and recorded like any other.
 - ★ **And a closed item cannot be claimed** (since 0.11.1, ledger #1419). A claim, a renewal
   and a takeover on a closed item are each refused with a `Conflict` naming the item and its
   state; until 0.11.1 a claim took it, and the held-closed state the close had just removed
@@ -1330,6 +1337,16 @@ item's current close timestamp while preserving history in events. New bare reso
 names `counts` and `backfill-closed-at` are reserved ledger names. No publication is part
 of this change. The ledger #2602 follow-up adds `content=all` to migrate every
 undated closed item from `updated` in one command, with a count and an idempotent rerun.
+
+Fixed in the same release (ledger #2764): `close` decided from its read of the item, and its
+update re-checked only that the item was still live. Concurrent closes of one claimed item
+each wrote the release comment, and each appended a `closed` status event and set
+`closedAt`; a claim that committed between the read and the update was retracted with no
+record. The open-to-closed transition and the release record now carry their condition in
+the update's own `WHERE`, and the close reads back what it wrote. A close of an already
+closed item still edits the verdict without moving the close time, and now says so: the
+plain answer ends `; it was already closed, so only the verdict changed`, and the JSON
+answer carries `"already_closed": true`. `tests/close_race.rs` forces both schedules.
 
 ### 0.13.1 (2026-10-27): overdue dispatcher hand-backs (ledger #2395)
 

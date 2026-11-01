@@ -362,7 +362,7 @@ pub struct NextDocument {
 /// | `existing` (an append) | `status` (`open`, `closed` or `deleted`), `key` |
 /// | `existing` (a keyed comment) | `comment` (the one the key names), `key` |
 /// | `commented` | `comment`; `key` when the comment carried one; `handback` when it set or cleared a hand-back |
-/// | `closed` | `reason`; `comment` when a note was given; `released` when it was claimed |
+/// | `closed` | `reason`; `comment` when a note was given; `released` when it was claimed; `already_closed` when it only edited the verdict |
 /// | `linked`, `unlinked` | `type`, `target` |
 ///
 /// `existing` is a keyed write's "nothing was written": an item (append) or a comment
@@ -403,6 +403,11 @@ pub struct Answer {
     /// claimed). Since 0.7.0 a close releases the claim it finds (ledger #1147).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released: Option<String>,
+    /// `true` when a close found the item already closed, so it edited the verdict (the
+    /// reason, a note) and recorded no second close (`close` only; missing otherwise).
+    /// Added in 0.14.0 (ledger #2764).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub already_closed: Option<bool>,
     /// What a comment did to the item's hand-back (`commented` only, and only when it did
     /// something): `set` for `handback=true`, `cleared` when it took an item off
     /// `awaiting` — a `rejects=true` comment, or any comment from a caller holding the close
@@ -690,6 +695,7 @@ pub(crate) fn answer(ledger: &Ledger, outcome: &str, item: ItemRef) -> Answer {
         target: None,
         comment: None,
         released: None,
+        already_closed: None,
         handback: None,
     }
 }
