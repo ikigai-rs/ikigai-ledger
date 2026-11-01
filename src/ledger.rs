@@ -389,6 +389,20 @@ impl Ledger {
         format!("{CAP_ALIAS_PREFIX}{}", self.name)
     }
 
+    /// `urn:cap:ledger:link-in:{name}` — linking an item of ANOTHER ledger to one of this
+    /// ledger's items with `blocks`, `parent` or `related`, and removing that link (since 0.15.0,
+    /// ledger #2829). It is held beside `write` on the subject's ledger, and `write:{name}` does
+    /// NOT cover it: a link in decides what this ledger's `next` offers, so whoever issues grants
+    /// decides who may add one.
+    ///
+    /// ```
+    /// use ikigai_ledger::Ledger;
+    /// assert_eq!(Ledger::parse("acme").unwrap().cap_link_in(), "urn:cap:ledger:link-in:acme");
+    /// ```
+    pub fn cap_link_in(&self) -> String {
+        format!("{CAP_LINK_IN_PREFIX}{}", self.name)
+    }
+
     /// `urn:cap:ledger:delete:{name}` — moving an item out of view, recoverably.
     pub fn cap_delete(&self) -> String {
         format!("{CAP_DELETE_PREFIX}{}", self.name)
@@ -410,6 +424,7 @@ pub(crate) const CAP_COMMENT_PREFIX: &str = "urn:cap:ledger:comment:";
 pub(crate) const CAP_CLOSE_PREFIX: &str = "urn:cap:ledger:close:";
 pub(crate) const CAP_ABOUT_PREFIX: &str = "urn:cap:ledger:about:";
 pub(crate) const CAP_ALIAS_PREFIX: &str = "urn:cap:ledger:alias:";
+pub(crate) const CAP_LINK_IN_PREFIX: &str = "urn:cap:ledger:link-in:";
 
 /// A grammar matching **both** `urn:iki:ledger:{ledger}:{action}` and the bare
 /// `urn:iki:ledger:{action}`, capturing `ledger` either way.

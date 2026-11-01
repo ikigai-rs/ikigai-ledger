@@ -43,7 +43,7 @@
 
 <https://ikigai-rs.dev/ns/ledger> a owl:Ontology ;
     rdfs:label "ikigai-ledger" ;
-    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828)." ;
+    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And it adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829)." ;
     owl:versionInfo "0.15.0" .
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -572,6 +572,52 @@ ledger:editKind a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "edit kind" ;
     rdfs:comment "Which edit a ledger:EditEvent records, as a literal: label, unlabel, link, unlink, defer, resume, about, unabout, edit (an item's title, body, priority, revision or about) or state (a lifecycle transition)." .
+# ═══════════════════════════════════════════════════════════════════════════
+# Typed links across ledgers (ledger #2829)
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:Link a rdfs:Class ;
+    rdfs:label "cross-ledger link" ;
+    rdfs:comment "An edge from an item to an item of ANOTHER ledger, written in the subject's graph: ledger:onItem the subject, ledger:linkType, ledger:linkTarget, with ledger:committer and ledger:committedAt. Admitted by write on the subject's ledger and urn:cap:ledger:link-in on the target's. An edge within one ledger stays a plain ledger:blocks, ledger:parent or ledger:related triple. Skolemized as {subject}:link:{type}:{target ledger}:{target id}." .
+
+ledger:Mirror a rdfs:Class ;
+    rdfs:label "cross-ledger mirror" ;
+    rdfs:comment "What the target's graph knows of a ledger:Link of type blocks or parent: ledger:onItem the target, ledger:linkType, ledger:mirrorOf the subject's IRI, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion, and nothing of the subject's content. Written by the ledger after every link, unlink, close and reopen of the subject, only when its version is at least the one it holds, so the last change of the subject wins whatever order the writes land in. Skolemized as {target}:mirror:{type}:{subject ledger}:{subject id}." .
+
+ledger:linkType a rdf:Property ;
+    rdfs:label "link type" ;
+    rdfs:comment "The edge a ledger:Link or a ledger:Mirror is: ledger:blocks, ledger:parent or ledger:related, as an IRI." .
+
+ledger:linkTarget a rdf:Property ;
+    rdfs:domain ledger:Link ;
+    rdfs:range ledger:Item ;
+    rdfs:label "link target" ;
+    rdfs:comment "The item, in another ledger, a ledger:Link points at." .
+
+ledger:mirrorOf a rdf:Property ;
+    rdfs:domain ledger:Mirror ;
+    rdfs:range ledger:Item ;
+    rdfs:label "mirror of" ;
+    rdfs:comment "The subject, in another ledger, whose edge a ledger:Mirror reflects. Its IRI only." .
+
+ledger:subjectOpen a rdf:Property ;
+    rdfs:domain ledger:Mirror ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "subject open" ;
+    rdfs:comment "Whether the subject was open at the version the mirror was written from. An open blocker keeps the target out of next." .
+
+ledger:linkPresent a rdf:Property ;
+    rdfs:domain ledger:Mirror ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "link present" ;
+    rdfs:comment "Whether the edge still exists. An unlink leaves the mirror with false rather than removing it, so a late write from an older version cannot bring the edge back." .
+
+ledger:mirrorVersion a rdf:Property ;
+    rdfs:domain ledger:Mirror ;
+    rdfs:range xsd:integer ;
+    rdfs:label "mirror version" ;
+    rdfs:comment "How many ledger:StatusEvent and ledger:EditEvent nodes the subject had when the mirror was read from it. Every close, reopen, link and unlink adds one inside the update that makes the change, so the count only grows." .
+
 ledger:DailyCounts a rdfs:Class ;
     rdfs:comment "One UTC end-of-day observation, skolemized as urn:iki:ledger:{name}:counts:{date}. The current day's row is provisional. openCount plus closedCount is the number filed by that date." .
 ledger:date a rdf:Property ;

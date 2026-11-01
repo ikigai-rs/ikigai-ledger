@@ -595,6 +595,64 @@ $ source urn:iki:ledger:item:12
 - `tests/children.rs`. On 0.11.1 `parent=` was not an argument, and an unknown argument is
   ignored, so `items parent=1` listed every item.
 
+## Links across ledgers: an edge admitted by `link-in`, mirrored in the target
+
+Since 0.15.0 (ledger #2829) `blocks`, `parent` and `related` may point at an item of ANOTHER
+ledger. A ledger stays a boundary for content; only the edge crosses, and the target ledger learns
+the subject's IRI and whether it is open, nothing else:
+
+```text
+$ sink urn:iki:ledger:cli:link item=4 content=acme#7 type=blocks      # or content=<acme#7's IRI>
+linked cli#4 blocks acme#7
+$ source urn:iki:ledger:acme:next
+nothing is ready (1 open item(s) excluded: acme#7 blocked by urn:iki:ledger:cli:item:01m6… in the ledger cli)
+$ source urn:iki:ledger:acme:item:7                                    # under acme's grants only
+ acme#7  open    p-  Document the flag
+  …
+  blocked-by: urn:iki:ledger:cli:item:01m6… (open; in the ledger cli, not readable under your grants)
+```
+
+- **The edge** is the subject's: a `ledger:Link` node in the subject's graph (`onItem` the
+  subject, `linkType`, `linkTarget`, `committer`, `committedAt`), archived with the subject. An
+  edge within one ledger is the plain triple it always was.
+- **`urn:cap:ledger:link-in:{target}`** admits it, beside `write` on the subject's ledger, and
+  the store's read and write grants for the target's graph (the mirror's update reads and writes
+  it). `write:{target}` does NOT stand in: a link in decides what the target's `next` offers, so
+  whoever issues grants decides who may add one. It is checked before the object is looked up,
+  so a caller without it learns nothing of the other ledger. Unlinking takes the same grants.
+- **The mirror** is a `ledger:Mirror` in the target's graph (`onItem` the target, `linkType`,
+  `mirrorOf` the subject's IRI, `subjectOpen`, `linkPresent`, `mirrorVersion`), written by the
+  ledger after every link, unlink, close and reopen of the subject. `blocks` and `parent` are
+  mirrored and `related` is not. The target's `next` reads its own graph only and excludes an item
+  with an open blocker elsewhere (`blocked_elsewhere` in JSON); a store write cuts its cache like
+  any other. The target's item faces show `blocked-by:` and `child:` lines (`mirrored` in JSON),
+  saying "not readable under your grants" when the reader holds no read grant on the subject's
+  ledger; the subject's faces show the edge among its `blocks:`, `parent:` and `related:` lines.
+- **Closing or reopening the subject writes every mirror**, so a closer needs the target's store
+  grants too; without them the close is refused before anything changes, naming the grants. A
+  subject that carries a `blocks` or `parent` link across is not deleted until it is unlinked. Deleting the target
+  archives its mirrors with it.
+
+★ **Two graphs cannot be one update, so the mirror is a compare-and-set on a version.**
+`urn:iki:store:graph-update` changes one graph and its `WHERE` cannot read another, so the
+subject's status and the target's mirror are always two writes. What is decided inside the
+subject's update is the VERSION: every close and reopen adds a `ledger:StatusEvent` and every
+link and unlink a `ledger:EditEvent` in the same update as the change, and the version is the
+count of those events. After its update a writer reads the status, the version and the links in
+one query, and writes each mirror only when the mirror holds no greater version. Whatever order
+the mirror writes land in, the latest snapshot wins; an unlink leaves the mirror with
+`linkPresent false` so an older write cannot bring the edge back. `tests/cross_ledger_links.rs`
+forces all four races (a close's mirror landing after a whole reopen, and the reverse; a link's
+after a close; a close's after an unlink).
+
+⚠ **Not covered, and why**: a process that stops between the subject's update and the mirror's
+leaves the mirror at its previous version until the subject's next close, reopen, link or unlink
+(a close of an already closed item rewrites it, so that is the repair). The same holds for a
+target linked while a close was in flight by a caller whose grants do not reach it; that close
+says so in a `⚠ not mirrored:` line. A purge does not check for links across. And a `blocks`
+cycle that runs through two ledgers is not refused: each ledger's `next` sees only its half, so
+both items are simply excluded, each naming the other.
+
 ## The JSON face
 
 `as=application/json` is the machine contract; the plain face is for people and is not a
@@ -1250,6 +1308,7 @@ worker can be handed the work without the verdict on it:
 | `urn:cap:ledger:close:{ledger}` | `close` and `reopen` | |
 | `urn:cap:ledger:about:{ledger}` (0.10.0) | `item:{id}:about` Sink (add) and Delete (remove) | not the item Sink's own `about=`, which is the edit door |
 | `urn:cap:ledger:alias:{ledger}` (0.15.0) | giving one of this ledger's items an alias, in a scheme the caller owns | see "Aliases" |
+| `urn:cap:ledger:link-in:{ledger}` (0.15.0) | linking an item of ANOTHER ledger to one of this ledger's items, and unlinking it | **not** covered by `write:{ledger}`; see "Links across ledgers" |
 | `urn:cap:ledger:write:{ledger}` | **all four of the above**, and filing, linking, labeling, deferring, editing, `about=` on the item, state | unchanged: no grant issued before 0.7.0 or 0.10.0 changed meaning |
 
 A claim's or a close's note, and the release record a close writes, are part of that verb and
@@ -1504,7 +1563,7 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### 0.15.0 (not yet published): who wrote it, and who worked on it (ledger #2827, #2819)
+### 0.15.0 (not yet published): who wrote it, who worked on it, aliases, and links across ledgers (ledger #2827, #2819, #2828, #2829)
 
 **A committer the door stamps, and a verified or claimed author (#2827).** Every item, comment
 and tombstone records `ledger:committer` and `ledger:committedAt`; an author is verified (the
@@ -1533,6 +1592,15 @@ space (`urn:iki:alias:scheme:{scheme}`, `…:value:{value}`), the `urn:cap:ledge
 and `urn:cap:alias:scheme:{scheme}` grants, the deployment graph `urn:iki:alias:graph`, and the
 terms `AliasScheme`, `Alias`, `schemeName`, `schemeOwner`, `aliasScheme`, `aliasValue` and
 `aliasOf`. See "Aliases" above.
+
+**Typed links across ledgers (#2829).** `blocks`, `parent` and `related` may point at an item of
+another ledger, admitted by the new `urn:cap:ledger:link-in:{ledger}` on the target's ledger
+beside `write` on the subject's. The edge is a `ledger:Link` in the subject's graph, and the ledger
+keeps a `ledger:Mirror` in the target's (the subject's IRI and open bit only), versioned so that
+no race leaves it stale. The target's `next` excludes an item with an open blocker elsewhere. New:
+`CAP_LINK_IN`, `select::Excluded::BlockedAcross`, `model::Mirrored`, the JSON fields
+`blocked_elsewhere` and `mirrored`, and the terms `Link`, `Mirror`, `linkType`, `linkTarget`,
+`mirrorOf`, `subjectOpen`, `linkPresent` and `mirrorVersion`. See "Links across ledgers" above.
 
 **An item with many quads deletes again.** A delete's commit guard listed the quads it read one
 `VALUES` row per line, and the store's scanner refused that past about twenty triples beyond the

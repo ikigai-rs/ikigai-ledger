@@ -75,6 +75,16 @@ pub enum Excluded {
     Deferred,
     /// One or more open items block it.
     Blocked(Vec<i64>),
+    /// An open item of ANOTHER ledger blocks it, by a link that ledger's `link-in` grant
+    /// admitted (ledger #2829): `here` are this ledger's blockers, as for
+    /// [`Excluded::Blocked`], and `elsewhere` the other ledgers' blocker IRIs, which is all
+    /// this ledger knows of them. Added in 0.15.0.
+    BlockedAcross {
+        /// This ledger's open blockers, by number.
+        here: Vec<i64>,
+        /// The open blockers in other ledgers, by IRI, sorted.
+        elsewhere: Vec<String>,
+    },
 }
 
 impl Excluded {
@@ -103,6 +113,17 @@ impl Excluded {
                 numbers
                     .iter()
                     .map(|n| ledger.number(*n))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Excluded::BlockedAcross { here, elsewhere } => format!(
+                "blocked by {}",
+                here.iter()
+                    .map(|n| ledger.number(*n))
+                    .chain(elsewhere.iter().map(|iri| match Ledger::of_subject(iri) {
+                        Some(there) => format!("{iri} in the ledger {}", there.name()),
+                        None => iri.clone(),
+                    }))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -158,6 +179,10 @@ async fn ready_inner(
     now: Option<u64>,
 ) -> Result<ReadySet> {
     let open = model::load_open_items(client).await?;
+    // ★ Blockers in other ledgers, from this ledger's own graph (ledger #2829): the mirror the
+    // ledger keeps of each cross-ledger `blocks` says whether its subject is open, and that is
+    // all a ledger reads of another.
+    let elsewhere = open_blockers_elsewhere(client).await?;
     // Which of them the caller asked about — the filter's own clauses, evaluated by the
     // store, so `labels=rust` means here what it means to `items`. `None` is "all of them".
     let mut narrowing = filter.clone();
@@ -278,6 +303,11 @@ async fn ready_inner(
             }
         } else if item.deferred {
             Some(Excluded::Deferred)
+        } else if let Some(iris) = elsewhere.get(&item.iri) {
+            Some(Excluded::BlockedAcross {
+                here: blockers.get(&item.iri).cloned().unwrap_or_default(),
+                elsewhere: iris.clone(),
+            })
         } else {
             blockers
                 .get(&item.iri)
@@ -293,6 +323,39 @@ async fn ready_inner(
         excluded,
         leverage,
     })
+}
+
+/// Every item of this ledger an open item of another ledger blocks, with those blockers'
+/// IRIs, sorted: the present mirrors whose subject is open.
+async fn open_blockers_elsewhere(
+    client: &StoreClient<'_, '_>,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let rows = client
+        .select(&format!(
+            "SELECT ?item ?subject WHERE {{ {} }} ORDER BY ?item ?subject",
+            client.in_graph(&format!(
+                "?mirror <{}> <{}> ; <{}> <{}> ; <{}> ?item ; <{}> ?subject ; <{}> true ; \
+                 <{}> true .",
+                v::ext::TYPE,
+                v::MIRROR_CLASS,
+                v::LINK_TYPE,
+                v::BLOCKS,
+                v::ON_ITEM,
+                v::MIRROR_OF,
+                v::SUBJECT_OPEN,
+                v::LINK_PRESENT
+            ))
+        ))
+        .await?;
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for row in &rows {
+        if let (Some(item), Some(subject)) = (row.get("item"), row.get("subject")) {
+            map.entry(item.value.clone())
+                .or_default()
+                .push(subject.value.clone());
+        }
+    }
+    Ok(map)
 }
 
 /// One run of `next`: which policy, over what, in what order, and what it refused.

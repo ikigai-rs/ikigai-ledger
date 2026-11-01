@@ -137,6 +137,21 @@ pub struct Link {
     pub target: ItemRef,
 }
 
+/// One edge from an item of another ledger (ledger #2829).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Mirrored {
+    /// `blocks` or `parent`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The subject's IRI, in the other ledger.
+    pub iri: String,
+    /// The other ledger's name.
+    pub ledger: String,
+    /// `open` or `closed`.
+    pub status: String,
+}
+
 /// One comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -204,6 +219,12 @@ pub struct Item {
     /// with none.
     #[serde(default)]
     pub children: Vec<ItemRef>,
+    /// The INBOUND `blocks` and `parent` edges from items of OTHER ledgers, as this ledger's
+    /// mirror holds them: the subject's IRI and status, nothing else (ledger #2829). Only on
+    /// `item:{id}`. Added in 0.15.0; absent when empty, so earlier documents read and render
+    /// as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mirrored: Vec<Mirrored>,
     /// Its comments, oldest first.
     pub comments: Vec<Comment>,
     /// What the reader read around to list it — `unreadable dcterms:modified "yesterday"`,
@@ -385,6 +406,11 @@ pub struct Exclusion {
     pub expires: Option<String>,
     /// The open blockers' numbers, when `why` is `blocked`.
     pub blocked_by: Vec<i64>,
+    /// The open blockers in OTHER ledgers, by IRI, when `why` is `blocked` by a link across
+    /// ledgers (ledger #2829): all this ledger knows of them. Added in 0.15.0; absent when
+    /// empty, so every earlier document reads and renders as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_elsewhere: Vec<String>,
     /// The item.
     pub item: Item,
 }
@@ -643,6 +669,18 @@ pub(crate) fn item(
         modified: sparql::iso8601(item.modified),
         links,
         children: item.children.iter().map(target).collect(),
+        mirrored: item
+            .mirrored
+            .iter()
+            .map(|edge| Mirrored {
+                kind: edge.kind.clone(),
+                iri: edge.subject.clone(),
+                ledger: Ledger::of_subject(&edge.subject)
+                    .map(|l| l.name().to_string())
+                    .unwrap_or_default(),
+                status: if edge.open { "open" } else { "closed" }.to_string(),
+            })
+            .collect(),
         comments: comments.iter().map(self::comment).collect(),
         defects: item.defects.clone(),
         state: item.state().map(str::to_string),
@@ -733,6 +771,11 @@ pub(crate) async fn next(
                 Excluded::AwaitingDispatcher => ("awaiting-dispatcher", None, Vec::new(), None),
                 Excluded::Deferred => ("deferred", None, Vec::new(), None),
                 Excluded::Blocked(numbers) => ("blocked", None, numbers.clone(), None),
+                Excluded::BlockedAcross { here, .. } => ("blocked", None, here.clone(), None),
+            };
+            let blocked_elsewhere = match why {
+                Excluded::BlockedAcross { elsewhere, .. } => elsewhere.clone(),
+                _ => Vec::new(),
             };
             Exclusion {
                 why: word.to_string(),
@@ -740,6 +783,7 @@ pub(crate) async fn next(
                 holder,
                 expires,
                 blocked_by,
+                blocked_elsewhere,
                 item: rendered
                     .next()
                     .expect("one rendered item per excluded item"),

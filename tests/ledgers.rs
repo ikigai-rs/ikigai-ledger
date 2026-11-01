@@ -488,16 +488,17 @@ fn an_unusable_ledger_name_is_refused_where_it_is_used() {
     assert!(ready.contains("policy:"), "{ready}");
 }
 
-/// ★ **A `blocks` edge cannot cross a ledger, and the refusal says why.**
+/// ★ **A `blocks` edge crosses a ledger only under that ledger's `link-in` grant.**
 ///
 /// Decided rather than left emergent. A block is not a reference: it changes the OTHER
-/// ledger's ready set, so a caller granted one ledger could make work in another
-/// unschedulable, and the blocked ledger's `next` would have to either name an item its
-/// reader cannot see or say "something blocks you" — which leaks one bit and helps
-/// nobody. `ledger:about` is the edge that crosses, because it names a resource rather
-/// than asserting a membership.
+/// ledger's ready set, so a caller granted one ledger must not be able to make work in another
+/// unschedulable. Until 0.15.0 the edge was refused outright; since ledger #2829 it is admitted
+/// by `urn:cap:ledger:link-in:{target}`, which the target's grant issuer decides, and the
+/// target's `next` names the blocker by its IRI and open bit alone
+/// (`tests/cross_ledger_links.rs`). A caller holding every grant of its own ledger, and none
+/// of the other's, is still refused, by name.
 #[test]
-fn a_blocks_edge_cannot_cross_a_ledger_boundary() {
+fn a_blocks_edge_cannot_cross_a_ledger_boundary_without_link_in() {
     let kernel = kernel();
     sink(
         &kernel,
@@ -514,8 +515,9 @@ fn a_blocks_edge_cannot_cross_a_ledger_boundary() {
     .expect("append answers with the number and the IRI")
     .to_string();
 
-    let refused = try_verb(
+    let refused = try_as(
         &kernel,
+        &grants_for("acme"),
         Verb::Sink,
         "urn:iki:ledger:acme:link",
         &[
@@ -525,8 +527,10 @@ fn a_blocks_edge_cannot_cross_a_ledger_boundary() {
         ],
     );
     let message = refused.expect_err("a cross-ledger link").to_string();
-    assert!(message.contains("bosatsu"), "{message}");
-    assert!(message.contains("ledger:about"), "{message}");
+    assert!(
+        message.contains("urn:cap:ledger:link-in:bosatsu"),
+        "{message}"
+    );
 
     // ...and `about` really is the way across: it names a resource, not a membership,
     // so it is accepted and changes nobody's ready set.

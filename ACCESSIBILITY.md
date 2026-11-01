@@ -20,7 +20,7 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
 - **An item's line and detail** (`Item::line` and `Item::detail` in `src/model.rs`): one fixed
   line per item, `#12  open    p1  Title  [labels]  claimed:holder`, and under it, in the
   detail, labeled lines (`iri:`, `filed:`, `updated:`, `author:`, `committer:`, `about:`,
-  `blocks:`, `child:` …), the body, and the comments, each stamped with its time and author
+  `blocks:`, `child:`, `blocked-by:` …), the body, and the comments, each stamped with its time and author
   (`Comment::render`). Whether an author or a date is verified or claimed is said in words in
   parentheses (`(verified)`, `(claimed by a delegate)`, `(claimed)`), never by a sign alone.
 - **Listings** (`items`, `ledgers`, `count`): item lines and a total (`3 item(s)`); `count`
@@ -111,3 +111,4 @@ technology you used, if you are comfortable sharing them. Anything security-sens
 | 2026-10-31 | First version. |
 | 2026-11-01 | `close closed-at=` (ledger #2819) adds refusals; each names the argument, the reason and the remedy in words. No plain face changed: `tests/faces.rs` passes unchanged. |
 | 2026-11-01 | Aliases (ledger #2828) add write answers (`scheme gh owned by …`, `gh:acme/web#12 names acme#12 …`, `… no longer names …`) and refusals, each naming in words the alias, the scheme, its owner or the item that already holds it, and the grant that would do. An alias value appears percent-encoded in an IRI (`acme%2Fweb%2312`), which a screen reader reads character by character; the decoded value is what every answer shows. No existing plain face changed: `tests/faces.rs` passes unchanged. |
+| 2026-11-01 | Links across ledgers (ledger #2829) add one detail line, `blocked-by: <IRI> (open; in the ledger cli, not readable under your grants)`, a `child:` line of the same shape, the `next` reason `blocked by <IRI> in the ledger cli`, a `⚠ not mirrored:` line a close or reopen adds when a target was beyond its grants, and refusals naming the grant (`urn:cap:ledger:link-in:acme`, the target graph's store grants) and the remedy. The status and whether the reader may read the other ledger are said in words. The blocker is named by its full IRI, which a screen reader reads character by character; its number is in the other ledger and is not this ledger's to show. No existing plain face changed: `tests/faces.rs` passes unchanged. |

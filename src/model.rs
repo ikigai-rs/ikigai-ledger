@@ -193,6 +193,10 @@ pub struct Item {
     pub children: Vec<String>,
     /// See-also.
     pub related: Vec<String>,
+    /// Edges from items of OTHER ledgers into this one, as this ledger's mirror of them holds
+    /// them: each subject's IRI and whether it is open, and nothing else (ledger #2829). Filled
+    /// by the item's own read only, so a listing carries none. Added in 0.15.0.
+    pub mirrored: Vec<Mirrored>,
     /// What the reader read AROUND to list this item — `unreadable dcterms:modified
     /// "yesterday"`, `missing dcterms:created` — in the words [`defects`] uses. Empty for
     /// every item written only through a ledger Sink.
@@ -218,6 +222,38 @@ pub struct Item {
     pub(crate) unread: Vec<(&'static str, sparql::Binding)>,
     /// Whether `created` / `modified` were read, rather than stood in for.
     pub(crate) read: (bool, bool),
+}
+
+/// One edge from an item of another ledger, as the mirror in this ledger's graph holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mirrored {
+    /// `blocks` or `parent`.
+    pub kind: String,
+    /// The subject's IRI: the item in the other ledger.
+    pub subject: String,
+    /// Whether the subject is open.
+    pub open: bool,
+    /// Whether the reader holds the read grant of the subject's ledger, so the line can say
+    /// where to read more.
+    pub readable: bool,
+}
+
+impl Mirrored {
+    /// `(open; in the ledger cli, not readable under your grants)`.
+    fn note(&self) -> String {
+        let ledger = crate::ledger::Ledger::of_subject(&self.subject)
+            .map(|l| l.name().to_string())
+            .unwrap_or_default();
+        format!(
+            "({}; in the ledger {ledger}{})",
+            if self.open { "open" } else { "closed" },
+            if self.readable {
+                ""
+            } else {
+                ", not readable under your grants"
+            }
+        )
+    }
 }
 
 impl Item {
@@ -354,6 +390,15 @@ impl Item {
         }
         for target in &self.related {
             out.push_str(&format!("  related:  {target}\n"));
+        }
+        // Only when there are some, so an item no other ledger links renders as before.
+        for edge in &self.mirrored {
+            let label = if edge.kind == "blocks" {
+                "blocked-by:"
+            } else {
+                "child:   "
+            };
+            out.push_str(&format!("  {label} {} {}\n", edge.subject, edge.note()));
         }
         if let Some(purpose) = &self.purpose {
             out.push_str(&format!("  purpose:  {purpose}\n"));
@@ -2072,6 +2117,7 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         parents: Vec::new(),
         children: Vec::new(),
         related: Vec::new(),
+        mirrored: Vec::new(),
         defects,
         states,
         state_values,
@@ -2186,6 +2232,7 @@ mod tests {
             parents: Vec::new(),
             children: Vec::new(),
             related: Vec::new(),
+            mirrored: Vec::new(),
             defects: Vec::new(),
             states: Vec::new(),
             state_values: Vec::new(),
