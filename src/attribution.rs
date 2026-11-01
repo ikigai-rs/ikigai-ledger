@@ -247,14 +247,14 @@ pub async fn resolve(
                      author yourself",
                 )
             })?;
-            if acts_for(client, participants, committer, &as_iri).await? {
+            let delegate = acts_for(client, participants, committer, &as_iri).await?;
+            if !delegate {
+                importer = Some(enrolled_as_importer(client, participants, committer).await?);
+            }
+            if delegate {
                 out.author = Some(author.to_string());
                 out.source = Some(AuthorSource::Delegate);
-            } else if {
-                let answer = enrolled_as_importer(client, participants, committer).await?;
-                importer = Some(answer);
-                answer
-            } {
+            } else if importer == Some(true) {
                 out.author = Some(author.to_string());
                 out.source = Some(AuthorSource::Import);
             } else {

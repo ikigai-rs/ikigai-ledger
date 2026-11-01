@@ -1523,7 +1523,7 @@ pub async fn find_comment_by_key(
             author_source: row.get("authorSource").map(|b| b.value.clone()),
             committer: row.get("committer").map(|b| b.value.clone()),
             committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
-            created_claimed: row.get("createdSource").is_some(),
+            created_claimed: row.contains_key("createdSource"),
         })
     }))
 }
@@ -1600,7 +1600,7 @@ pub async fn load_comments_for(
                 author_source: row.get("authorSource").map(|b| b.value.clone()),
                 committer: row.get("committer").map(|b| b.value.clone()),
                 committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
-                created_claimed: row.get("createdSource").is_some(),
+                created_claimed: row.contains_key("createdSource"),
             })
         })() else {
             continue;
@@ -1802,7 +1802,7 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
                 author_source: row.get("authorSource").map(|b| b.value.clone()),
                 committer: row.get("committer").map(|b| b.value.clone()),
                 committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
-                created_claimed: row.get("createdSource").is_some(),
+                created_claimed: row.contains_key("createdSource"),
             })
         })
         .collect())
@@ -2051,10 +2051,10 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         author_source: row.get("authorSource").map(|b| b.value.clone()),
         committer: row.get("committer").map(|b| b.value.clone()),
         committed_at,
-        created_claimed: row.get("createdSource").is_some(),
+        created_claimed: row.contains_key("createdSource"),
         // ★ A claimed `modified` holds only while it is earlier than the commit: any later
         // write stamps the kernel's time, which is not (see `ledger:modifiedSource`).
-        modified_claimed: row.get("modifiedSource").is_some()
+        modified_claimed: row.contains_key("modifiedSource")
             && matches!((modified, committed_at), (Some(m), Some(c)) if m < c),
         // Each stands in for the other: created ≤ modified, so a missing `created` is at
         // most the `modified`, and a missing `modified` is at least the `created`. Neither
