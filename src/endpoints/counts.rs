@@ -12,25 +12,38 @@ const FACES: [&str; 2] = [CSV, TURTLE];
 ///
 /// It is written only while `guard` (a pattern over the ledger's graph) also holds, and it
 /// comes with the minted event's IRI, so the caller can read back whether this update wrote
-/// it (ledger #2764, #2766).
+/// it (ledger #2764, #2766). It carries its committer (ledger #2819), and `claimed`, a close
+/// date an import principal claimed, dates it instead of `now`, marked `closedAtSource
+/// "import"`, so the daily series places the close on its source date.
 pub(super) fn status_event_when(
     client: &StoreClient<'_, '_>,
     item: &str,
     status: &str,
     now: u64,
     guard: &str,
+    who: &Attribution,
+    claimed: Option<u64>,
 ) -> Result<(String, String)> {
     let event = format!("{item}:status:{}", mint_id(now)?);
-    let triples = client.in_graph(&format!(
+    let mut triples = format!(
         "<{event}> <{}> <{}> ; <{}> <{item}> ; <{}> <{status}> ; <{}> {} ; <{}> ?sequence .",
         v::ext::TYPE,
         v::STATUS_EVENT_CLASS,
         v::ON_ITEM,
         v::STATUS,
         v::ext::CREATED,
-        datetime(now),
+        datetime(claimed.unwrap_or(now)),
         v::EVENT_SEQUENCE
-    ));
+    );
+    triples.push_str(&who.commit(&event, now));
+    if claimed.is_some() {
+        triples.push_str(&format!(
+            "\n<{event}> <{}> {} .",
+            v::CLOSED_AT_SOURCE,
+            literal(crate::attribution::IMPORT)
+        ));
+    }
+    let triples = client.in_graph(&triples);
     let guard = client.in_graph(&format!("{} {guard}", live(item)));
     let previous = client.in_graph(&format!(
         "?past <{}> <{}> ; <{}> <{item}> .",

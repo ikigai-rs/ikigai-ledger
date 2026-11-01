@@ -234,9 +234,12 @@ fn a_release_and_a_close_take_the_principal_with_them() {
         )),
         "the release record names the principal"
     );
+    // On the ITEM: since 0.15.0 the claim and release events keep the principal on purpose,
+    // so who worked on it outlives the claim (ledger #2819).
     let rows = select(
         &kernel,
-        "SELECT ?p WHERE { GRAPH ?g { ?i <https://ikigai-rs.dev/ns/ledger#claimPrincipal> ?p } }",
+        "SELECT ?p WHERE { GRAPH ?g { ?i a <https://ikigai-rs.dev/ns/ledger#Item> ; \
+         <https://ikigai-rs.dev/ns/ledger#claimPrincipal> ?p } }",
     );
     assert!(!rows.contains(A), "a close left the principal: {rows}");
 }

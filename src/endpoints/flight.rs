@@ -228,12 +228,16 @@ async fn closed_transition_refusal(
 /// ⚠ `dcterms:modified` is in this update rather than a second operation of the batch: an
 /// operation after a failed guard still runs, so a separate `touch` would stamp an item that
 /// a lost race never changed.
+///
+/// `event` is the transition's edit event (ledger #2819), inserted by the same operation
+/// under the same compare-and-set, so a transition that loses records nothing.
 fn cas(
     client: &StoreClient<'_, '_>,
     item: &str,
     from: &LifecycleState,
     to: &LifecycleState,
     token: &str,
+    event: &str,
     now: u64,
 ) -> String {
     let mut guard = if from.name == FILED {
@@ -262,6 +266,7 @@ fn cas(
     if to.name != FILED {
         insert.push_str(&format!("\n<{item}> <{}> <{}> .", v::STATE, to.iri));
     }
+    insert.push_str(event);
     format!(
         "DELETE {{ {delete} }}\nINSERT {{ {insert} }}\nWHERE {{ {where_} }}",
         delete = client.in_graph(&format!(
@@ -404,8 +409,9 @@ impl Endpoint for StateEndpoint {
                     "unchanged"
                 } else {
                     let token = mint_id(now)?;
+                    let event = edit_event_triples(&item.iri, "state", &who, now)?;
                     client
-                        .update(&cas(&client, &item.iri, from, to, &token, now))
+                        .update(&cas(&client, &item.iri, from, to, &token, &event, now))
                         .await?;
                     let after = read_state(&client, &item.iri).await?;
                     if after.tokens != [token.clone()] {

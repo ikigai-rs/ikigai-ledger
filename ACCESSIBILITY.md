@@ -109,3 +109,4 @@ technology you used, if you are comfortable sharing them. Anything security-sens
 | Date | Change |
 |---|---|
 | 2026-10-31 | First version. |
+| 2026-11-01 | `close closed-at=` (ledger #2819) adds refusals; each names the argument, the reason and the remedy in words. No plain face changed: `tests/faces.rs` passes unchanged. |

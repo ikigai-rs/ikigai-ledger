@@ -135,10 +135,7 @@ impl Attribution {
     /// The committer and the author as triples on `subject`, stamped `now`. The dates are
     /// the caller's to place, because where `dcterms:created` goes differs per entry.
     pub fn triples(&self, subject: &str, now: u64) -> String {
-        let mut out = format!("\n<{subject}> <{}> {} .", v::COMMITTED_AT, datetime(now));
-        if let Some(committer) = &self.committer {
-            out.push_str(&format!("\n<{subject}> <{}> <{committer}> .", v::COMMITTER));
-        }
+        let mut out = self.commit(subject, now);
         match (&self.author, self.source) {
             (Some(author), Some(source)) => out.push_str(&format!(
                 "\n<{subject}> <{}> <{author}> ; <{}> {} .",
@@ -152,6 +149,16 @@ impl Attribution {
                 literal(author)
             )),
             _ => {}
+        }
+        out
+    }
+
+    /// The committer alone as triples on `subject`, stamped `now`: what an event carries
+    /// (ledger #2819), which has a committer and no author.
+    pub fn commit(&self, subject: &str, now: u64) -> String {
+        let mut out = format!("\n<{subject}> <{}> {} .", v::COMMITTED_AT, datetime(now));
+        if let Some(committer) = &self.committer {
+            out.push_str(&format!("\n<{subject}> <{}> <{committer}> .", v::COMMITTER));
         }
         out
     }
@@ -362,6 +369,116 @@ pub async fn resolve(
     }
     Ok(out)
 }
+
+/// Resolve and check `closed-at`, the source date of a close an import principal claims
+/// (ledger #2819): `None` when it was not sent. It is an `xsd:dateTime` no later than `now`
+/// and no earlier than `filed`, the item's `dcterms:created`, so a daily series never closes
+/// an item before it was filed. Anyone but an import principal is refused, with the reason
+/// and the remedy, as a claimed `created` is.
+pub async fn resolve_closed_at(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    participants: Option<&str>,
+    filed: u64,
+    now: u64,
+) -> Result<Option<u64>> {
+    const NAME: &str = "closed-at";
+    let Ok(value) = inv.inline_str(NAME) else {
+        return Ok(None);
+    };
+    let Some(committer) = Attribution::committer(inv)?.committer else {
+        return Err(refused_date(
+            NAME,
+            value,
+            "this capability carries no principal, so nothing says it is an import principal",
+        ));
+    };
+    if !enrolled_as_importer(client, participants, &committer).await? {
+        return Err(refused_date(
+            NAME,
+            value,
+            &format!(
+                "{committer} is not an import or sync principal{}",
+                match participants {
+                    Some(graph) => format!(" (ledger:Importer in <{graph}>)"),
+                    None => ", and this host names no participants graph".to_string(),
+                }
+            ),
+        ));
+    }
+    let millis = crate::model::millis(value).ok_or_else(|| Error::InvalidArgument {
+        name: NAME.to_string(),
+        detail: format!(
+            "`{value}` is not an xsd:dateTime; an authored date is written \
+             2026-11-01T18:30:00Z, with a time and a zone"
+        ),
+    })?;
+    if millis > now {
+        return Err(Error::InvalidArgument {
+            name: NAME.to_string(),
+            detail: format!(
+                "`{value}` is after this write ({}); a close's source date cannot be later \
+                 than its import",
+                sparql::iso8601(now)
+            ),
+        });
+    }
+    if millis < filed {
+        return Err(Error::InvalidArgument {
+            name: NAME.to_string(),
+            detail: format!(
+                "`{value}` is before the item was filed ({}); an item cannot close before it \
+                 was filed. Send the item's source dates when filing it, or a later close date",
+                sparql::iso8601(filed)
+            ),
+        });
+    }
+    Ok(Some(millis))
+}
+
+/// The explicit, one-time backfill of `ledger:handedBackBy` (ledger #2819), as two SPARQL
+/// texts over a ledger's graph `graph`: a `SELECT` counting what it would recover, and the
+/// `INSERT` that recovers it. Never run at startup, like the close-time backfill: an operator
+/// issues them through the store (`urn:iki:store:select`, then `urn:iki:store:update`).
+///
+/// A hand-back written before 0.15.0 names no holder in the graph, but gonk's worker loop
+/// wrote its text as ``gonk worker `X` handed this back``, and `X` is the holder label. This
+/// copies `X` from every comment whose body says so and that names no holder yet, so running
+/// it twice recovers nothing the second time. A comment that does not name its worker that
+/// way is left alone: prose is not guessed at.
+///
+/// ```
+/// let (count, update) = ikigai_ledger::attribution::handed_back_by_backfill(
+///     "urn:iki:ledger:graph:default",
+/// );
+/// assert!(count.starts_with("SELECT (COUNT(?comment) AS ?recovered)"));
+/// assert!(update.starts_with("INSERT"));
+/// ```
+pub fn handed_back_by_backfill(graph: &str) -> (String, String) {
+    let pattern = format!(
+        "GRAPH <{graph}> {{ ?comment <{type_}> <{class}> ; <{body}> ?text . \
+         FILTER NOT EXISTS {{ ?comment <{by}> ?named }} \
+         BIND(STRBEFORE(STRAFTER(STR(?text), {open}), {close}) AS ?holder) \
+         FILTER(?holder != \"\" && !CONTAINS(?holder, \"`\")) }}",
+        type_ = v::ext::TYPE,
+        class = v::COMMENT_CLASS,
+        body = v::BODY,
+        by = v::HANDED_BACK_BY,
+        open = literal(HANDBACK_OPEN),
+        close = literal(HANDBACK_CLOSE),
+    );
+    (
+        format!("SELECT (COUNT(?comment) AS ?recovered) WHERE {{ {pattern} }}"),
+        format!(
+            "INSERT {{ GRAPH <{graph}> {{ ?comment <{}> ?holder }} }} WHERE {{ {pattern} }}",
+            v::HANDED_BACK_BY
+        ),
+    )
+}
+
+/// What gonk's worker loop wrote before the holder's label, and after it, in a hand-back.
+const HANDBACK_OPEN: &str = "gonk worker `";
+const HANDBACK_CLOSE: &str = "` handed this back";
 
 /// A refused author: the reason and the remedy, and the principal it was checked against.
 fn refused(name: &str, value: &str, committer: &str, why: &str, remedy: &str) -> Error {
