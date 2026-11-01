@@ -96,6 +96,7 @@
 //! because they are correct and because the day a read stops going through the store is the
 //! day they become load-bearing, but do not read that list as what keeps the cache honest.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -793,8 +794,9 @@ fn insert_on_live(client: &StoreClient<'_, '_>, items: &[&str], triples: &str) -
 /// succeeds. A write that lost the race to a delete is answered `NotFound`, the answer the
 /// same request gets once the delete has committed, rather than a success for a write that
 /// is in no live graph. ⚠ The read after cannot tell "landed, then the delete took it" from
-/// "did not land": in the first case the write was archived with the item, which is the
-/// delete's to account for, so both are reported the same way.
+/// "did not land": in the first case the write was archived with the item, because a
+/// recoverable delete commits only when nothing landed after its read and otherwise reads
+/// again (ledger #2780, see `delete_item`), so both are reported the same way.
 async fn guarded_update(client: &StoreClient<'_, '_>, items: &[&str], update: &str) -> Result<()> {
     client.update(update).await?;
     for item in items {
@@ -2014,6 +2016,27 @@ fn rows_as_data(rows: &[sparql::Row]) -> Result<String> {
     Ok(triples)
 }
 
+/// The same rows as a `VALUES (?s ?p ?o)` block's body, one `( s p o )` per row.
+fn rows_as_values(rows: &[sparql::Row]) -> Result<String> {
+    let mut values = String::new();
+    for row in rows {
+        let (Some(s), Some(p), Some(o)) = (row.get("s"), row.get("p"), row.get("o")) else {
+            continue;
+        };
+        values.push_str(&format!(
+            "( {} {} {} )\n",
+            sparql::term(&s.term("s")?),
+            sparql::term(&p.term("p")?),
+            sparql::term(&o.term("o")?)
+        ));
+    }
+    Ok(values)
+}
+
+/// How many times a recoverable delete reads and commits again when writes keep landing on
+/// its item in between, before it refuses (see `delete_item`).
+const DELETE_ATTEMPTS: usize = 16;
+
 /// Move (or destroy) an item's quads and write its tombstone.
 ///
 /// ★ The three sets that go together, because leaving any behind is a lie about what was
@@ -2056,13 +2079,19 @@ fn rows_as_data(rows: &[sparql::Row]) -> Result<String> {
 /// 0.2.0 was atomic and had no such window; narrowing the doors opened it.)
 ///
 /// Removing exactly the rows read makes three things the same set by construction: what
-/// was archived, what was removed, and what the tombstone hashes and counts. A write that
-/// races the delete is **kept**, in the live graph, beside the tombstone — an orphan of
-/// the deleted item rather than a loss, and the same place a write that arrives just after
-/// the delete has always landed. The alternative considered was a guarded removal that
-/// re-reads and retries until nothing raced it; it closes the window only to reopen it one
-/// round trip later, because a write's own existence check and its insert are also two
-/// steps, so it would buy a retry loop and no guarantee.
+/// was archived, what was removed, and what the tombstone hashes and counts.
+///
+/// ★ **And step 3 commits only if nothing raced it** (ledger #2780). Through 0.14.1 a write
+/// that landed between the read and the commit was kept in the live graph beside the
+/// tombstone, an orphan that no reader shows and that no later purge could reach, since a
+/// purge of a deleted item touches only the graveyard and the tombstone: a pasted secret in a
+/// racing comment could never be destroyed. Now the removal's `WHERE` holds only while the
+/// item is live and nothing matches the selector beyond the rows read, and the tombstone is
+/// written only once the item is no longer live. A write that raced makes the commit match
+/// nothing, and the delete reads, archives and commits again, up to `DELETE_ATTEMPTS` times.
+/// That retry is a guarantee rather than a loop that reopens the window, because every write
+/// on an item carries [`live`] in its own update (ledger #764): a write lands before the
+/// commit, and is then read by the retry, or after it, and then lands nowhere.
 ///
 /// The same argument runs backwards for `purge`, which must clear both graphs: it empties
 /// the **graveyard** first and the live graph second, so an interrupted purge leaves the
@@ -2106,132 +2135,188 @@ async fn delete_item(
 ) -> Result<Option<Removed>> {
     let subject = sparql::iri(&item.iri, "item")?;
     let selector = removal_selector(&subject);
-    let rows = client
-        .select(&format!(
-            "SELECT ?s ?p ?o WHERE {{ {} }} ORDER BY ?s ?p ?o",
-            client.in_graph(&selector)
-        ))
-        .await?;
-    let digest = content_hash(&rows);
-
-    // Step 1 of 2 — the graveyard, which no read in this crate can see, so nothing a
-    // reader observes has changed yet.
-    //
-    // ⚠ The DELETE TEMPLATE is a quad pattern and may not carry a FILTER — the selector
-    // belongs in the WHERE clause only. Putting it in both is a parse error at the store,
-    // which is at least loud.
-    let mut archived = 0;
-    let mut archive = None;
-    let removal = if destroy {
-        // Everything an earlier recoverable delete quarantined. Read first, so the answer
-        // can say how much it destroyed — and so the graveyard's READ grant, which the
-        // store requires of a `DELETE … WHERE` over it, is a requirement here too rather
-        // than a surprise at the next store upgrade.
-        archived = client
-            .select_deleted(&format!(
-                "SELECT ?s ?p ?o WHERE {{ {} }}",
-                client.in_deleted_graph(&selector)
-            ))
-            .await?
-            .len();
-        clear_archive(client, &selector).await?;
-        // Only while the item is live: once another delete committed, the selector's
-        // `?o = <item>` would take that delete's tombstone edge with it.
-        format!(
-            "DELETE {{ {} }} WHERE {{ {} }}",
-            client.in_graph("?s ?p ?o"),
-            client.in_graph(&format!("{} {selector}", live(&item.iri)))
-        )
-    } else if rows.is_empty() {
-        String::new()
-    } else {
-        // The quads read above, as data: a scoped update cannot read the live graph from
-        // inside the graveyard's scope, so the WHERE clause that used to do this work is
-        // now the SELECT that already ran.
-        let data = rows_as_data(&rows)?;
-        client
-            .update_deleted(&format!(
-                "INSERT DATA {{ {} }}",
-                client.in_deleted_graph(&data)
-            ))
-            .await?;
-        let removal = format!("DELETE DATA {{ {} }}", client.in_graph(&data));
-        archive = Some(data);
-        removal
-    };
-
     let id = item.iri.rsplit(':').next().unwrap_or("unknown").to_string();
     let tombstone = client.ledger().tombstone(&id);
-    let mut triples = format!(
-        "<{tombstone}> <{type_}> <{class}> ; <{deleted}> <{item_iri}> ; <{number}> {n} ; \
-         <{invalidated}> {when} ; <{recoverable}> {recoverable_value} ; <{quads}> {count} ; \
-         <{hash}> {digest} .",
-        type_ = v::ext::TYPE,
-        class = v::TOMBSTONE_CLASS,
-        deleted = v::DELETED_ITEM,
-        item_iri = item.iri,
-        number = v::NUMBER,
-        n = integer(item.number),
-        invalidated = v::ext::INVALIDATED_AT,
-        when = datetime(now),
-        recoverable = v::RECOVERABLE,
-        recoverable_value = boolean(!destroy),
-        quads = v::QUAD_COUNT,
-        count = integer(rows.len() as i64),
-        hash = v::ext::CONTENT_HASH,
-        digest = literal(&digest),
-    );
-    if destroy {
-        triples.push_str(&format!(
-            "\n<{tombstone}> <{}> {} .",
-            v::PURGED_AT,
-            datetime(now)
-        ));
-    }
-    if !reason.is_empty() {
-        triples.push_str(&format!(
-            "\n<{tombstone}> <{}> {} .",
-            v::REASON,
-            literal(reason)
-        ));
-    }
-    if let Some(author) = author {
-        triples.push_str(&format!(
-            "\n<{tombstone}> <{}> {} .",
-            v::AUTHOR,
-            literal(author)
-        ));
-    }
-    // ★ The key goes onto the tombstone, in the same update that removes it from the item,
-    // so there is no instant at which the key is free: a keyed append replayed after a
-    // delete answers the deleted item instead of filing it again. Kept through a purge as
-    // well — it is a name, like the number, not content.
-    if let Some(key) = &item.key {
-        triples.push_str(&format!("\n<{tombstone}> <{}> {} .", v::KEY, literal(key)));
-    }
-    // Step 2 of 2 — the live graph, which IS the commit point. Removing the item's quads
-    // and writing its tombstone are one scoped update and therefore atomic: there is no
-    // instant in which the item is gone and unaccounted for.
-    //
-    // ★ The order of the two statements is load-bearing for a purge. Its selector matches
-    // `?o = <item>`, and the tombstone's `ledger:deletedItem <item>` is exactly that shape —
-    // so an INSERT before the DELETE would write the tombstone and then remove it. SPARQL
-    // runs `;`-separated operations in order, which is what makes this safe and also what
-    // makes it fragile enough to say out loud.
-    client
-        .update(&batch(&[
-            removal,
+    // What an earlier attempt archived, so a retry can take back what it no longer removes.
+    let mut archived_before: Option<String> = None;
+    let mut attempt = 0;
+    let (rows, digest, archived, archive) = loop {
+        attempt += 1;
+        let rows = client
+            .select(&format!(
+                "SELECT ?s ?p ?o WHERE {{ {} }} ORDER BY ?s ?p ?o",
+                client.in_graph(&selector)
+            ))
+            .await?;
+        let digest = content_hash(&rows);
+
+        // Step 1 of 2 — the graveyard, which no read in this crate can see, so nothing a
+        // reader observes has changed yet.
+        //
+        // ⚠ The DELETE TEMPLATE is a quad pattern and may not carry a FILTER — the selector
+        // belongs in the WHERE clause only. Putting it in both is a parse error at the store,
+        // which is at least loud.
+        let mut archived = 0;
+        let mut archive = None;
+        let removal = if destroy {
+            // Everything an earlier recoverable delete quarantined. Read first, so the answer
+            // can say how much it destroyed — and so the graveyard's READ grant, which the
+            // store requires of a `DELETE … WHERE` over it, is a requirement here too rather
+            // than a surprise at the next store upgrade.
+            archived = client
+                .select_deleted(&format!(
+                    "SELECT ?s ?p ?o WHERE {{ {} }}",
+                    client.in_deleted_graph(&selector)
+                ))
+                .await?
+                .len();
+            clear_archive(client, &selector).await?;
+            // Only while the item is live: once another delete committed, the selector's
+            // `?o = <item>` would take that delete's tombstone edge with it.
             format!(
-                "INSERT {{ {} }} WHERE {{ FILTER NOT EXISTS {{ {} }} }}",
-                client.in_graph(&triples),
+                "DELETE {{ {} }} WHERE {{ {} }}",
+                client.in_graph("?s ?p ?o"),
+                client.in_graph(&format!("{} {selector}", live(&item.iri)))
+            )
+        } else if rows.is_empty() {
+            String::new()
+        } else {
+            // The quads read above, as data: a scoped update cannot read the live graph from
+            // inside the graveyard's scope, so the WHERE clause that used to do this work is
+            // now the SELECT that already ran.
+            let data = rows_as_data(&rows)?;
+            // A retry's archive replaces the last attempt's: what was edited away in between
+            // is not what this delete removes, so it does not stay in the graveyard either.
+            if let Some(before) = archived_before.take() {
+                let now_read: HashSet<&str> = data.lines().collect();
+                let stale: String = before
+                    .lines()
+                    .filter(|line| !now_read.contains(line))
+                    .map(|line| format!("{line}\n"))
+                    .collect();
+                if !stale.is_empty() {
+                    client
+                        .update_deleted(&format!(
+                            "DELETE DATA {{ {} }}",
+                            client.in_deleted_graph(&stale)
+                        ))
+                        .await?;
+                }
+            }
+            client
+                .update_deleted(&format!(
+                    "INSERT DATA {{ {} }}",
+                    client.in_deleted_graph(&data)
+                ))
+                .await?;
+            // ★ The commit decides inside the write (ledger #2780): it removes the quads read,
+            // and only while the item is live and NOTHING else matches the selector. A write
+            // that landed after the read (a comment, an edit) makes this match nothing, the
+            // item stays live, and the delete reads again below.
+            let removal = format!(
+                "DELETE {{ {} }} WHERE {{ {} }}",
+                client.in_graph(&data),
                 client.in_graph(&format!(
-                    "<{tombstone}> <{}> <{}>",
-                    v::ext::TYPE,
-                    v::TOMBSTONE_CLASS
-                )),
-            ),
-        ]))
-        .await?;
+                    "{} FILTER NOT EXISTS {{ {{ {selector} }} MINUS {{ VALUES (?s ?p ?o) {{ {} }} }} }}",
+                    live(&item.iri),
+                    rows_as_values(&rows)?
+                ))
+            );
+            archive = Some(data);
+            removal
+        };
+
+        let mut triples = format!(
+            "<{tombstone}> <{type_}> <{class}> ; <{deleted}> <{item_iri}> ; <{number}> {n} ; \
+             <{invalidated}> {when} ; <{recoverable}> {recoverable_value} ; <{quads}> {count} ; \
+             <{hash}> {digest} .",
+            type_ = v::ext::TYPE,
+            class = v::TOMBSTONE_CLASS,
+            deleted = v::DELETED_ITEM,
+            item_iri = item.iri,
+            number = v::NUMBER,
+            n = integer(item.number),
+            invalidated = v::ext::INVALIDATED_AT,
+            when = datetime(now),
+            recoverable = v::RECOVERABLE,
+            recoverable_value = boolean(!destroy),
+            quads = v::QUAD_COUNT,
+            count = integer(rows.len() as i64),
+            hash = v::ext::CONTENT_HASH,
+            digest = literal(&digest),
+        );
+        if destroy {
+            triples.push_str(&format!(
+                "\n<{tombstone}> <{}> {} .",
+                v::PURGED_AT,
+                datetime(now)
+            ));
+        }
+        if !reason.is_empty() {
+            triples.push_str(&format!(
+                "\n<{tombstone}> <{}> {} .",
+                v::REASON,
+                literal(reason)
+            ));
+        }
+        if let Some(author) = author {
+            triples.push_str(&format!(
+                "\n<{tombstone}> <{}> {} .",
+                v::AUTHOR,
+                literal(author)
+            ));
+        }
+        // ★ The key goes onto the tombstone, in the same update that removes it from the item,
+        // so there is no instant at which the key is free: a keyed append replayed after a
+        // delete answers the deleted item instead of filing it again. Kept through a purge as
+        // well — it is a name, like the number, not content.
+        if let Some(key) = &item.key {
+            triples.push_str(&format!("\n<{tombstone}> <{}> {} .", v::KEY, literal(key)));
+        }
+        // Step 2 of 2 — the live graph, which IS the commit point. Removing the item's quads
+        // and writing its tombstone are one scoped update and therefore atomic: there is no
+        // instant in which the item is gone and unaccounted for. The tombstone is written only
+        // once the item is no longer live, so a removal that matched nothing writes none.
+        //
+        // ★ The order of the two statements is load-bearing for a purge. Its selector matches
+        // `?o = <item>`, and the tombstone's `ledger:deletedItem <item>` is exactly that shape —
+        // so an INSERT before the DELETE would write the tombstone and then remove it. SPARQL
+        // runs `;`-separated operations in order, which is what makes this safe and also what
+        // makes it fragile enough to say out loud.
+        client
+            .update(&batch(&[
+                removal,
+                format!(
+                    "INSERT {{ {} }} WHERE {{ FILTER NOT EXISTS {{ {} }} FILTER NOT EXISTS {{ {} }} }}",
+                    client.in_graph(&triples),
+                    client.in_graph(&format!(
+                        "<{tombstone}> <{}> <{}>",
+                        v::ext::TYPE,
+                        v::TOMBSTONE_CLASS
+                    )),
+                    client.in_graph(&live(&item.iri)),
+                ),
+            ]))
+            .await?;
+        // A purge's removal is re-evaluated at its commit, so nothing races it; a recoverable
+        // delete whose item is still live lost its commit to a write, and reads again.
+        if destroy
+            || archive.is_none()
+            || !client
+                .ask(&format!("ASK {{ {} }}", client.in_graph(&live(&item.iri))))
+                .await?
+        {
+            break (rows, digest, archived, archive);
+        }
+        if attempt == DELETE_ATTEMPTS {
+            return Err(Error::Conflict(format!(
+                "{} was not deleted: it was written to {DELETE_ATTEMPTS} times while this delete \
+                 was in flight, and it is unchanged in the live graph. Delete it again",
+                item.short()
+            )));
+        }
+        archived_before = archive;
+    };
     // ★ A purge that ran inside this delete's window (ledger #2779). A purge that read the
     // item live, or found another delete's tombstone, between this delete's read and its
     // archive cleared the graveyard BEFORE the archive landed, so the item's content would
