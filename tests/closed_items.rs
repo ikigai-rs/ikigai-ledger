@@ -164,20 +164,28 @@ fn a_reopened_item_can_be_claimed() {
 
 // ------------------------------------------------------- a close between read and write
 
-/// Three race kernels, one per test, each wrapped so that the write carrying `MARKERS[i]`
+/// Four race kernels, one per test, each wrapped so that the write carrying `MARKERS[i]`
 /// lands only after a close of `acme#1` has: the interleaving a concurrent close produces at
 /// the endpoint's await points, forced so it happens every time.
-static RACE_KERNELS: [OnceLock<Kernel>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
-static ARMED: [AtomicBool; 3] = [
+static RACE_KERNELS: [OnceLock<Kernel>; 4] = [
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+];
+static ARMED: [AtomicBool; 4] = [
+    AtomicBool::new(false),
     AtomicBool::new(false),
     AtomicBool::new(false),
     AtomicBool::new(false),
 ];
-const MARKERS: [&str; 3] = [
+const MARKERS: [&str; 4] = [
     "\"worker-7\"",
     "urn:iki:ledger:awaiting:dispatcher",
     "urn:iki:ledger:awaiting:dispatcher",
+    "urn:iki:ledger:lifecycle:kata-flight:resolving",
 ];
+const STATE: usize = 3;
 const CLAIM: usize = 0;
 const HANDBACK: usize = 1;
 const KEYED_HANDBACK: usize = 2;
@@ -328,4 +336,32 @@ fn a_keyed_hand_back_racing_a_close_does_not_land() {
         "the hand-back's comment landed alone"
     );
     assert_closed_refusal(&answer, "a keyed hand-back racing a close");
+}
+
+/// The close lands after the state reads and immediately before the CAS update.
+#[test]
+fn a_transition_into_flight_racing_a_close_does_not_land() {
+    let kernel = race_kernel(STATE);
+    sink(kernel, &at("append"), &[("content", "Finished work")]);
+    let before = comments(kernel);
+    ARMED[STATE].store(true, Ordering::SeqCst);
+    let answer = try_verb(
+        kernel,
+        Verb::Sink,
+        &at("item:1:state"),
+        &[
+            ("from", "filed"),
+            ("to", "resolving"),
+            ("content", "should not be written"),
+        ],
+    );
+    assert!(!ARMED[STATE].load(Ordering::SeqCst), "the close ran first");
+    assert_closed_refusal(&answer, "a transition racing a close");
+    assert_eq!(source(kernel, &at("item:1:state"), &[]), "filed\n");
+    assert_eq!(
+        comments(kernel),
+        before,
+        "the refused transition wrote a note"
+    );
+    assert!(source(kernel, &at("doctor"), &[]).contains("no problems"));
 }
