@@ -138,6 +138,7 @@
 
 #![deny(missing_docs)]
 
+pub mod alias;
 pub mod attribution;
 pub mod claim;
 pub mod endpoints;
@@ -151,8 +152,8 @@ pub mod sparql;
 pub mod vocabulary;
 
 pub use endpoints::{
-    space, space_with, space_with_policies, SpaceConfig, CAP_ABOUT, CAP_ANY, CAP_CLAIM, CAP_CLOSE,
-    CAP_COMMENT, CAP_DELETE, CAP_PURGE, CAP_READ, CAP_WRITE, SPACE_ID,
+    space, space_with, space_with_policies, SpaceConfig, CAP_ABOUT, CAP_ALIAS, CAP_ANY, CAP_CLAIM,
+    CAP_CLOSE, CAP_COMMENT, CAP_DELETE, CAP_PURGE, CAP_READ, CAP_WRITE, SPACE_ID,
 };
 pub use ledger::Ledger;
 pub use lifecycle::{Lifecycle, Lifecycles};

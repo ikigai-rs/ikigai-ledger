@@ -253,6 +253,11 @@ called `default`. The capability column names the grant for **that** ledger.
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
 | `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
 | `urn:iki:ledger:lifecycle:{name}` | Source · Exists | the legal states, in order | any `read:*` |
+| `urn:iki:alias:scheme:{scheme}` | Source · Sink | who owns a scheme / register it (0.15.0, `alias::space()`) | `urn:cap:alias:scheme:{scheme}` to register |
+| `urn:iki:alias:scheme:{scheme}:value:{value}` | Source · Sink · Delete | which item an alias names / give it / remove it | the scheme's owner, and `alias:{ledger}` or `write:{ledger}` to give |
+
+The two `urn:iki:alias:` rows are a separate space, `ikigai_ledger::alias::space()`, which a host
+binds beside this one; see "Aliases" below.
 
 The last three carry no ledger segment because neither is a ledger's own state: the
 inventory spans them, and a policy is a property of the host's configuration. **The
@@ -509,6 +514,55 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) cleared-awaiting
 - ⚠ **A claim is untouched by either**: the worker releases its claim as before. An item
   awaiting its dispatcher can still be claimed (the dispatcher may, to review it); `next` simply
   does not offer it.
+
+## Aliases: an external id, in a scheme one principal owns
+
+Since 0.15.0 (ledger #2828) an item may carry many **aliases**, each a `(scheme, value)` pair
+unique per scheme across the deployment: `kata:01m6c5bjbm…` and `kata:web#3f2` from an import,
+`roborev:job/88`, `gh:acme/web#12` from a GitHub sync, or an item's handle from a ledger it was
+moved out of. Every reference that takes an item resolves one: `item=gh:acme/web#12`,
+`urn:iki:ledger:acme:item:kata:01m6c5bjbm…`, and the alias's own IRI. An item PART
+(`…:item:{id}:state`) does not, for the reason it refuses a key: a value may hold a `:`.
+
+**An alias is not a key.** The idempotency key (`append key=`) is unchanged, an item's primary
+name stays `ledger#N`, and a new item carries no alias.
+
+```text
+$ sink urn:iki:alias:scheme:gh                                 # as the sync's principal
+scheme gh owned by urn:iki:gonk:client:gh-sync
+$ sink urn:iki:alias:scheme:gh:value:acme%2Fweb%2312 acme#12
+gh:acme/web#12 names acme#12 urn:iki:ledger:acme:item:01m4a2…
+$ source urn:iki:ledger:acme:item:gh:acme%2Fweb%2312           # or item=gh:acme/web#12
+```
+
+Every scheme and alias is in one deployment-wide graph, `urn:iki:alias:graph`, skolemized as
+`urn:iki:alias:scheme:{scheme}` and `urn:iki:alias:scheme:{scheme}:value:{value}`, with the value
+percent-encoded outside `A-Z a-z 0-9 - . _ ~`. The resources are a space of their own,
+`ikigai_ledger::alias::space()`, bound beside `space()`.
+
+★ **It is a new authority boundary, and these are its rules:**
+
+| to | you need |
+| --- | --- |
+| register a scheme | `urn:cap:alias:scheme:{scheme}` and a principal; the principal becomes the owner. The first registration wins, inside the write; another principal is refused naming the owner |
+| give an item an alias | to own the scheme (data, checked inside the write) **and** `urn:cap:ledger:alias:{ledger}` or `write:{ledger}` on the item's ledger. A non-owner is refused naming the owner; an alias already naming another item is refused naming that item |
+| remove an alias | to own the scheme |
+| read the aliases graph | `urn:cap:store:read:graph:urn:iki:alias:graph` (and `…:write:graph:…` to write it) |
+| resolve an alias to an item | the aliases graph's read grant **and** read on the item's ledger |
+
+⚠ **Reading the aliases graph reveals that items exist**: an alias names an item IRI, which
+carries its ledger and opaque id (never its title or body). Issue that grant to an importer, a
+sync or an operator, and to nobody you would not show the list of ledgers. Resolution never
+names an item to a caller without read on its ledger: an alias of such an item answers word for
+word what an alias nobody holds answers, and an alias of an item in another ledger the caller
+can read is refused the way a foreign item IRI is. A reference that is not an alias reads
+nothing new and needs no new grant.
+
+Uniqueness and ownership are decided in the update that adds the alias (the check-then-act
+lesson of ledger #2772): racing adds of one alias leave one, and racing registrations of one
+scheme leave one owner. `tests/aliases.rs` holds all of this, both races included. Not built: no
+item face lists its aliases, a scheme has no transfer, and deleting an item leaves its aliases,
+which then resolve to an item that is not found, the way a key stays taken.
 
 ## A goal and its arcs: `parent=` and an item's children
 
@@ -1195,6 +1249,7 @@ worker can be handed the work without the verdict on it:
 | `urn:cap:ledger:comment:{ledger}` | `comment`, keyed or not | |
 | `urn:cap:ledger:close:{ledger}` | `close` and `reopen` | |
 | `urn:cap:ledger:about:{ledger}` (0.10.0) | `item:{id}:about` Sink (add) and Delete (remove) | not the item Sink's own `about=`, which is the edit door |
+| `urn:cap:ledger:alias:{ledger}` (0.15.0) | giving one of this ledger's items an alias, in a scheme the caller owns | see "Aliases" |
 | `urn:cap:ledger:write:{ledger}` | **all four of the above**, and filing, linking, labeling, deferring, editing, `about=` on the item, state | unchanged: no grant issued before 0.7.0 or 0.10.0 changed meaning |
 
 A claim's or a close's note, and the release record a close writes, are part of that verb and
@@ -1442,7 +1497,8 @@ is, the rules it follows, what is not tested, and how to report a barrier.
 ## Status
 
 All twenty-four resources are bound, tested, and walked clean by `ikigai-conformance`
-(`AUTHORITY` included — every mutating action declares the scope it enforces).
+(`AUTHORITY` included — every mutating action declares the scope it enforces). So are the two
+alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
@@ -1469,6 +1525,14 @@ principal may date a close (`closed-at=`). An explicit one-time backfill recover
 may say `import`. The vocabulary now carries an `owl:Ontology` header whose `owl:versionInfo`
 is the crate version (test-pinned), which devtools' `ns-drift` compares with the deployed
 `/ns/ledger`: redeploy it after this release.
+
+**Aliases by scheme (#2828).** An item may carry many `(scheme, value)` aliases, unique per
+scheme across the deployment, and every item reference resolves one. A scheme is registered
+with one owning principal, and only it adds aliases in it. New: `ikigai_ledger::alias` and its
+space (`urn:iki:alias:scheme:{scheme}`, `…:value:{value}`), the `urn:cap:ledger:alias:{ledger}`
+and `urn:cap:alias:scheme:{scheme}` grants, the deployment graph `urn:iki:alias:graph`, and the
+terms `AliasScheme`, `Alias`, `schemeName`, `schemeOwner`, `aliasScheme`, `aliasValue` and
+`aliasOf`. See "Aliases" above.
 
 **An item with many quads deletes again.** A delete's commit guard listed the quads it read one
 `VALUES` row per line, and the store's scanner refused that past about twenty triples beyond the

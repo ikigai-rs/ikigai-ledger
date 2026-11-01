@@ -238,6 +238,12 @@ impl<'a, 'i> StoreClient<'a, 'i> {
         &self.ledger
     }
 
+    /// The invocation this client issues under: what [`crate::alias`] asks of the caller's
+    /// capability (whether it may read the ledger an alias names).
+    pub(crate) fn invocation(&self) -> &'a Invocation<'i> {
+        self.inv
+    }
+
     /// The `GRAPH <…> { … }` wrapper every query and update of this ledger carries.
     ///
     /// One method rather than a free function taking a graph IRI: a caller that has to
@@ -318,31 +324,50 @@ impl<'a, 'i> StoreClient<'a, 'i> {
     }
 
     async fn update_graph(&self, graph: &str, update: &str) -> Result<()> {
-        let target = ikigai_core::Iri::parse(STORE_GRAPH_UPDATE).expect("a constant IRI");
-        self.inv
-            .issue(
-                Request::new(Verb::Sink, target)
-                    .with_arg("content", ArgRef::Inline(update.as_bytes().to_vec()))
-                    .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec())),
-            )
-            .await
-            .map_err(store_missing)?;
-        Ok(())
+        update_in(self.inv, graph, update).await
     }
 
     async fn query(&self, endpoint: &str, graph: &str, query: &str) -> Result<Vec<u8>> {
-        let target = ikigai_core::Iri::parse(endpoint).expect("a constant IRI");
-        let repr = self
-            .inv
-            .issue(
-                Request::new(Verb::Source, target)
-                    .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()))
-                    .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec())),
-            )
-            .await
-            .map_err(store_missing)?;
-        Ok(repr.bytes)
+        query_in(self.inv, endpoint, graph, query).await
     }
+}
+
+/// Evaluate a SPARQL SELECT over one named graph that is no ledger's, through the same narrow
+/// door and with the caller's capability: the deployment's aliases graph ([`crate::alias`]).
+pub(crate) async fn select_in(inv: &Invocation<'_>, graph: &str, query: &str) -> Result<Vec<Row>> {
+    parse_results(&query_in(inv, STORE_GRAPH_SELECT, graph, query).await?)
+}
+
+/// Apply a SPARQL UPDATE to one named graph, through the narrow door, with the caller's
+/// capability. [`StoreClient`]'s writes come here with the graph they are scoped to.
+pub(crate) async fn update_in(inv: &Invocation<'_>, graph: &str, update: &str) -> Result<()> {
+    let target = ikigai_core::Iri::parse(STORE_GRAPH_UPDATE).expect("a constant IRI");
+    inv.issue(
+        Request::new(Verb::Sink, target)
+            .with_arg("content", ArgRef::Inline(update.as_bytes().to_vec()))
+            .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec())),
+    )
+    .await
+    .map_err(store_missing)?;
+    Ok(())
+}
+
+async fn query_in(
+    inv: &Invocation<'_>,
+    endpoint: &str,
+    graph: &str,
+    query: &str,
+) -> Result<Vec<u8>> {
+    let target = ikigai_core::Iri::parse(endpoint).expect("a constant IRI");
+    let repr = inv
+        .issue(
+            Request::new(Verb::Source, target)
+                .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()))
+                .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec())),
+        )
+        .await
+        .map_err(store_missing)?;
+    Ok(repr.bytes)
 }
 
 /// The named graphs the store holds that this caller may read, through

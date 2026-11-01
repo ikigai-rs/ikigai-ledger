@@ -378,6 +378,17 @@ impl Ledger {
         format!("{CAP_ABOUT_PREFIX}{}", self.name)
     }
 
+    /// `urn:cap:ledger:alias:{name}` — giving one of this ledger's items an alias in a scheme
+    /// the caller owns, and nothing else (since 0.15.0, ledger #2828). See [`crate::alias`].
+    ///
+    /// ```
+    /// use ikigai_ledger::Ledger;
+    /// assert_eq!(Ledger::parse("acme").unwrap().cap_alias(), "urn:cap:ledger:alias:acme");
+    /// ```
+    pub fn cap_alias(&self) -> String {
+        format!("{CAP_ALIAS_PREFIX}{}", self.name)
+    }
+
     /// `urn:cap:ledger:delete:{name}` — moving an item out of view, recoverably.
     pub fn cap_delete(&self) -> String {
         format!("{CAP_DELETE_PREFIX}{}", self.name)
@@ -398,6 +409,7 @@ pub(crate) const CAP_CLAIM_PREFIX: &str = "urn:cap:ledger:claim:";
 pub(crate) const CAP_COMMENT_PREFIX: &str = "urn:cap:ledger:comment:";
 pub(crate) const CAP_CLOSE_PREFIX: &str = "urn:cap:ledger:close:";
 pub(crate) const CAP_ABOUT_PREFIX: &str = "urn:cap:ledger:about:";
+pub(crate) const CAP_ALIAS_PREFIX: &str = "urn:cap:ledger:alias:";
 
 /// A grammar matching **both** `urn:iki:ledger:{ledger}:{action}` and the bare
 /// `urn:iki:ledger:{action}`, capturing `ledger` either way.
@@ -480,7 +492,9 @@ impl Grammar for LedgerGrammar {
 /// contain `:` (`urn:kata:issue:01JZ`), so `item:key:a:state` could name the state of the
 /// item keyed `a` or the item keyed `a:state`, and `item:{id}` has answered the second
 /// since 0.4.0. A part therefore refuses an id of `key`, the item resource keeps every key,
-/// and a keyed item's parts are reached through its number or its IRI. Bound AHEAD of
+/// and a keyed item's parts are reached through its number or its IRI. An alias
+/// (`gh:acme/web#12`, ledger #2828) is the same case and gets the same answer: the item
+/// resource resolves it, a part does not. Bound AHEAD of
 /// `item:{id}` (whose `{id}` takes the rest of the IRI) so `item:12:state` is the part and
 /// not an item whose id is `12:state` — which was a NotFound before, so nothing changes
 /// meaning.
