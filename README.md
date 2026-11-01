@@ -686,11 +686,13 @@ live graph.
 selector, so a comment that landed between the read and the removal was removed without
 ever being archived — a recoverable delete that destroyed an acknowledged write, every time
 the two raced. Removing the rows that were read makes what was archived, what was removed,
-and what the tombstone hashes and counts one set. A write that races a delete is kept, in
-the live graph beside the tombstone: an orphan of the deleted item, which is where a write
-arriving just after a delete has always landed, and never a loss. A purge still removes by
-selector — it is asked to leave nothing of the item — so a write racing a purge goes with
-it.
+and what the tombstone hashes and counts one set. And that removal commits only while
+nothing beyond those quads matches the item (ledger #2780): a write that lands between the
+read and the commit makes the commit match nothing, and the delete reads, archives and
+commits again, so the write is archived with the item. Through 0.14.1 it was kept in the live
+graph beside the tombstone instead, an orphan that no later purge could reach. A purge
+still removes by selector — it is asked to leave nothing of the item — so a write racing a
+purge goes with it.
 
 ⚠ **The graveyard is touched first and the live graph last, deliberately: the live graph is
 the commit point.** Every read here looks at the live graph and none looks at the graveyard,
