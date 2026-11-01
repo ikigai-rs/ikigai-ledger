@@ -1035,6 +1035,21 @@ async fn write_keyed_comment(
     };
     // And only on a live item (ledger #764), like every write on one.
     let free = format!("{} {open} {free}", client.in_graph(&live(item)));
+    // ★ A hand-back names the holder label of the claim it finds (ledger #2819), read in the
+    // update that writes it: the principal is the comment's committer, and two workers can
+    // share one, so the label is what tells them apart. Nobody holding it names nobody.
+    let holder = if handback == Handback::Set {
+        triples.push_str(&format!(
+            "\n<{comment}> <{}> ?handedBackBy .",
+            v::HANDED_BACK_BY
+        ));
+        client.in_graph(&format!(
+            "OPTIONAL {{ <{item}> <{}> ?handedBackBy }}",
+            v::CLAIMED_BY
+        ))
+    } else {
+        String::new()
+    };
     // The stamp and the hand-back first: once the comment is in, the key is taken and the
     // guard is false, so a replay changes neither.
     client
@@ -1054,7 +1069,7 @@ async fn write_keyed_comment(
             ),
             handback_update(client, item, handback, &free, now),
             format!(
-                "INSERT {{ {} }} WHERE {{ {free} }}",
+                "INSERT {{ {} }} WHERE {{ {free} {holder} }}",
                 client.in_graph(&triples)
             ),
         ]))
@@ -1757,6 +1772,13 @@ impl Endpoint for ItemEndpoint {
                     return Err(Error::MissingArgument("content".to_string()));
                 }
                 updates.push(touch(&client, &item.iri, now));
+                updates.push(edit_event(
+                    &client,
+                    &item.iri,
+                    "edit",
+                    &Attribution::committer(inv)?,
+                    now,
+                )?);
                 guarded_update(&client, &[&item.iri], &batch(&updates)).await?;
                 Ok(plain(format!("updated {} {}\n", item.short(), item.iri)))
             }
@@ -2073,21 +2095,32 @@ fn rows_as_data(rows: &[sparql::Row]) -> Result<String> {
     Ok(triples)
 }
 
-/// The same rows as a `VALUES (?s ?p ?o)` block's body, one `( s p o )` per row.
+/// The same rows as a `VALUES (?s ?p ?o)` block's body, one `( s p o )` per row, all on ONE
+/// line.
+///
+/// ⚠ **One line is load-bearing** (ledger #2819). The store's scanner reads a `<` inside
+/// parentheses both as an IRI and as a less-than, and in the less-than reading the `#` of a
+/// `ledger:` predicate opens a comment that runs to the end of the line. With a row per line
+/// every row resumed that reading and forked it again, and past 64 open readings
+/// (`MAX_SCAN_BRANCHES`) the store refused the update: an item with about twenty triples
+/// beyond its own could not be deleted at all, and attribution events put that many on most
+/// items that were ever claimed. On one line the comment runs past every row, so the
+/// readings stay a handful whatever the row count. A literal's newline is escaped by the
+/// store's term serializer, so no term breaks the line.
 fn rows_as_values(rows: &[sparql::Row]) -> Result<String> {
-    let mut values = String::new();
+    let mut values = Vec::new();
     for row in rows {
         let (Some(s), Some(p), Some(o)) = (row.get("s"), row.get("p"), row.get("o")) else {
             continue;
         };
-        values.push_str(&format!(
-            "( {} {} {} )\n",
+        values.push(format!(
+            "( {} {} {} )",
             sparql::term(&s.term("s")?),
             sparql::term(&p.term("p")?),
             sparql::term(&o.term("o")?)
         ));
     }
-    Ok(values)
+    Ok(values.join(" "))
 }
 
 /// How many times a recoverable delete reads and commits again when writes keep landing on
@@ -3284,11 +3317,28 @@ impl Endpoint for CloseEndpoint {
             v::STATUS,
             v::CLOSED
         );
-        let (event, event_iri) =
-            counts::status_event_when(&client, &item.iri, v::CLOSED, now, &still_open)?;
         let who =
             attribution::resolve(inv, &client, self.participants.as_deref(), Dates::None, now)
                 .await?;
+        // ★ An import principal may date the close at its source (ledger #2819), as it may
+        // date an item's filing; anyone else is refused, with the reason and the remedy.
+        let claimed = attribution::resolve_closed_at(
+            inv,
+            &client,
+            self.participants.as_deref(),
+            item.created,
+            now,
+        )
+        .await?;
+        let (event, event_iri) = counts::status_event_when(
+            &client,
+            &item.iri,
+            v::CLOSED,
+            now,
+            &still_open,
+            &who,
+            claimed,
+        )?;
         let record = client.ledger().comment(&mint_id(now)?);
         let mut ops = vec![
             // Editing the verdict of an already closed item must not move its close time.
@@ -3297,7 +3347,7 @@ impl Endpoint for CloseEndpoint {
                 &client,
                 &item.iri,
                 v::CLOSED_AT,
-                &datetime(now),
+                &datetime(claimed.unwrap_or(now)),
                 &still_open,
             ),
             format!(
@@ -3309,7 +3359,24 @@ impl Endpoint for CloseEndpoint {
                     v::CLOSED_AT_SOURCE
                 ))
             ),
+            if claimed.is_some() {
+                format!(
+                    "INSERT {{ {} }} WHERE {{ {} }}",
+                    client.in_graph(&format!(
+                        "<{}> <{}> {} .",
+                        item.iri,
+                        v::CLOSED_AT_SOURCE,
+                        literal(attribution::IMPORT)
+                    )),
+                    client.in_graph(&format!("{} {still_open}", live(&item.iri)))
+                )
+            } else {
+                String::new()
+            },
             release_record(&client, &item.iri, &record, &who, now),
+            // And the release as an event, who held it and who released it (ledger #2819),
+            // under the same condition: only an update that finds a claim records one.
+            release_event(&client, &item.iri, ReleaseReason::Closed, "", &who, now)?,
             replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
             replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
             touch(&client, &item.iri, now),
@@ -3416,6 +3483,14 @@ impl Endpoint for CloseEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(
+                        ArgSpec::new("closed-at")
+                            .summary(
+                                "When the item closed at its source, for an import principal (ledger:Importer in the host's participants graph) only: an xsd:dateTime no later than now and no earlier than the item's filing. Dates closedAt and the close's status event, so the daily counts place it on that day, both marked closedAtSource import (ledger #2819). Anyone else sending it is refused.",
+                            )
+                            .class(v::ext::XSD_DATETIME)
+                            .optional(),
+                    )
                     .input(as_arg(&WRITE_FACES))
                     .output(PLAIN)
                     .output(JSON),
@@ -3450,7 +3525,7 @@ impl Endpoint for ReopenEndpoint {
         // event IRI minted here is how this request learns whether it was that one.
         let still_closed = format!("<{}> <{}> <{}> .", item.iri, v::STATUS, v::CLOSED);
         let (event, event_iri) =
-            counts::status_event_when(&client, &item.iri, v::OPEN, now, &still_closed)?;
+            counts::status_event_when(&client, &item.iri, v::OPEN, now, &still_closed, &who, None)?;
         guarded_update(
             &client,
             &[&item.iri],
@@ -3657,6 +3732,127 @@ fn release_record(
     )
 }
 
+/// The triples every attribution event carries (ledger #2819): its class, its item, when, and
+/// who committed it. ★ Every event hangs off its item by `onItem`, so a delete, an archive
+/// and a purge own it as they own a status event, and every one is written in the update
+/// that makes the change it records, under that update's guard: a write that loses its race
+/// leaves no event.
+fn event_triples(event: &str, class: &str, item: &str, who: &Attribution, now: u64) -> String {
+    let mut out = format!(
+        "<{event}> <{}> <{class}> ; <{}> <{item}> ; <{}> {} .",
+        v::ext::TYPE,
+        v::ON_ITEM,
+        v::ext::CREATED,
+        datetime(now)
+    );
+    out.push_str(&who.commit(event, now));
+    out
+}
+
+/// A fresh event IRI beneath `item`: `{item}:{segment}:{id}`, skolemized like a status event.
+fn event_iri(item: &str, segment: &str, now: u64) -> Result<String> {
+    Ok(format!("{item}:{segment}:{}", mint_id(now)?))
+}
+
+/// Why a claim ended: the value of `ledger:releaseReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseReason {
+    /// A release, by the holder or a dispatcher's override.
+    Released,
+    /// A close, which releases the claim.
+    Closed,
+    /// A takeover, which replaced it.
+    Takeover,
+}
+
+impl ReleaseReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReleaseReason::Released => "released",
+            ReleaseReason::Closed => "closed",
+            ReleaseReason::Takeover => "takeover",
+        }
+    }
+}
+
+/// The release event for the claim on `item` (ledger #2819): who held it, as whom, since
+/// when, why it ended, and who ended it (the committer). Written only when the update finds a
+/// claim, and only while `guard` (a pattern over the ledger's graph) holds, so it lands
+/// exactly when the release does. It must run ahead of the operations that retract the claim.
+fn release_event(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    reason: ReleaseReason,
+    guard: &str,
+    who: &Attribution,
+    now: u64,
+) -> Result<String> {
+    let event = event_iri(item, "release", now)?;
+    let mut triples = event_triples(&event, v::RELEASE_EVENT_CLASS, item, who, now);
+    // An unbound variable drops only its own triple, so a claim with no principal, kind or
+    // time records the rest.
+    triples.push_str(&format!(
+        "\n<{event}> <{by}> ?holder ; <{why}> {reason} .\n<{event}> <{principal}> ?principal .\n\
+         <{event}> <{kind}> ?kind .\n<{event}> <{at}> ?claimedAt .",
+        by = v::CLAIMED_BY,
+        why = v::RELEASE_REASON,
+        reason = literal(reason.as_str()),
+        principal = v::CLAIM_PRINCIPAL,
+        kind = v::CLAIM_KIND,
+        at = v::CLAIMED_AT,
+    ));
+    Ok(format!(
+        "INSERT {{ {} }} WHERE {{ {} }}",
+        client.in_graph(&triples),
+        client.in_graph(&format!(
+            "{live} {guard}\n<{item}> <{by}> ?holder .\n\
+             OPTIONAL {{ <{item}> <{principal}> ?principal }}\n\
+             OPTIONAL {{ <{item}> <{kind}> ?kind }}\n\
+             OPTIONAL {{ <{item}> <{at}> ?claimedAt }}",
+            live = live(item),
+            by = v::CLAIMED_BY,
+            principal = v::CLAIM_PRINCIPAL,
+            kind = v::CLAIM_KIND,
+            at = v::CLAIMED_AT,
+        ))
+    ))
+}
+
+/// An edit event (ledger #2819): an edit that creates no node of its own (`kind`: `label`,
+/// `link`, `defer`, `about`, `edit` …) records who made it, as one operation of the edit's own
+/// update, while the item is live.
+fn edit_event(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    kind: &str,
+    who: &Attribution,
+    now: u64,
+) -> Result<String> {
+    Ok(insert_on_live(
+        client,
+        &[item],
+        &edit_event_triples(item, kind, who, now)?,
+    ))
+}
+
+/// The triples of an [`edit_event`], for an update that carries its own guard (a lifecycle
+/// transition's compare-and-set).
+pub(super) fn edit_event_triples(
+    item: &str,
+    kind: &str,
+    who: &Attribution,
+    now: u64,
+) -> Result<String> {
+    let event = event_iri(item, "edit", now)?;
+    let mut triples = event_triples(&event, v::EDIT_EVENT_CLASS, item, who, now);
+    triples.push_str(&format!(
+        "\n<{event}> <{}> {} .",
+        v::EDIT_KIND,
+        literal(kind)
+    ));
+    Ok(triples)
+}
+
 /// The holder whose claim the update that wrote [`release_record`] `record` released, read
 /// back from the record; `None` when that update found no claim.
 async fn released_by(client: &StoreClient<'_, '_>, record: &str) -> Result<Option<String>> {
@@ -3725,6 +3921,13 @@ fn holder_display(item: &Item) -> String {
 
 /// The claim as ONE update: the old claim's every field out, the new one in, `modified`
 /// stamped — all under the guard, so a lost race changes nothing at all.
+///
+/// ★ And the events with it (ledger #2819), ahead of the operation that changes the claim and
+/// under the same guard: a takeover's release of the claim it replaces, and a claim event for
+/// a first claim or a takeover. A renewal (`renew=true`, or a plain claim by the holder that
+/// already holds it) records none, which is why a first claim's event also needs the item
+/// unclaimed. Of concurrent claims of one free item only the first finds it free, so one
+/// claim event is written.
 #[allow(clippy::too_many_arguments)] // reason: one SPARQL statement's inputs, each distinct
 fn claim_update(
     client: &StoreClient<'_, '_>,
@@ -3735,9 +3938,15 @@ fn claim_update(
     purpose: Option<&str>,
     kind: crate::claim::ClaimKind,
     lease: Option<&crate::claim::Lease>,
+    who: &Attribution,
     now: u64,
-) -> String {
+) -> Result<String> {
     let takeover = matches!(guard, Guard::ExpiredFrom(..));
+    let taken_from = match guard {
+        Guard::ExpiredFrom(from, _) => Some(from),
+        _ => None,
+    };
+    let records_a_claim = !matches!(guard, Guard::Mine(_));
     // ★ "Mine" is the label AND the principal (ledger #1199): another principal spelling this
     // holder's label neither renews nor re-takes its claim.
     let claimant = same_claimant_clause(item, principal);
@@ -3824,18 +4033,66 @@ fn claim_update(
     }
     // ★ Only an OPEN item (ledger #1419): the endpoint refuses a closed one before writing,
     // and this holds against a close that lands between that read and this write.
-    format!(
+    let open = format!("<{item}> <{}> <{}> .\n{guard}", v::STATUS, v::OPEN);
+    let mut ops = Vec::new();
+    if takeover {
+        ops.push(release_event(
+            client,
+            item,
+            ReleaseReason::Takeover,
+            &open,
+            who,
+            now,
+        )?);
+    }
+    if records_a_claim {
+        let event = event_iri(item, "claim", now)?;
+        let mut triples = event_triples(&event, v::CLAIM_EVENT_CLASS, item, who, now);
+        triples.push_str(&format!(
+            "\n<{event}> <{}> {} ; <{}> <{}> .",
+            v::CLAIMED_BY,
+            literal(holder),
+            v::CLAIM_KIND,
+            kind.iri()
+        ));
+        if let Some(principal) = principal {
+            triples.push_str(&format!(
+                "\n<{event}> <{}> {principal} .",
+                v::CLAIM_PRINCIPAL
+            ));
+        }
+        if let Some(from) = taken_from {
+            triples.push_str(&format!(
+                "\n<{event}> <{}> {} .",
+                v::TAKEOVER_FROM,
+                literal(from)
+            ));
+        }
+        let unclaimed = if takeover {
+            String::new()
+        } else {
+            format!(
+                "FILTER NOT EXISTS {{ <{item}> <{}> ?anyHolder }}",
+                v::CLAIMED_BY
+            )
+        };
+        ops.push(format!(
+            "INSERT {{ {} }} WHERE {{ {} }}",
+            client.in_graph(&triples),
+            client.in_graph(&format!("{} {open}\n{unclaimed}", live(item)))
+        ));
+    }
+    ops.push(format!(
         "DELETE {{ {} }}\nINSERT {{ {} }}\nWHERE {{ {} }}",
         client.in_graph(&delete),
         client.in_graph(&insert),
         client.in_graph(&format!(
-            "<{item}> <{}> <{}> ; <{}> <{}> .\n{guard}\n{optional}",
+            "<{item}> <{}> <{}> .\n{open}\n{optional}",
             v::ext::TYPE,
             v::ITEM_CLASS,
-            v::STATUS,
-            v::OPEN
         )),
-    )
+    ));
+    Ok(batch(&ops))
 }
 
 /// `true`, `false`, or a refusal naming the argument.
@@ -4060,8 +4317,9 @@ impl Endpoint for ClaimEndpoint {
                         purpose,
                         kind,
                         lease.as_ref(),
+                        &Attribution::committer(inv)?,
                         now,
-                    ))
+                    )?)
                     .await?;
                 let after = model::load_item(&client, &item.iri)
                     .await?
@@ -4204,8 +4462,20 @@ impl Endpoint for ClaimEndpoint {
                         ));
                     }
                 }
+                // The release event first, under the same guard, while the claim is there to
+                // read (ledger #2819).
                 client
-                    .update(&release_update(&client, &item.iri, &guard, now))
+                    .update(&batch(&[
+                        release_event(
+                            &client,
+                            &item.iri,
+                            ReleaseReason::Released,
+                            &guard,
+                            &Attribution::committer(inv)?,
+                            now,
+                        )?,
+                        release_update(&client, &item.iri, &guard, now),
+                    ]))
                     .await?;
                 if !guard.is_empty() {
                     let after = model::load_item(&client, &item.iri).await?.ok_or_else(|| {
@@ -4378,30 +4648,33 @@ impl Endpoint for DeferEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
-        let (update, said) = match inv.request.verb {
+        let (update, said, edit) = match inv.request.verb {
             Verb::Sink => (
                 replace_one(&client, &item.iri, v::DEFERRED, &boolean(true)),
                 "deferred",
+                "defer",
             ),
-            Verb::Delete => (retract(&client, &item.iri, v::DEFERRED), "resumed"),
+            Verb::Delete => (
+                retract(&client, &item.iri, v::DEFERRED),
+                "resumed",
+                "resume",
+            ),
             other => return Err(unsupported("ledger-defer", other)),
         };
+        let who = Attribution::committer(inv)?;
         guarded_update(
             &client,
             &[&item.iri],
-            &batch(&[update, touch(&client, &item.iri, now)]),
+            &batch(&[
+                update,
+                touch(&client, &item.iri, now),
+                edit_event(&client, &item.iri, edit, &who, now)?,
+            ]),
         )
         .await?;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
-                write_comment(
-                    &client,
-                    &item.iri,
-                    note.trim(),
-                    &Attribution::committer(inv)?,
-                    now,
-                )
-                .await?;
+                write_comment(&client, &item.iri, note.trim(), &who, now).await?;
             }
         }
         Ok(plain(format!("{} {said}\n", item.short())))
@@ -4492,15 +4765,17 @@ impl Endpoint for LinkEndpoint {
             });
         }
         let triple = format!("<{}> <{predicate}> <{}> .", from.iri, to.iri);
-        let (update, said) = match inv.request.verb {
+        let (update, said, edit) = match inv.request.verb {
             // Both ends live: an edge to a deleted item names something nothing resolves.
             Verb::Sink => (
                 insert_on_live(&client, &[&from.iri, &to.iri], &triple),
                 "linked",
+                "link",
             ),
             Verb::Delete => (
                 format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
                 "unlinked",
+                "unlink",
             ),
             other => return Err(unsupported("ledger-link", other)),
         };
@@ -4513,7 +4788,11 @@ impl Endpoint for LinkEndpoint {
         guarded_update(
             &client,
             ends,
-            &batch(&[update, touch(&client, &from.iri, now)]),
+            &batch(&[
+                update,
+                touch(&client, &from.iri, now),
+                edit_event(&client, &from.iri, edit, &Attribution::committer(inv)?, now)?,
+            ]),
         )
         .await?;
         if want == JSON {
@@ -4624,18 +4903,27 @@ impl Endpoint for LabelEndpoint {
             });
         }
         let triple = format!("<{}> <{}> {} .", item.iri, v::LABEL, literal(label));
-        let (update, said) = match inv.request.verb {
-            Verb::Sink => (insert_on_live(&client, &[&item.iri], &triple), "labeled"),
+        let (update, said, edit) = match inv.request.verb {
+            Verb::Sink => (
+                insert_on_live(&client, &[&item.iri], &triple),
+                "labeled",
+                "label",
+            ),
             Verb::Delete => (
                 format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
                 "unlabeled",
+                "unlabel",
             ),
             other => return Err(unsupported("ledger-label", other)),
         };
         guarded_update(
             &client,
             &[&item.iri],
-            &batch(&[update, touch(&client, &item.iri, now)]),
+            &batch(&[
+                update,
+                touch(&client, &item.iri, now),
+                edit_event(&client, &item.iri, edit, &Attribution::committer(inv)?, now)?,
+            ]),
         )
         .await?;
         Ok(plain(format!("{said} {} {label}\n", item.short())))
@@ -4738,6 +5026,17 @@ impl Endpoint for AboutEndpoint {
             });
         }
         updates.push(touch(&client, &item.iri, now));
+        updates.push(edit_event(
+            &client,
+            &item.iri,
+            if inv.request.verb == Verb::Sink {
+                "about"
+            } else {
+                "unabout"
+            },
+            &Attribution::committer(inv)?,
+            now,
+        )?);
         guarded_update(&client, &[&item.iri], &batch(&updates)).await?;
         Ok(plain(format!(
             "{} {said} {}\n",

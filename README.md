@@ -1013,6 +1013,72 @@ The JSON face carries the same as `attribution` on an item and on a comment (`au
 write without a principal still records `author=` as the free text it always was; every face
 reads that as claimed (`claimed, free text`). `tests/attribution.rs` has one test per path.
 
+## Who worked on it: claim, release, hand-back and edit events
+
+A claim is current state: a release or a close retracts `claimedBy` and the rest, so until
+0.15.0 the graph forgot who had worked on an item the moment it closed, and a status event
+said when an item closed but never who closed it. Now each of these writes records its "who"
+as a node of its own (ledger #2819), so "what did this agent do" is a query over the events:
+
+| event | written by | carries |
+|---|---|---|
+| `ledger:ClaimEvent` `{item}:claim:{id}` | a first claim, or a takeover (never a renewal) | `claimedBy` (the holder label), `claimPrincipal`, `claimKind`, and `takeoverFrom` on a takeover |
+| `ledger:ReleaseEvent` `{item}:release:{id}` | a release (by the holder or a dispatcher), a close, a takeover, when there was a claim | the released claim's `claimedBy`, `claimPrincipal`, `claimKind` and `claimedAt`, and `releaseReason` `released`, `closed` or `takeover` |
+| `ledger:EditEvent` `{item}:edit:{id}` | `label`, `link`, `defer`, `item:{id}:about`, an item edit, a `state` transition | `editKind`: `label`, `unlabel`, `link`, `unlink`, `defer`, `resume`, `about`, `unabout`, `edit` or `state` |
+| `ledger:StatusEvent` (since 0.14.0) | a close or a reopen | now also its committer |
+| `ledger:handedBackBy` on the hand-back comment | `comment handback=true` | the holder label of the claim the hand-back found |
+
+Every event carries `onItem`, `dcterms:created`, `ledger:committedAt` and, when the capability
+carried a principal, `ledger:committer`: the releaser of a release, the closer of a close. The
+model is the one "Who wrote it" describes, with no second one beside it.
+
+- ★ **Each event rides the update that makes its change, under the same guard.** No new check
+  then act: a claim that loses its race writes no claim event, so concurrent claims of one free
+  item leave one, and a release with `from=` that finds the claim changed hands records nothing.
+- **The holder label is what tells two workers apart that share a principal** (both lawnboy
+  workers share one QUIC principal). The claim event keeps it after the release, and a
+  hand-back records it in `ledger:handedBackBy`.
+- **Events hang off their item** by `onItem` and are skolemized beneath it, so a delete, an
+  archive and a purge own them as they own comments and status events. No property they carry
+  has an `rdfs:domain`, so a reasoner does not take an event for an item.
+- **A renewal records nothing**: the claim it extends already has its event.
+
+```sparql
+# How many items has each holder claimed, in one ledger, whatever is still claimed now
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT ?holder (COUNT(DISTINCT ?item) AS ?items) WHERE {
+  GRAPH <urn:iki:ledger:graph:default> {
+    ?claim a ledger:ClaimEvent ; ledger:claimedBy ?holder ; ledger:onItem ?item .
+  }
+} GROUP BY ?holder
+```
+
+### An importer's close date
+
+An import principal (`ledger:Importer`, as in "Who wrote it") may send `closed-at=` on `close`:
+an `xsd:dateTime` no later than now and no earlier than the item's filing. It dates `closedAt`
+and the `StatusEvent` that `counts` reads, so the daily series places the close on its source
+date, and both are marked `ledger:closedAtSource "import"`; the event's `committedAt` keeps the
+true time of the write. Anyone else sending it is refused with the reason and the remedy:
+
+```text
+`closed-at=2026-01-05T10:00:00Z` refused: only an import or sync principal may claim an
+authored date, and urn:iki:gonk:passkey:dispatcher is not an import or sync principal
+(ledger:Importer in <urn:collab:participants>). Send it without `closed-at`, and the ledger
+stamps the time itself
+```
+
+### Explicit one-time backfill of `handedBackBy` (never at startup)
+
+A hand-back written before 0.15.0 names no holder in the graph, but gonk's worker loop wrote it
+as ``gonk worker `X` handed this back``. `ikigai_ledger::attribution::handed_back_by_backfill`
+returns two SPARQL texts over one ledger's graph: a `SELECT` counting what it would recover, and
+the `INSERT` that copies `X` into `ledger:handedBackBy`. Run the first through
+`urn:iki:store:select` and the second through `urn:iki:store:update`, once, by hand. A comment
+that does not name its worker that way is left alone, and a second run recovers nothing.
+
+`tests/attribution_events.rs` has one test per event and per path.
+
 ## The doctor: everything wrong, at once, and nothing repaired
 
 ```text
@@ -1352,7 +1418,10 @@ one graph.
 - **No event graph.** kata records every mutation as an event row. Here the mutation history
   is the kernel's to tell — `ikigai-log`'s tracer already writes resolutions, cache hits and
   capability denials — and duplicating it in the domain graph would be two records to
-  disagree.
+  disagree. ⚠ The exception is attribution (since 0.15.0, ledger #2819): who claimed,
+  released, handed back and edited an item is a domain fact a work query asks for ("what did
+  this agent do"), so those events are in the ledger's graph. They record who and when, never
+  a before and after.
 - **No reaper.** A lease that runs out is reported (by `next` and the doctor) and taken over
   by an explicit act; nothing releases or reassigns a claim on its own, because "owned" has to
   mean something a reader can check.
@@ -1379,12 +1448,35 @@ All twenty-four resources are bound, tested, and walked clean by `ikigai-conform
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Unreleased: a committer the door stamps, and a verified or claimed author (ledger #2827)
+### 0.15.0 (not yet published): who wrote it, and who worked on it (ledger #2827, #2819)
 
-Every item, comment and tombstone records `ledger:committer` and `ledger:committedAt`; an
-author is verified (the committer) or claimed (an enrolled delegate, or an import principal's
-foreign actor); an import principal may claim authored dates. A principal can no longer send a
-free-text `author=`, and every face tells verified from claimed. See "Who wrote it" above.
+**A committer the door stamps, and a verified or claimed author (#2827).** Every item, comment
+and tombstone records `ledger:committer` and `ledger:committedAt`; an author is verified (the
+committer) or claimed (an enrolled delegate, or an import principal's foreign actor); an import
+principal may claim authored dates. A principal can no longer send a free-text `author=`, and
+every face tells verified from claimed. See "Who wrote it" above.
+
+**Attribution events (#2819).** A first claim and a takeover write a `ledger:ClaimEvent`, every
+release (by the holder, a dispatcher, a close or a takeover) a `ledger:ReleaseEvent`, every edit
+that creates no node a `ledger:EditEvent`, and a hand-back names its holder
+(`ledger:handedBackBy`); each event, and every status event, carries its committer. An import
+principal may date a close (`closed-at=`). An explicit one-time backfill recovers
+`handedBackBy` from legacy hand-backs. See "Who worked on it" above.
+
+**Vocabulary.** New: `ClaimEvent`, `ReleaseEvent`, `EditEvent`, `takeoverFrom`,
+`releaseReason`, `handedBackBy`, `editKind`. `claimedBy`, `claimedAt`, `claimKind` and
+`claimPrincipal` lose `rdfs:domain ledger:Item`, because events carry them too. `closedAtSource`
+may say `import`. The vocabulary now carries an `owl:Ontology` header whose `owl:versionInfo`
+is the crate version (test-pinned), which devtools' `ns-drift` compares with the deployed
+`/ns/ledger`: redeploy it after this release.
+
+**An item with many quads deletes again.** A delete's commit guard listed the quads it read one
+`VALUES` row per line, and the store's scanner refused that past about twenty triples beyond the
+item's own (`MAX_SCAN_BRANCHES`: in the less-than reading of `<`, each row's `#` opened a comment
+that the next line closed). Any item with that many labels, comments or links could not be
+deleted, and the events above would have put most items that were ever claimed there. The rows
+are now one line; an item with hundreds of quads, its literals full of `#`, `<`, quotes and newlines, deletes
+(`tests/attribution_events.rs`, `an_item_with_hundreds_of_quads_still_deletes`).
 
 ### 0.14.2: one reopen per close, and a delete or purge leaves nothing behind (ledger #2766, #2779, #2780)
 

@@ -25,6 +25,12 @@
 #   sig:contentHash    the tagged digest convention (ikigai-sign's term, so a
 #                      tombstone's hash JOINS with a signature graph instead of
 #                      colliding with it)
+#
+# This file IS the published document: it is served at
+# https://ikigai-rs.dev/ns/ledger, deployed by hand, and checked against this repo's
+# main by ikigai-devtools' `ns-drift`, which reads the `owl:versionInfo` below on both
+# sides. That line is the crate version (test-pinned), so redeploy /ns/ledger after every
+# release that changes this file, or the live copy claims the previous one.
 
 @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
 @prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -33,6 +39,12 @@
 @prefix prov:   <http://www.w3.org/ns/prov#> .
 @prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
 @prefix sig:    <https://ikigai-rs.dev/ns/sign#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+
+<https://ikigai-rs.dev/ns/ledger> a owl:Ontology ;
+    rdfs:label "ikigai-ledger" ;
+    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819)." ;
+    owl:versionInfo "0.15.0" .
 
 # ═══════════════════════════════════════════════════════════════════════════
 # The spine
@@ -195,7 +207,7 @@ ledger:author a rdf:Property ;
 
 ledger:committer a rdf:Property ;
     rdfs:label "committer" ;
-    rdfs:comment "The principal that made the write: the one urn:cap:principal:<iri> the writer's capability carried, minted by the host's door (gonk names each QUIC client urn:iki:gonk:client:<fingerprint>; a participant is urn:collab:participant:{name}). Never an argument, so a caller cannot supply it. Stamped on every item, comment and tombstone a write creates, with ledger:committedAt (ledger #2827). Absent when the capability carried no principal: root, or a host whose door mints none." .
+    rdfs:comment "The principal that made the write: the one urn:cap:principal:<iri> the writer's capability carried, minted by the host's door (gonk names each QUIC client urn:iki:gonk:client:<fingerprint>; a participant is urn:collab:participant:{name}). Never an argument, so a caller cannot supply it. Stamped on every item, comment and tombstone a write creates, with ledger:committedAt (ledger #2827), and since 0.15.0 on every StatusEvent, ClaimEvent, ReleaseEvent and EditEvent, so every write has a who (ledger #2819). Absent when the capability carried no principal: root, or a host whose door mints none." .
 
 ledger:committedAt a rdf:Property ;
     rdfs:range xsd:dateTime ;
@@ -222,15 +234,14 @@ ledger:Importer a rdfs:Class ;
     rdfs:comment "An import or sync principal: a principal the host's participants graph types ledger:Importer. Read, never written, by this module. Only an Importer may name a foreign actor as an author, or claim an authored dcterms:created, dcterms:modified or ledger:closedAt (ledger #2827). Which principals are importers is enrollment data, not a capability." .
 
 ledger:claimedBy a rdf:Property ;
-    rdfs:domain ledger:Item ;
     rdfs:range xsd:string ;
     rdfs:label "claimedBy" ;
-    rdfs:comment "Who holds this item. The ready set never offers a claimed item, which is most of what \"what should I do next\" means when more than one worker shares a ledger. A claim may carry a lease (ledger:lease, ledger:leaseExpires) and always carries the kind of its holder (ledger:claimKind, stamped by the host). An expired lease is observable and never silently free." .
+    rdfs:comment "On an item, who holds it; on a ledger:ClaimEvent, the holder that took the claim; on a ledger:ReleaseEvent, the holder whose claim was released. The holder's free-text label, which tells apart two workers that share one principal. No domain since 0.15.0: an event must not become an inferred Item. On an item, the ready set never offers a claimed item, which is most of what \"what should I do next\" means when more than one worker shares a ledger. A claim may carry a lease (ledger:lease, ledger:leaseExpires) and always carries the kind of its holder (ledger:claimKind, stamped by the host). An expired lease is observable and never silently free." .
 
 ledger:claimedAt a rdf:Property ;
-    rdfs:domain ledger:Item ;
     rdfs:range xsd:dateTime ;
-    rdfs:label "claimedAt" .
+    rdfs:label "claimedAt" ;
+    rdfs:comment "When the current claim was taken or last renewed, from the kernel clock; on a ledger:ReleaseEvent, that time for the claim it released. No domain since 0.15.0: an event must not become an inferred Item." .
 
 ledger:purpose a rdf:Property ;
     rdfs:domain ledger:Item ;
@@ -474,10 +485,9 @@ ledger:person a ledger:ClaimKind ;
     rdfs:comment "A claim held by a person, deliberately." .
 
 ledger:claimKind a rdf:Property ;
-    rdfs:domain ledger:Item ;
     rdfs:range ledger:ClaimKind ;
     rdfs:label "claimKind" ;
-    rdfs:comment "Who holds this item's claim: ledger:machine, ledger:agent or ledger:person, as the host stamped it when the claim was taken." .
+    rdfs:comment "Who holds this item's claim: ledger:machine, ledger:agent or ledger:person, as the host stamped it when the claim was taken. Also on a ledger:ClaimEvent and a ledger:ReleaseEvent, for the claim each records; no domain since 0.15.0, so an event is not an inferred Item." .
 
 ledger:lease a rdf:Property ;
     rdfs:domain ledger:Item ;
@@ -492,10 +502,9 @@ ledger:leaseExpires a rdf:Property ;
     rdfs:comment "When the claim's lease runs out, from the kernel's clock. ⚠ An expired lease is NOT a free item: the claim stays, `next` excludes the item as lease-expired naming the holder and this time, and only `claim takeover=true from=<holder>` takes it — a compare-and-set against that holder. A lease that expired silently would make \"owned\" mean \"owned as of an unspecified time\"." .
 
 ledger:claimPrincipal a rdf:Property ;
-    rdfs:domain ledger:Item ;
     rdfs:range rdfs:Resource ;
     rdfs:label "claimPrincipal" ;
-    rdfs:comment "The principal the claim was taken AS: the one `urn:cap:principal:<iri>` the claimant's capability carried, minted by the host's door (gonk's QUIC door names each client `urn:iki:gonk:client:<fingerprint>`). Recorded beside ledger:claimedBy, which stays the holder's free-text label. ★ This, not the label, is what a release checks: a claim recorded with a principal is released only by a capability that acts as it, or by a dispatcher holding the ledger's close or write grant, so one worker cannot release another's claim by spelling its name. Absent when the claimant carried no principal (a host without them, or root), and then a holder is free text as it always was." .
+    rdfs:comment "The principal the claim was taken AS: the one `urn:cap:principal:<iri>` the claimant's capability carried, minted by the host's door (gonk's QUIC door names each client `urn:iki:gonk:client:<fingerprint>`). Recorded beside ledger:claimedBy, which stays the holder's free-text label. ★ This, not the label, is what a release checks: a claim recorded with a principal is released only by a capability that acts as it, or by a dispatcher holding the ledger's close or write grant, so one worker cannot release another's claim by spelling its name. Absent when the claimant carried no principal (a host without them, or root), and then a holder is free text as it always was. Also on a ledger:ClaimEvent and a ledger:ReleaseEvent, for the claim each records; no domain since 0.15.0, so an event is not an inferred Item." .
 
 ledger:awaiting a rdf:Property ;
     rdfs:domain ledger:Item ;
@@ -518,9 +527,51 @@ ledger:closedAt a rdf:Property ;
     rdfs:comment "When the current close occurred, from the kernel clock. Removed on reopen; dated StatusEvent nodes retain subsequent history. Legacy values supplied by backfill are approximate and marked closedAtSource backfill." .
 ledger:closedAtSource a rdf:Property ;
     rdfs:range xsd:string ;
-    rdfs:comment "The literal backfill marks an approximate legacy close time. Present on the item and its backfilled StatusEvent, which retains this provenance after reopen. DailyCounts observations through the latest estimated close day also carry this marker." .
+    rdfs:comment "Where a close time came from, when it is not the kernel clock. The literal backfill marks an approximate legacy close time: present on the item and its backfilled StatusEvent, which retains this provenance after reopen, and DailyCounts observations through the latest estimated close day also carry it. The literal import (since 0.15.0, ledger #2819) marks a close date an import principal (ledger:Importer) claimed with closed-at=, on the item and on the StatusEvent dated by it; the StatusEvent's ledger:committedAt keeps the true time of the write." .
 ledger:StatusEvent a rdfs:Class ;
-    rdfs:comment "A dated close or reopen: onItem names its item, status its resulting status, and dcterms:created its kernel time. Skolemized beneath the item. Retained across reopen so historical daily counts remain true." .
+    rdfs:comment "A dated close or reopen: onItem names its item, status its resulting status, and dcterms:created its kernel time (or, marked closedAtSource import, the source date an import principal claimed). Since 0.15.0 it carries ledger:committer and ledger:committedAt, so it says who closed or reopened, not only when. Skolemized beneath the item. Retained across reopen so historical daily counts remain true." .
+
+# ---- attribution events (ledger #2819) ---------------------------------------
+# A claim is current state, retracted by its release; these record who claimed,
+# released and edited each item, so "what did this agent do" is a query after the
+# claims are gone. Each is written in the same store update as the change it records,
+# under the same guard, so a write that loses its race leaves no event. Each hangs off
+# its item by ledger:onItem, so delete, archive and purge own it like a StatusEvent, and
+# each is skolemized beneath its item: {item}:claim:{id}, {item}:release:{id},
+# {item}:edit:{id}. Each carries dcterms:created, ledger:committedAt and, when the
+# capability carried a principal, ledger:committer.
+
+ledger:ClaimEvent a rdfs:Class ;
+    rdfs:label "claim event" ;
+    rdfs:comment "A claim taken: a first claim of a free item, or a takeover of an expired lease, never a renewal. Carries ledger:claimedBy (the holder label), ledger:claimPrincipal (when the claimant carried one), ledger:claimKind, and ledger:takeoverFrom on a takeover. Concurrent claims of one free item leave one." .
+
+ledger:ReleaseEvent a rdfs:Class ;
+    rdfs:label "release event" ;
+    rdfs:comment "A claim released, written only when there was a claim to release. Carries the released claim's ledger:claimedBy, ledger:claimPrincipal, ledger:claimKind and ledger:claimedAt (each when it had one), ledger:releaseReason, and the releaser as ledger:committer: the holder, a dispatcher's override, the closer, or the taker." .
+
+ledger:EditEvent a rdfs:Class ;
+    rdfs:label "edit event" ;
+    rdfs:comment "An edit that creates no node of its own, so that every write has a who: one per write, naming the edit in ledger:editKind and its maker in ledger:committer. A claim, a release and a close or reopen are recorded by their own events instead." .
+
+ledger:takeoverFrom a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "takeover from" ;
+    rdfs:comment "On a ledger:ClaimEvent, the holder label a takeover took the expired claim from (the claim's from=). Absent on a first claim." .
+
+ledger:releaseReason a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "release reason" ;
+    rdfs:comment "Why a ledger:ReleaseEvent's claim ended, as a literal: released (a release, by the holder or a dispatcher), closed (a close releases the claim), or takeover (a takeover replaced it)." .
+
+ledger:handedBackBy a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "handed back by" ;
+    rdfs:comment "On a hand-back comment (comment handback=true), the holder label of the item's claim when the hand-back landed, written in the same update. The comment's ledger:committer is the principal, which two workers can share; this label tells them apart. Absent when nobody held the item." .
+
+ledger:editKind a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "edit kind" ;
+    rdfs:comment "Which edit a ledger:EditEvent records, as a literal: label, unlabel, link, unlink, defer, resume, about, unabout, edit (an item's title, body, priority, revision or about) or state (a lifecycle transition)." .
 ledger:DailyCounts a rdfs:Class ;
     rdfs:comment "One UTC end-of-day observation, skolemized as urn:iki:ledger:{name}:counts:{date}. The current day's row is provisional. openCount plus closedCount is the number filed by that date." .
 ledger:date a rdf:Property ;

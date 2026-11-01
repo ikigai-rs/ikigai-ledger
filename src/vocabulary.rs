@@ -107,6 +107,20 @@ term! {
     CLOSED_AT_SOURCE => "closedAtSource";
     /// `ledger:StatusEvent`
     STATUS_EVENT_CLASS => "StatusEvent";
+    /// `ledger:ClaimEvent` — a first claim or a takeover, as it was taken (ledger #2819).
+    CLAIM_EVENT_CLASS => "ClaimEvent";
+    /// `ledger:ReleaseEvent` — a claim released, by whom and why (ledger #2819).
+    RELEASE_EVENT_CLASS => "ReleaseEvent";
+    /// `ledger:EditEvent` — an edit that creates no node, and who made it (ledger #2819).
+    EDIT_EVENT_CLASS => "EditEvent";
+    /// `ledger:takeoverFrom` — the holder label a takeover took the claim from.
+    TAKEOVER_FROM => "takeoverFrom";
+    /// `ledger:releaseReason` — `released`, `closed` or `takeover`.
+    RELEASE_REASON => "releaseReason";
+    /// `ledger:handedBackBy` — the holder label on a hand-back comment.
+    HANDED_BACK_BY => "handedBackBy";
+    /// `ledger:editKind` — which edit an edit event records.
+    EDIT_KIND => "editKind";
     /// `ledger:DailyCounts`
     DAILY_COUNTS_CLASS => "DailyCounts";
     /// `ledger:date`
@@ -297,7 +311,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 14] = [
+pub const STRUCTURAL_CLASSES: [&str; 18] = [
     COMMENT_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
@@ -312,6 +326,10 @@ pub const STRUCTURAL_CLASSES: [&str; 14] = [
     LIFECYCLE_STATE_CLASS,
     CLAIM_KIND_CLASS,
     IMPORTER_CLASS,
+    STATUS_EVENT_CLASS,
+    CLAIM_EVENT_CLASS,
+    RELEASE_EVENT_CLASS,
+    EDIT_EVENT_CLASS,
 ];
 
 /// The close reasons, as `(short name, IRI)` — the `one_of` an ArgSpec declares and the
