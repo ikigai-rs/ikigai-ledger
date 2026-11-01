@@ -43,7 +43,7 @@
 
 <https://ikigai-rs.dev/ns/ledger> a owl:Ontology ;
     rdfs:label "ikigai-ledger" ;
-    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819)." ;
+    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828)." ;
     owl:versionInfo "0.15.0" .
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -584,3 +584,47 @@ ledger:closedCount a rdf:Property ;
 ledger:eventSequence a rdf:Property ;
     rdfs:range xsd:integer ;
     rdfs:comment "The graph-local ordering of an item's status events, disambiguating transitions at the same kernel-clock millisecond. Backfill starts at zero." .
+
+# ---- aliases (ledger #2828) ----------------------------------------------------
+# Written in ONE deployment-wide graph, urn:iki:alias:graph, never in a ledger's graph:
+# an alias is unique per scheme across every ledger, and uniqueness is decided by one
+# update over one graph. Every node is skolemized: urn:iki:alias:scheme:{scheme} for a
+# scheme and urn:iki:alias:scheme:{scheme}:value:{value} for an alias, the value
+# percent-encoded outside the unreserved characters.
+
+ledger:AliasScheme a rdfs:Class ;
+    rdfs:label "alias scheme" ;
+    rdfs:comment "A namespace of external ids (kata, roborev, gh), registered once with the one principal that may add aliases in it, ledger:schemeOwner. Carries ledger:schemeName, ledger:committer and ledger:committedAt. Skolemized as urn:iki:alias:scheme:{scheme}." .
+
+ledger:Alias a rdfs:Class ;
+    rdfs:label "alias" ;
+    rdfs:comment "One (scheme, value) pair naming one item: ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf, with ledger:committer and ledger:committedAt. Unique per scheme across the deployment, so an alias already naming another item is refused. Not a replacement for ledger:key, the idempotency key, and an item's primary name stays its number. Skolemized as urn:iki:alias:scheme:{scheme}:value:{value}." .
+
+ledger:schemeName a rdf:Property ;
+    rdfs:domain ledger:AliasScheme ;
+    rdfs:range xsd:string ;
+    rdfs:label "scheme name" ;
+    rdfs:comment "A scheme's name as it is typed in an alias reference, {scheme}:{value}: lowercase letters, digits and -, starting with a letter." .
+
+ledger:schemeOwner a rdf:Property ;
+    rdfs:domain ledger:AliasScheme ;
+    rdfs:label "scheme owner" ;
+    rdfs:comment "The principal (an IRI, the urn:cap:principal: its capability carried) that registered the scheme and the only one that may add or remove aliases in it." .
+
+ledger:aliasScheme a rdf:Property ;
+    rdfs:domain ledger:Alias ;
+    rdfs:range ledger:AliasScheme ;
+    rdfs:label "alias scheme" ;
+    rdfs:comment "The scheme an alias is in." .
+
+ledger:aliasValue a rdf:Property ;
+    rdfs:domain ledger:Alias ;
+    rdfs:range xsd:string ;
+    rdfs:label "alias value" ;
+    rdfs:comment "An alias's value within its scheme, exactly as given (decoded): acme/web#12 in gh:acme/web#12." .
+
+ledger:aliasOf a rdf:Property ;
+    rdfs:domain ledger:Alias ;
+    rdfs:range ledger:Item ;
+    rdfs:label "alias of" ;
+    rdfs:comment "The item an alias names. Exactly one per alias, decided inside the write that adds it." .

@@ -110,3 +110,4 @@ technology you used, if you are comfortable sharing them. Anything security-sens
 |---|---|
 | 2026-10-31 | First version. |
 | 2026-11-01 | `close closed-at=` (ledger #2819) adds refusals; each names the argument, the reason and the remedy in words. No plain face changed: `tests/faces.rs` passes unchanged. |
+| 2026-11-01 | Aliases (ledger #2828) add write answers (`scheme gh owned by …`, `gh:acme/web#12 names acme#12 …`, `… no longer names …`) and refusals, each naming in words the alias, the scheme, its owner or the item that already holds it, and the grant that would do. An alias value appears percent-encoded in an IRI (`acme%2Fweb%2312`), which a screen reader reads character by character; the decoded value is what every answer shows. No existing plain face changed: `tests/faces.rs` passes unchanged. |

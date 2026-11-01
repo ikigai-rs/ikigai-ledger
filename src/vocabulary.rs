@@ -298,6 +298,20 @@ term! {
     MODIFIED_SOURCE => "modifiedSource";
     /// `ledger:Importer` — an import or sync principal, read from the participants graph.
     IMPORTER_CLASS => "Importer";
+    /// `ledger:AliasScheme` — a registered alias scheme and its owner (ledger #2828).
+    ALIAS_SCHEME_CLASS => "AliasScheme";
+    /// `ledger:Alias` — one `(scheme, value)` pair naming one item (ledger #2828).
+    ALIAS_CLASS => "Alias";
+    /// `ledger:schemeName` — a scheme's name, as typed in `{scheme}:{value}`.
+    SCHEME_NAME => "schemeName";
+    /// `ledger:schemeOwner` — the one principal that may add aliases in a scheme.
+    SCHEME_OWNER => "schemeOwner";
+    /// `ledger:aliasScheme` — the scheme an alias is in.
+    ALIAS_SCHEME => "aliasScheme";
+    /// `ledger:aliasValue` — an alias's value within its scheme, as given.
+    ALIAS_VALUE => "aliasValue";
+    /// `ledger:aliasOf` — the item an alias names.
+    ALIAS_OF => "aliasOf";
 }
 
 /// The `@prefix` header every Turtle face this module emits carries.
@@ -311,7 +325,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 18] = [
+pub const STRUCTURAL_CLASSES: [&str; 20] = [
     COMMENT_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
@@ -326,6 +340,8 @@ pub const STRUCTURAL_CLASSES: [&str; 18] = [
     LIFECYCLE_STATE_CLASS,
     CLAIM_KIND_CLASS,
     IMPORTER_CLASS,
+    ALIAS_SCHEME_CLASS,
+    ALIAS_CLASS,
     STATUS_EVENT_CLASS,
     CLAIM_EVENT_CLASS,
     RELEASE_EVENT_CLASS,

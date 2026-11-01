@@ -1648,6 +1648,11 @@ pub async fn resolve_id(client: &StoreClient<'_, '_>, id: &str) -> Result<String
             ))),
         };
     }
+    // An alias, `{scheme}:{value}` or the alias's IRI (ledger #2828), ahead of the number:
+    // `gh:acme/web#12` would otherwise read as `#12` of a ledger called `gh:acme/web`.
+    if let Some(item) = crate::alias::resolve(client, id).await? {
+        return Ok(item);
+    }
     if let Some(number) = number_in(ledger, id)? {
         // ⚠ **An ITEM with that number.** A tombstone carries its item's number too, so
         // the bare pattern resolved a deleted item's number to its tombstone, and the

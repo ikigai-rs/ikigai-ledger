@@ -166,6 +166,16 @@ pub const CAP_CLOSE: &str = "urn:cap:ledger:close:*";
 /// body and priority, and a per-argument grant is not a thing a declaration can say.
 pub const CAP_ABOUT: &str = "urn:cap:ledger:about:*";
 
+/// The family of the alias grant (ledger #2828): giving one of this ledger's items an alias
+/// at `urn:iki:alias:scheme:{scheme}:value:{value}`, and nothing else. A held grant names one
+/// ledger: [`Ledger::cap_alias`]. `urn:cap:ledger:write:{ledger}` covers it too. Declared as
+/// [`CAP_ANY`]; see [`CAP_CLAIM`].
+///
+/// ★ **It is half of what an alias needs, never all of it.** The other half is owning the
+/// scheme, which is data in the aliases graph rather than a grant: see [`crate::alias`]. An
+/// importer holds this grant on the ledgers it imports into, and owns its scheme.
+pub const CAP_ALIAS: &str = "urn:cap:ledger:alias:*";
+
 /// "Holds some ledger grant": the floor `claim`, `comment`, `close`, `reopen` and
 /// `item:{id}:about` DECLARE,
 /// because it is the only family both the narrow grant and `write:{ledger}` satisfy (see
@@ -185,7 +195,7 @@ pub const CAP_PURGE: &str = "urn:cap:ledger:purge:*";
 
 /// What an action needs from the ledger it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Need {
+pub(crate) enum Need {
     Read,
     Write,
     Delete,
@@ -198,6 +208,8 @@ enum Need {
     Close,
     /// Add or remove an item's `about` edges: `about:{ledger}`, or `write:{ledger}`.
     About,
+    /// Give an item an alias: `alias:{ledger}`, or `write:{ledger}` (ledger #2828).
+    Alias,
 }
 
 impl Need {
@@ -212,6 +224,7 @@ impl Need {
             Need::Comment => ledger.cap_comment(),
             Need::Close => ledger.cap_close(),
             Need::About => ledger.cap_about(),
+            Need::Alias => ledger.cap_alias(),
         }
     }
 
@@ -221,7 +234,7 @@ impl Need {
     fn write_covers(self) -> bool {
         matches!(
             self,
-            Need::Claim | Need::Comment | Need::Close | Need::About
+            Need::Claim | Need::Comment | Need::Close | Need::About | Need::Alias
         )
     }
 
@@ -232,7 +245,7 @@ impl Need {
             Need::Write => CAP_WRITE,
             Need::Delete => CAP_DELETE,
             Need::Purge => CAP_PURGE,
-            Need::Claim | Need::Comment | Need::Close | Need::About => CAP_ANY,
+            Need::Claim | Need::Comment | Need::Close | Need::About | Need::Alias => CAP_ANY,
         }
     }
 }
@@ -251,7 +264,13 @@ impl Need {
 /// does. A worker holding claim and comment is refused here
 /// at close, label, edit and every other write, by name.
 fn ledger_for(inv: &Invocation<'_>, need: Need) -> Result<Ledger> {
-    let ledger = Ledger::from_bindings(inv.bindings)?;
+    grant_for(inv, Ledger::from_bindings(inv.bindings)?, need)
+}
+
+/// [`ledger_for`] over a ledger the request did not name in its IRI: the ledger of the item an
+/// alias is given to, which `urn:iki:alias:scheme:{scheme}:value:{value}` learns from
+/// `content=`.
+pub(crate) fn grant_for(inv: &Invocation<'_>, ledger: Ledger, need: Need) -> Result<Ledger> {
     let scope = need.scope(&ledger);
     if inv.capability.allows(&scope) {
         return Ok(ledger);
@@ -277,6 +296,8 @@ fn ledger_for(inv: &Invocation<'_>, need: Need) -> Result<Ledger> {
 
 /// `text/plain` — the default face, and what "view ASAP" actually needs.
 const PLAIN: &str = "text/plain";
+/// [`PLAIN`], for [`crate::alias`]'s descriptions.
+pub(crate) const PLAIN_FACE: &str = PLAIN;
 /// `text/turtle` — the graph face.
 const TURTLE: &str = "text/turtle";
 /// `application/json` — the machine face, [`crate::json`].
@@ -508,7 +529,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
 pub(crate) type Participants = Option<Arc<str>>;
 
 /// A `text/plain` representation.
-fn plain(text: impl Into<String>) -> Representation {
+pub(crate) fn plain(text: impl Into<String>) -> Representation {
     Representation::new(
         ReprType::new(PLAIN).with_param("charset", "utf-8"),
         text.into().into_bytes(),
@@ -581,7 +602,7 @@ fn bare(media_type: &str) -> &str {
 /// here is stamped, and an entry without a timestamp is not a ledger entry: a store that
 /// quietly accepted unstamped writes would be discovered as a hole in the record much
 /// later, by someone trying to answer "when". Fail loud on missing configuration.
-fn now_ms(inv: &Invocation<'_>) -> Result<u64> {
+pub(crate) fn now_ms(inv: &Invocation<'_>) -> Result<u64> {
     inv.now().map(|t| t.as_millis()).ok_or_else(|| {
         Error::Endpoint(
             "this kernel has no clock, so a ledger write cannot be stamped — and an entry \
@@ -712,7 +733,7 @@ fn split_content(content: &str) -> Result<(String, String)> {
 /// because the object cannot be named here. The reasoning is in
 /// [`LinkEndpoint::describe`]; the refusal is here, once, for every endpoint that takes
 /// an item.
-async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<Item> {
+pub(crate) async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<Item> {
     let iri = item_iri(client, reference, "item").await?;
     if let Some(item) = model::load_item(client, &iri).await? {
         return Ok(item);
@@ -768,6 +789,10 @@ async fn item_iri(client: &StoreClient<'_, '_>, reference: &str, arg: &str) -> R
                 Some((_, tail)) => model::resolve_id(client, tail).await?,
                 None => canonical,
             },
+            // An alias's own IRI (ledger #2828) resolves as the alias does.
+            None if crate::alias::split(reference).is_some() => {
+                model::resolve_id(client, reference).await?
+            }
             // Not a ledger item IRI. Left verbatim so the error can name what was asked
             // for rather than a guess at what was meant.
             None => reference.to_string(),
@@ -1204,7 +1229,8 @@ fn item_arg(summary: &str) -> ArgSpec {
     ArgSpec::new("item")
         .summary(format!(
             "{summary} Accepts `#12`, `12`, an opaque id, `key:{{key}}` (the caller's own \
-             name, from `append key=`), or the item's full IRI, \
+             name, from `append key=`), an alias, `{{scheme}}:{{value}}` (`gh:acme/web#12`; \
+             see `urn:iki:alias:scheme:{{scheme}}`), or the item's full IRI, \
              `urn:iki:ledger:{{ledger}}:item:{{id}}` (`urn:iki:ledger:item:{{id}}` in the \
              ledger called `default`) — a human types the number and a machine carries the \
              IRI. An item of another ledger is refused, never looked up here."
@@ -1212,7 +1238,7 @@ fn item_arg(summary: &str) -> ArgSpec {
         .class(v::ext::XSD_STRING)
 }
 
-fn unsupported(id: &str, verb: Verb) -> Error {
+pub(crate) fn unsupported(id: &str, verb: Verb) -> Error {
     Error::Endpoint(format!("`{id}` does not answer {verb:?}"))
 }
 
