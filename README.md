@@ -807,7 +807,10 @@ conflict: #12 is in `queued`, not `filed`. A transition is a compare-and-set: �
 - `content=` is an optional note, recorded as a comment when the item moves; `as=application/json`
   answers `{schema, ledger, item, lifecycle, state, in_flight, drain, since, outcome, from}`.
 - `close` does not touch the state, and the state does not touch `close`: they are different
-  facts, and a loop that wants an item closed AND out of the flight asks for both.
+  facts, and a loop that wants an item closed AND out of the flight asks for both. A closed
+  item refuses a transition into an in-flight state with a `Conflict` naming the item, close
+  reason, and close time. The compare-and-set checks status atomically with state. Reopen
+  the item before entering flight; a transition to a state outside flight is still allowed.
 
 ### Lifecycles are resources
 
@@ -1328,6 +1331,13 @@ All twenty-four resources are bound, tested, and walked clean by `ikigai-conform
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### Unreleased: closed items cannot enter flight (ledger #2765)
+
+The state Sink now requires open status in its compare-and-set guard when the destination
+is in flight. A closed item, including one closed between the read and write, receives a
+`Conflict` naming its close reason and time. Transitions to states outside flight still
+succeed on closed items. Regression tests pin the refusal and force the close/write race.
 
 ### 0.14.0 (unpublished): close timestamps and daily count series (ledger #2541)
 

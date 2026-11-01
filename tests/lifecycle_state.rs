@@ -582,3 +582,73 @@ fn a_read_grant_reads_the_state_and_cannot_move_it() {
     .expect_err("a reader cannot transition");
     assert!(matches!(refused, Error::Denied(_)), "{refused:?}");
 }
+
+#[test]
+fn a_closed_item_refuses_entering_flight_and_keeps_its_state() {
+    let kernel = kernel();
+    append(&kernel, "Finished work", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:close",
+        &[("item", "1"), ("reason", "done")],
+    );
+    let close: serde_json::Value = serde_json::from_str(&select(
+        &kernel,
+        "SELECT ?at WHERE { GRAPH <urn:iki:ledger:graph:default> { \
+         ?item <https://ikigai-rs.dev/ns/ledger#number> 1 ; \
+         <https://ikigai-rs.dev/ns/ledger#closedAt> ?at } }",
+    ))
+    .unwrap();
+    let closed_at = close["results"]["bindings"][0]["at"]["value"]
+        .as_str()
+        .unwrap();
+    let before = source(&kernel, "urn:iki:ledger:item:1", &[]);
+    let error =
+        transition(&kernel, 1, "filed", "resolving").expect_err("closed work cannot enter flight");
+    let Error::Conflict(message) = error else {
+        panic!("not a Conflict: {error:?}")
+    };
+    assert_eq!(message, format!("#1 is closed (done) at {closed_at}: cannot transition into in-flight state `resolving`. Reopen it first (`sink urn:iki:ledger:reopen item=1`) if there is more to do"));
+    assert_eq!(state_of(&kernel, 1), "filed");
+    assert!(states_in_store(&kernel, 1).is_empty());
+    assert_eq!(source(&kernel, "urn:iki:ledger:item:1", &[]), before);
+}
+
+#[test]
+fn a_closed_item_can_transition_to_a_state_outside_flight() {
+    let kernel = kernel();
+    append(&kernel, "Finished work", &[]);
+    transition(&kernel, 1, "filed", "resolving").unwrap();
+    sink(&kernel, "urn:iki:ledger:close", &[("item", "1")]);
+    assert_eq!(
+        transition(&kernel, 1, "resolving", "reviewed").unwrap(),
+        "#1 reviewed (was resolving)\n"
+    );
+    assert_eq!(state_of(&kernel, 1), "reviewed");
+    assert!(exists(&kernel, "urn:iki:ledger:item:1:closed").unwrap());
+}
+
+#[test]
+fn every_in_flight_destination_requires_open_status() {
+    for from in ["filed", "reviewed", "resolving"] {
+        for to in ["resolving", "refining", "shipping"] {
+            if from == to {
+                continue; // An unchanged request is not a transition.
+            }
+            let kernel = kernel();
+            append(&kernel, "Finished work", &[]);
+            if from != "filed" {
+                transition(&kernel, 1, "filed", from).unwrap();
+            }
+            sink(&kernel, "urn:iki:ledger:close", &[("item", "1")]);
+            assert!(
+                matches!(transition(&kernel, 1, from, to), Err(Error::Conflict(_))),
+                "{from} to {to}"
+            );
+            assert_eq!(state_of(&kernel, 1), from);
+            sink(&kernel, "urn:iki:ledger:reopen", &[("item", "1")]);
+            transition(&kernel, 1, from, to).expect("reopened work can enter flight");
+            assert_eq!(state_of(&kernel, 1), to);
+        }
+    }
+}

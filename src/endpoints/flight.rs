@@ -19,7 +19,8 @@
 //! Sinks too, and composing a transition out of them would reproduce that defect exactly
 //! (`tests/lifecycle_state.rs` reproduces it). So the state Sink is its own resource and is a
 //! **compare-and-set inside a single SPARQL update**: the `WHERE` holds only when the item is
-//! in `from=`, and with no solution the `DELETE … INSERT` does nothing. The store holds its
+//! in `from=` and, for an in-flight destination, open. With no solution the
+//! `DELETE … INSERT` does nothing. The store holds its
 //! write lock across one update's evaluation and insert, so two transitions from one state
 //! cannot both apply.
 //!
@@ -171,8 +172,57 @@ fn conflict(client: &StoreClient<'_, '_>, item: &Item, expected: &str, found: &s
     ))
 }
 
+/// Diagnose a refused write from the current close facts, including a close that raced
+/// the initial read. This read explains the refusal; the CAS guard decides it atomically.
+async fn closed_transition_refusal(
+    client: &StoreClient<'_, '_>,
+    item: &Item,
+    to: &LifecycleState,
+) -> Result<Option<Error>> {
+    let rows = client
+        .select(&format!(
+            "SELECT ?reason ?at WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "<{}> <{}> <{}> . OPTIONAL {{ <{}> <{}> ?reason }} \
+                 OPTIONAL {{ <{}> <{}> ?at }}",
+                item.iri,
+                v::STATUS,
+                v::CLOSED,
+                item.iri,
+                v::CLOSED_REASON,
+                item.iri,
+                v::CLOSED_AT,
+            ))
+        ))
+        .await?;
+    Ok(rows.first().map(|row| {
+        let reason = row
+            .get("reason")
+            .map(|b| {
+                format!(
+                    " ({})",
+                    b.value.rsplit(['#', '/']).next().unwrap_or(&b.value)
+                )
+            })
+            .unwrap_or_default();
+        let when = row
+            .get("at")
+            .map(|b| b.value.clone())
+            .unwrap_or_else(|| "an unknown time".to_string());
+        Error::Conflict(format!(
+            "{} is closed{reason} at {when}: cannot transition into in-flight state `{}`. \
+             Reopen it first (`sink {} item={}`) if there is more to do",
+            item.short(),
+            to.name,
+            client.ledger().resource("reopen"),
+            item.number
+        ))
+    }))
+}
+
 /// The compare-and-set, as ONE update: the `WHERE` holds only while the item is in exactly
-/// `from`, and then the old state, receipt, stamp and `dcterms:modified` are replaced in the
+/// `from` and open if `to` is in flight. The old state, receipt, stamp and `dcterms:modified`
+/// are replaced in the
 /// same operation.
 ///
 /// ⚠ `dcterms:modified` is in this update rather than a second operation of the batch: an
@@ -186,7 +236,7 @@ fn cas(
     token: &str,
     now: u64,
 ) -> String {
-    let guard = if from.name == FILED {
+    let mut guard = if from.name == FILED {
         format!("FILTER NOT EXISTS {{ <{item}> <{}> ?any }}", v::STATE)
     } else {
         format!(
@@ -196,6 +246,11 @@ fn cas(
             from = from.iri,
         )
     };
+    // Only entry into flight requires open work. A close leaves state independent,
+    // and moving closed work out of flight must remain possible.
+    if to.in_flight {
+        guard.push_str(&format!("\n<{item}> <{}> <{}> .", v::STATUS, v::OPEN));
+    }
     let mut insert = format!(
         "<{item}> <{token_p}> {token} ; <{at}> {when} ; <{modified}> {when} .",
         token_p = v::STATE_TOKEN,
@@ -345,6 +400,13 @@ impl Endpoint for StateEndpoint {
                         .await?;
                     let after = read_state(&client, &item.iri).await?;
                     if after.tokens != [token.clone()] {
+                        if to.in_flight {
+                            if let Some(refusal) =
+                                closed_transition_refusal(&client, &item, to).await?
+                            {
+                                return Err(refusal);
+                            }
+                        }
                         let found = current(lifecycle, &item, &after.values)
                             .map(|s| s.name.clone())
                             .unwrap_or_else(|why| why);
@@ -423,7 +485,8 @@ impl Endpoint for StateEndpoint {
                     .summary(
                         "Move the item from `from` to `to` — only if it is in `from` now. A \
                          mismatch is a Conflict naming the state it is in; a `to` outside the \
-                         lifecycle is refused before anything is written.",
+                         lifecycle is refused before anything is written. A closed item refuses \
+                         entry into an in-flight state, with a Conflict naming its close.",
                     )
                     .input(item_id_input())
                     .input(state_arg("to", "The state to move the item to."))
