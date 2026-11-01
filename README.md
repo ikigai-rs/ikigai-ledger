@@ -1340,8 +1340,11 @@ All twenty-four resources are bound, tested, and walked clean by `ikigai-conform
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Unreleased: one reopen per close (ledger #2766)
+### 0.14.2: one reopen per close, and a delete or purge leaves nothing behind (ledger #2766, #2779, #2780)
 
+Three races found by the check-then-act audit (ledger #2772), each reproduced before its fix.
+
+**One reopen per close (#2766).** 
 `reopen` required its item and then wrote unconditionally. Reopening an item that was
 already open appended an `open` status event for a close that never happened and reset its
 hand-back decision time; concurrent reopens of one closed item each appended an `open`
@@ -1350,6 +1353,17 @@ the close. Every write of a reopen now carries "the item is closed" in its own `
 the reopen reads back the event it minted to learn whether it was the one. A reopen of an
 open item answers `#12 was already open, so the reopen changed nothing`.
 `tests/close_race.rs` forces each schedule.
+
+**A purge inside a recoverable delete's window (#2779).** A purge that landed between a delete's read
+and its archive left the item's full content in the graveyard under a tombstone that said purged.
+Whichever of the two finishes second now cleans up: the purge clears the graveyard again after its
+mark, and the delete removes its own archive when it finds the mark. `tests/purge_race.rs`.
+
+**A comment racing a recoverable delete (#2780).** A comment that landed between a delete's read and
+its commit stayed in the live graph, where no later purge reached it. A delete now removes the
+item's rows only when nothing beyond them matches, and otherwise reads, archives and commits again (at
+most 16 attempts, then a `Conflict`). Comments orphaned by earlier versions are not swept up.
+`tests/comment_delete_race.rs`.
 
 ### 0.14.1: one close per item, and closed items cannot enter flight (ledger #2764, #2765)
 
