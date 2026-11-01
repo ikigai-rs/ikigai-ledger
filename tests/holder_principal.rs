@@ -222,7 +222,18 @@ fn a_release_and_a_close_take_the_principal_with_them() {
     release(&kernel, &grant(&["read", "claim"]), &[]).unwrap();
 
     claim(&kernel, &worker(A), &[("content", "worker-1")]).unwrap();
-    sink(&kernel, &at("close"), &[("item", "1")]);
+    // The answer names the label, and the record the principal too (ledger #2764: the
+    // record is now written from the claim the close's update found).
+    assert_eq!(
+        sink(&kernel, &at("close"), &[("item", "1")]),
+        "closed acme#1 (done), released worker-1\n"
+    );
+    assert!(
+        source(&kernel, &at("item:1"), &[]).contains(&format!(
+            "Closed while claimed by worker-1 (as {A}); the claim is released."
+        )),
+        "the release record names the principal"
+    );
     let rows = select(
         &kernel,
         "SELECT ?p WHERE { GRAPH ?g { ?i <https://ikigai-rs.dev/ns/ledger#claimPrincipal> ?p } }",

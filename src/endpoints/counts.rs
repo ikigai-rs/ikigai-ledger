@@ -15,6 +15,19 @@ pub(super) fn status_event(
     status: &str,
     now: u64,
 ) -> Result<String> {
+    Ok(status_event_when(client, item, status, now, "")?.0)
+}
+
+/// [`status_event`], written only while `guard` (a pattern over the ledger's graph) also
+/// holds; with the minted event's IRI, so the caller can read back whether this update wrote
+/// it (ledger #2764).
+pub(super) fn status_event_when(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    status: &str,
+    now: u64,
+    guard: &str,
+) -> Result<(String, String)> {
     let event = format!("{item}:status:{}", mint_id(now)?);
     let triples = client.in_graph(&format!(
         "<{event}> <{}> <{}> ; <{}> <{item}> ; <{}> <{status}> ; <{}> {} ; <{}> ?sequence .",
@@ -26,14 +39,17 @@ pub(super) fn status_event(
         datetime(now),
         v::EVENT_SEQUENCE
     ));
-    let guard = client.in_graph(&live(item));
+    let guard = client.in_graph(&format!("{} {guard}", live(item)));
     let previous = client.in_graph(&format!(
         "?past <{}> <{}> ; <{}> <{item}> .",
         v::ext::TYPE,
         v::STATUS_EVENT_CLASS,
         v::ON_ITEM
     ));
-    Ok(format!("INSERT {{ {triples} }} WHERE {{ {guard} {{ SELECT (COUNT(?past) + 1 AS ?sequence) WHERE {{ {previous} }} }} }}"))
+    Ok((
+        format!("INSERT {{ {triples} }} WHERE {{ {guard} {{ SELECT (COUNT(?past) + 1 AS ?sequence) WHERE {{ {previous} }} }} }}"),
+        event,
+    ))
 }
 
 /// Preserve a close stamp imported directly through the store before reopen removes it.

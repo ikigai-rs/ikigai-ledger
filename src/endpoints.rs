@@ -1840,6 +1840,25 @@ fn replace_one(client: &StoreClient<'_, '_>, item: &str, predicate: &str, value:
     replace_one_of(client, item, v::ITEM_CLASS, predicate, value)
 }
 
+/// [`replace_one`], only while `guard` (a pattern on the item) also holds.
+fn replace_one_when(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    predicate: &str,
+    value: &str,
+    guard: &str,
+) -> String {
+    format!(
+        "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
+        client.in_graph(&format!("<{item}> <{predicate}> ?was")),
+        client.in_graph(&format!("<{item}> <{predicate}> {value}")),
+        client.in_graph(&format!(
+            "{} {guard} OPTIONAL {{ <{item}> <{predicate}> ?was }}",
+            live(item)
+        ))
+    )
+}
+
 /// Replace a single-valued property of `subject`, only while it is typed `class`: an item for
 /// every write on one, a tombstone for a purge's stamps on it.
 fn replace_one_of(
@@ -2998,19 +3017,51 @@ impl Endpoint for CloseEndpoint {
         // machine claim and a holder `items holder=` went on listing. The release is in the
         // same update as the close, so neither can land without the other, and it is
         // recorded as a comment naming who held it, so the record does not lose that.
+        //
+        // ★ AND THE UPDATE DECIDES, NOT THE READ ABOVE IT (ledger #2764). Until 0.14.0 the
+        // close branched on `item.open` and `item.claimed_by` as read before the update, so
+        // concurrent closes of one claimed item each recorded a close and each wrote the
+        // release comment, and a claim that committed between the read and the update was
+        // retracted with no record. Now the open-to-closed transition and the release
+        // record carry their condition in their own `WHERE`, ahead of the operations that
+        // change status and claim: under the store's write lock exactly one update finds
+        // the item open, and only an update that finds a claim records it, naming the claim
+        // it found. Each writes an IRI minted here, and reading those back is how this
+        // request learns what it did.
+        let still_open = format!(
+            "FILTER NOT EXISTS {{ <{}> <{}> <{}> }}",
+            item.iri,
+            v::STATUS,
+            v::CLOSED
+        );
+        let (event, event_iri) =
+            counts::status_event_when(&client, &item.iri, v::CLOSED, now, &still_open)?;
+        let author = inv.inline_str("author").ok();
+        let record = client.ledger().comment(&mint_id(now)?);
         let mut ops = vec![
+            // Editing the verdict of an already closed item must not move its close time.
+            event,
+            replace_one_when(
+                &client,
+                &item.iri,
+                v::CLOSED_AT,
+                &datetime(now),
+                &still_open,
+            ),
+            format!(
+                "DELETE {{ {} }} WHERE {{ {} }}",
+                client.in_graph(&format!("<{}> <{}> ?was", item.iri, v::CLOSED_AT_SOURCE)),
+                client.in_graph(&format!(
+                    "<{}> <{}> ?was . {still_open}",
+                    item.iri,
+                    v::CLOSED_AT_SOURCE
+                ))
+            ),
+            release_record(&client, &item.iri, &record, author, now),
             replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
             replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
             touch(&client, &item.iri, now),
         ];
-        // Editing the verdict of an already closed item must not move its close time.
-        if item.open {
-            ops.extend([
-                replace_one(&client, &item.iri, v::CLOSED_AT, &datetime(now)),
-                retract(&client, &item.iri, v::CLOSED_AT_SOURCE),
-                counts::status_event(&client, &item.iri, v::CLOSED, now)?,
-            ]);
-        }
         ops.extend(
             CLAIM_FIELDS
                 .iter()
@@ -3025,15 +3076,13 @@ impl Endpoint for CloseEndpoint {
             &datetime(now),
         ));
         guarded_update(&client, &[&item.iri], &batch(&ops)).await?;
-        let author = inv.inline_str("author").ok();
-        let released = item.claimed_by.clone();
-        if released.is_some() {
-            let record = format!(
-                "Closed while claimed by {}; the claim is released.",
-                holder_display(&item)
-            );
-            write_comment(&client, &item.iri, &record, author, now).await?;
-        }
+        let closed_here = client
+            .ask(&format!(
+                "ASK {{ {} }}",
+                client.in_graph(&format!("<{event_iri}> <{}> ?any", v::ext::TYPE))
+            ))
+            .await?;
+        let released = released_by(&client, &record).await?;
         let mut note_written = None;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
@@ -3051,11 +3100,16 @@ impl Endpoint for CloseEndpoint {
             answer.reason = Some(name.to_string());
             answer.comment = note_written;
             answer.released = released;
+            answer.already_closed = (!closed_here).then_some(true);
             return Ok(json_repr(json::render(&answer)?));
         }
-        Ok(plain(match released {
-            Some(holder) => format!("closed {} ({name}), released {holder}\n", item.short()),
-            None => format!("closed {} ({name})\n", item.short()),
+        Ok(plain(match (released, closed_here) {
+            (Some(holder), _) => format!("closed {} ({name}), released {holder}\n", item.short()),
+            (None, true) => format!("closed {} ({name})\n", item.short()),
+            (None, false) => format!(
+                "closed {} ({name}); it was already closed, so only the verdict changed\n",
+                item.short()
+            ),
         }))
     }
 
@@ -3268,6 +3322,80 @@ const CLAIM_FIELDS: [&str; 7] = [
     v::LEASE_EXPIRES,
     v::CLAIM_PRINCIPAL,
 ];
+
+/// The prefix and suffix of the comment a close writes when it releases a claim.
+const RELEASE_PREFIX: &str = "Closed while claimed by ";
+const RELEASE_SUFFIX: &str = "; the claim is released.";
+
+/// The comment `record` recording the release of the claim on `item`, written only when the
+/// update finds one, and naming the holder it finds there as [`holder_display`] does
+/// (ledger #2764). It must run ahead of the operations that retract the claim.
+fn release_record(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    record: &str,
+    author: Option<&str>,
+    now: u64,
+) -> String {
+    let mut triples = format!(
+        "<{record}> <{type_}> <{class}> ; <{on}> <{item}> ; <{body}> ?body ; <{created}> {when} .",
+        type_ = v::ext::TYPE,
+        class = v::COMMENT_CLASS,
+        on = v::ON_ITEM,
+        body = v::BODY,
+        created = v::ext::CREATED,
+        when = datetime(now),
+    );
+    if let Some(author) = author {
+        triples.push_str(&format!(
+            "\n<{record}> <{}> {} .",
+            v::AUTHOR,
+            literal(author)
+        ));
+    }
+    format!(
+        "INSERT {{ {} }} WHERE {{ {} }}",
+        client.in_graph(&triples),
+        client.in_graph(&format!(
+            "{live} <{item}> <{by}> ?holder . OPTIONAL {{ <{item}> <{principal}> ?principal }}\n\
+             BIND(CONCAT({prefix}, STR(?holder), \
+             COALESCE(CONCAT(\" (as \", STR(?principal), \")\"), \"\"), {suffix}) AS ?body)",
+            live = live(item),
+            by = v::CLAIMED_BY,
+            principal = v::CLAIM_PRINCIPAL,
+            prefix = literal(RELEASE_PREFIX),
+            suffix = literal(RELEASE_SUFFIX),
+        ))
+    )
+}
+
+/// The holder whose claim the update that wrote [`release_record`] `record` released, read
+/// back from the record; `None` when that update found no claim.
+async fn released_by(client: &StoreClient<'_, '_>, record: &str) -> Result<Option<String>> {
+    let rows = client
+        .select(&format!(
+            "SELECT ?body WHERE {{ {} }}",
+            client.in_graph(&format!("<{record}> <{}> ?body", v::BODY))
+        ))
+        .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get("body"))
+        .find_map(|body| {
+            let held = body
+                .value
+                .strip_prefix(RELEASE_PREFIX)?
+                .strip_suffix(RELEASE_SUFFIX)?;
+            // `holder (as principal)` when the claim carried a principal: the label is the
+            // part before it, as `released` has always named it.
+            Some(
+                match held.strip_suffix(')').and_then(|h| h.rsplit_once(" (as ")) {
+                    Some((label, _)) => label.to_string(),
+                    None => held.to_string(),
+                },
+            )
+        }))
+}
 
 /// Whether a caller acting as `caller` (its capability's one principal, if any) may treat a
 /// claim recorded with `recorded` as its own — renew it, re-take it under the same label.
