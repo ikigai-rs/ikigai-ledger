@@ -32,11 +32,14 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   (`#1: 3 event(s)`), or the sentence `#1 has no recorded events`, then one line per event,
   oldest first: its time, what happened in words (`state filed to queued`, `edit title, body`)
   and `by` who. An edit with no object says so in words. A close names its verdict and its
-  evidence in words (`closed done, evidence …`, `closed duplicate of …`).
+  evidence in words (`closed done, evidence …`, `closed duplicate of …`). An event an import
+  principal recorded afterward says so in words: `(claimed)` after its time, `imported` before
+  what happened, and `(claimed by an importer)` after who did it at the source.
 - **Write answers** (`src/endpoints.rs`): one sentence each, such as
   `#1 urn:iki:ledger:default:item:…`, `commented on #1 (…)`, `linked #1 blocks #2`,
   `closed #2 (done)`, `closed #2 done (2 evidence)`, `closed #2 duplicate of #1`,
-  `#1 claimed by worker-1`.
+  `#1 claimed by worker-1`, `#1: imported events recorded 3, already recorded 1; history only, so
+  the item itself did not change`.
 - **The doctor and lifecycles**: the doctor's findings, each with a `remedy:` line; a
   lifecycle's states, one per line (`Lifecycle::plain` in `src/lifecycle.rs`).
 - **Refusals**: `InvalidArgument` naming the argument with a sentence that says what is
@@ -118,3 +121,4 @@ technology you used, if you are comfortable sharing them. Anything security-sens
 | 2026-11-01 | `close closed-at=` (ledger #2819) adds refusals; each names the argument, the reason and the remedy in words. No plain face changed: `tests/faces.rs` passes unchanged. |
 | 2026-11-01 | Aliases (ledger #2828) add write answers (`scheme gh owned by …`, `gh:acme/web#12 names acme#12 …`, `… no longer names …`) and refusals, each naming in words the alias, the scheme, its owner or the item that already holds it, and the grant that would do. An alias value appears percent-encoded in an IRI (`acme%2Fweb%2312`), which a screen reader reads character by character; the decoded value is what every answer shows. No existing plain face changed: `tests/faces.rs` passes unchanged. |
 | 2026-11-01 | Links across ledgers (ledger #2829) add one detail line, `blocked-by: <IRI> (open; in the ledger cli, not readable under your grants)`, a `child:` line of the same shape, the `next` reason `blocked by <IRI> in the ledger cli`, a `⚠ not mirrored:` line a close or reopen adds when a target was beyond its grants, and refusals naming the grant (`urn:cap:ledger:link-in:acme`, the target graph's store grants) and the remedy. The status and whether the reader may read the other ledger are said in words. The blocker is named by its full IRI, which a screen reader reads character by character; its number is in the other ledger and is not this ledger's to show. No existing plain face changed: `tests/faces.rs` passes unchanged. |
+| 2026-11-01 | An importer's history (ledger #2843) adds a write answer that says in words what was recorded, what was recorded already and that the item did not change, and it avoids a parenthesized plural; a history line for an imported event, marked in words; and refusals, each naming the event, the term or date and what is accepted, and saying nothing was written. Anyone else is told to write the change itself. A value that would break a history's one line per event is refused. The line for an event no importer wrote is unchanged, and so are the other plain faces: `tests/faces.rs` passes unchanged. `tests/imported_history.rs` pins the new line byte for byte; no assistive technology was used. |

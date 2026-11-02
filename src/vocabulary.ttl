@@ -43,7 +43,7 @@
 
 <https://ikigai-rs.dev/ns/ledger> a owl:Ontology ;
     rdfs:label "ikigai-ledger" ;
-    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841); ledger:evidence: what closed an item, on that close's StatusEvent, beside its ledger:closedReason, which therefore drops its rdfs:domain (ledger #2842)." ;
+    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841); ledger:evidence: what closed an item, on that close's StatusEvent, beside its ledger:closedReason, which therefore drops its rdfs:domain (ledger #2842); ledger:eventKey: an imported event's id at its source, on claim, release, edit and status events an import principal records with claimed dates, which change nothing on the item (ledger #2843)." ;
     owl:versionInfo "0.17.0" .
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -189,6 +189,11 @@ ledger:key a rdf:Property ;
     rdfs:label "key" ;
     rdfs:comment "The CALLER'S name for an item: unique per ledger, chosen by whoever files it (`append key=`), and the thing a keyed append checks before it files. Its first use is idempotence (a hook re-run, two hooks racing) and its second is lookup by a foreign id (`urn:iki:ledger:item:key:{key}`, `items key=`) — a roborev finding, a kata issue — which is why it is called a key and not an idempotency key. A literal, not an IRI, so any caller's identifier fits; its shape is fixed (ASCII letters, digits, `-`, `.`, `_`, `~` and `:`, at most 256 characters) so it stays a legal IRI segment and survives a URL path. Compared exactly; never rewritten after filing. ⚠ No domain, for the ledger:number reason: an item AND the tombstone it leaves both carry it, so a deleted item's key stays TAKEN — a replayed request must not resurrect what someone deliberately deleted — and rdfs:domain ledger:Item would make every tombstone an inferred item to a reasoning consumer. ⚠ A key is a NAME, kept on the tombstone through a purge like the number is: it is not content, so do not put content in it." .
 
+ledger:eventKey a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "event key" ;
+    rdfs:comment "An imported event's id at its source (ledger #2843): the subject the importer's batch named it by, unique per ledger and checked in the same store update that writes the event, so a re-sent event is recorded once. The same shape as ledger:commentKey, and like it not kept on a tombstone: deleting an item takes its events, keys and all." .
+
 ledger:commentKey a rdf:Property ;
     rdfs:domain ledger:Comment ;
     rdfs:range xsd:string ;
@@ -222,7 +227,7 @@ ledger:authorSource a rdf:Property ;
 ledger:createdSource a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "created source" ;
-    rdfs:comment "The literal import when dcterms:created on an item or a comment is an authored date an import principal claimed, not the kernel time of the write (that is ledger:committedAt). Absent when the date is the kernel's." .
+    rdfs:comment "The literal import when dcterms:created on an item or a comment is an authored date an import principal claimed, not the kernel time of the write (that is ledger:committedAt). Absent when the date is the kernel's. On a claim, release, edit or status event (ledger #2843) it says more: an import principal recorded the event afterward, as history only. Such an event changed nothing on its item, carries no ledger:eventSequence, and is not counted in a mirror's ledger:mirrorVersion." .
 
 ledger:modifiedSource a rdf:Property ;
     rdfs:range xsd:string ;
@@ -231,7 +236,7 @@ ledger:modifiedSource a rdf:Property ;
 
 ledger:Importer a rdfs:Class ;
     rdfs:label "Importer" ;
-    rdfs:comment "An import or sync principal: a principal the host's participants graph types ledger:Importer. Read, never written, by this module. Only an Importer may name a foreign actor as an author, or claim an authored dcterms:created, dcterms:modified or ledger:closedAt (ledger #2827). Which principals are importers is enrollment data, not a capability." .
+    rdfs:comment "An import or sync principal: a principal the host's participants graph types ledger:Importer. Read, never written, by this module. Only an Importer may name a foreign actor as an author, claim an authored dcterms:created, dcterms:modified or ledger:closedAt (ledger #2827), or record past-dated history events (ledger #2843). Which principals are importers is enrollment data, not a capability." .
 
 ledger:claimedBy a rdf:Property ;
     rdfs:range xsd:string ;

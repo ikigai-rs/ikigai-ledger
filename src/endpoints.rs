@@ -24,6 +24,7 @@
 //! urn:iki:ledger:{ledger}:item:{id}:holder:{holder}  Exists       is it held by them?
 //! urn:iki:ledger:{ledger}:item:{id}:closed           Exists       is it closed?
 //! urn:iki:ledger:{ledger}:item:{id}:history          Source       every event, oldest first
+//! urn:iki:ledger:{ledger}:history                    Sink         an importer's past events
 //! ```
 //!
 //! Omit the `{ledger}` segment and you address the ledger called `default`, through the
@@ -328,6 +329,7 @@ mod counts;
 mod evidence;
 mod flight;
 mod history;
+mod import;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
 pub const SPACE_ID: &str = "urn:iki:space:ledger";
@@ -534,6 +536,12 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             LedgerGrammar::action("doctor"),
             flight::DoctorEndpoint {
                 lifecycles: Arc::clone(&lifecycles),
+            },
+        )
+        .bind(
+            LedgerGrammar::action("history"),
+            import::ImportEndpoint {
+                participants: participants.clone(),
             },
         )
         .bind(LedgerGrammar::action("next"), NextEndpoint { policies })
@@ -3824,6 +3832,15 @@ fn release_record(
             prefix = literal(RELEASE_PREFIX),
             suffix = literal(RELEASE_SUFFIX),
         ))
+    )
+}
+
+/// The filter that leaves out an imported `event` (ledger #2843): history only, so it counts
+/// toward nothing a write decides. See [`import`].
+fn not_imported(event: &str) -> String {
+    format!(
+        "FILTER NOT EXISTS {{ {event} <{}> ?imported }}",
+        v::CREATED_SOURCE
     )
 }
 

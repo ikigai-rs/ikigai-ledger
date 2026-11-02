@@ -42,14 +42,21 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
-use ikigai_core::{Capability, Iri, Request, Resolution, Scope, Space, Verb};
+use ikigai_core::{Capability, Fallback, Iri, Kernel, Request, Resolution, Scope, Space, Verb};
+use ikigai_ledger::SpaceConfig;
+use ikigai_store::DurableStore;
 
 use common::*;
 
 /// The ledger the whole script runs in. A *named* one, never `default`, so a scope that
 /// silently ignored the ledger segment would still have to name this graph.
 const LEDGER: &str = "acme";
+
+/// Where the script's kernel reads enrollment, and the principal it enrolls as an importer.
+const PARTICIPANTS: &str = "urn:collab:grants:participants";
+const IMPORTER: &str = "urn:iki:gonk:client:grants-importer";
 
 /// The grant list `README.md`'s table publishes for one ledger — **eight tokens, every one
 /// of them naming that ledger, and nothing else at all.** The eighth, the graveyard's READ
@@ -135,6 +142,9 @@ struct Step {
     verb: Verb,
     iri: String,
     args: Vec<(&'static str, &'static str)>,
+    /// Whether it runs as the principal [`PARTICIPANTS`] enrolls: the published list, a principal
+    /// and that graph's read grant, which is what being an importer adds (ledger #2843).
+    importer: bool,
 }
 
 fn step(
@@ -148,6 +158,20 @@ fn step(
         verb,
         iri,
         args: args.to_vec(),
+        importer: false,
+    }
+}
+
+/// [`step`], as the import principal.
+fn importer_step(
+    endpoint: &'static str,
+    verb: Verb,
+    iri: String,
+    args: &[(&'static str, &'static str)],
+) -> Step {
+    Step {
+        importer: true,
+        ..step(endpoint, verb, iri, args)
     }
 }
 
@@ -261,6 +285,21 @@ fn script() -> Vec<Step> {
             Verb::Source,
             at("item:1:history"),
             &[],
+        ),
+        importer_step(
+            "ledger-history",
+            Verb::Sink,
+            at("history"),
+            &[
+                ("item", "#1"),
+                (
+                    "content",
+                    "<urn:grants:event:1> a <https://ikigai-rs.dev/ns/ledger#EditEvent> ; \
+                     <http://purl.org/dc/terms/created> \
+                     \"2026-09-15T00:00:05Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> ; \
+                     <https://ikigai-rs.dev/ns/ledger#editKind> \"defer\" .",
+                ),
+            ],
         ),
         step(
             "ledger-defer",
@@ -383,10 +422,43 @@ fn the_published_grant_list_is_sufficient_for_every_action_this_crate_binds() {
          away): {stale:?}"
     );
 
-    let kernel = kernel();
+    let space = Fallback::new(vec![
+        Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>,
+        Arc::new(ikigai_ledger::space_with(
+            SpaceConfig::default().participants(PARTICIPANTS),
+        )) as Arc<dyn Space>,
+    ]);
+    let kernel =
+        Kernel::with_meta_renderer(Arc::new(space), Arc::new(ikigai_vocab::TurtleRenderer))
+            .with_clock(Arc::new(TickingClock::default()));
+    sink(
+        &kernel,
+        "urn:iki:store:update",
+        &[(
+            "content",
+            &format!(
+                "INSERT DATA {{ GRAPH <{PARTICIPANTS}> {{ <{IMPORTER}> a \
+                 <https://ikigai-rs.dev/ns/ledger#Importer> }} }}"
+            ),
+        )],
+    );
     let caller = published_grants(LEDGER);
+    let importer = Capability::scoped([
+        format!("urn:cap:ledger:read:{LEDGER}"),
+        format!("urn:cap:ledger:write:{LEDGER}"),
+        format!("urn:cap:ledger:delete:{LEDGER}"),
+        format!("urn:cap:ledger:purge:{LEDGER}"),
+        graph_read(LEDGER),
+        graph_write(LEDGER),
+        graveyard_write(LEDGER),
+        graveyard_read(LEDGER),
+        format!("urn:cap:store:read:graph:{PARTICIPANTS}"),
+    ])
+    .with_principal(IMPORTER)
+    .unwrap();
     for (n, step) in script.iter().enumerate() {
-        let answered = try_as(&kernel, &caller, step.verb, &step.iri, &step.args);
+        let who = if step.importer { &importer } else { &caller };
+        let answered = try_as(&kernel, who, step.verb, &step.iri, &step.args);
         assert!(
             answered.is_ok(),
             "step {n} ({} {}) is refused the published grant list: {answered:?}",

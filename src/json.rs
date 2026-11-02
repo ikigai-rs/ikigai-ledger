@@ -508,6 +508,13 @@ pub struct Answer {
     /// Added in 0.18.0 (ledger #2842).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<ItemRef>,
+    /// How many events this batch recorded (`history` only). Added in 0.18.0 (ledger #2843).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<usize>,
+    /// How many of this batch's events were recorded already, and so changed nothing (`history`
+    /// only). Added in 0.18.0 (ledger #2843).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub already_recorded: Option<usize>,
 }
 
 /// `…:item:{id}:state` — read, or the answer of a transition.
@@ -571,6 +578,19 @@ pub struct HistoryEvent {
     pub at: Option<String>,
     /// The principal that made the write; `null` when its capability carried none.
     pub committer: Option<String>,
+    /// `true` when an import principal recorded it afterward with its source date, so `at` is
+    /// claimed and it changed nothing on the item. Added in 0.18.0 (ledger #2843).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
+    /// An imported event's id at its source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// Who did it at the source, as the importer claims (an imported event only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// When the importer recorded it (an imported event only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed: Option<String>,
     /// The label a `label` or `unlabel` added or removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -888,5 +908,7 @@ pub(crate) fn answer(ledger: &Ledger, outcome: &str, item: ItemRef) -> Answer {
         handback: None,
         evidence: Vec::new(),
         targets: Vec::new(),
+        recorded: None,
+        already_recorded: None,
     }
 }

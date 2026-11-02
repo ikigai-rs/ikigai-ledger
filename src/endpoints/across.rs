@@ -27,6 +27,7 @@
 //! decided inside the subject's own update**: every close and reopen adds a
 //! `ledger:StatusEvent`, and every link and unlink a `ledger:EditEvent`, in the same update as
 //! the change, so the subject's count of those events grows with every change a mirror reflects.
+//! An importer's events are not counted (ledger #2843): they change nothing a mirror reflects.
 //! After its update, a writer reads the subject's status, that count and its links in ONE query
 //! (one snapshot), and writes each mirror only when the version the mirror already holds is no
 //! greater. Whatever order the mirror writes land in, the one read from the latest snapshot
@@ -214,11 +215,12 @@ async fn snapshot(client: &StoreClient<'_, '_>, subject: &str) -> Result<Option<
                 "{{ SELECT ?status (COUNT(DISTINCT ?event) AS ?version) WHERE {{ \
                    <{subject}> <{status}> ?status . \
                    OPTIONAL {{ ?event <{on}> <{subject}> ; <{type_}> ?class . \
-                     FILTER(?class = <{status_event}> || ?class = <{edit_event}>) }} \
+                     FILTER(?class = <{status_event}> || ?class = <{edit_event}>) {imported} }} \
                  }} GROUP BY ?status }} \
                  OPTIONAL {{ ?link <{type_}> <{link}> ; <{on}> <{subject}> ; \
                    <{link_type}> ?type ; <{link_target}> ?target . }}",
                 status = v::STATUS,
+                imported = not_imported("?event"),
                 on = v::ON_ITEM,
                 type_ = v::ext::TYPE,
                 status_event = v::STATUS_EVENT_CLASS,
