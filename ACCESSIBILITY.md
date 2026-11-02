@@ -31,10 +31,12 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
 - **An item's history** (`src/endpoints/history.rs`): a first line with the item and a count
   (`#1: 3 event(s)`), or the sentence `#1 has no recorded events`, then one line per event,
   oldest first: its time, what happened in words (`state filed to queued`, `edit title, body`)
-  and `by` who. An edit with no object says so in words.
+  and `by` who. An edit with no object says so in words. A close names its verdict and its
+  evidence in words (`closed done, evidence …`, `closed duplicate of …`).
 - **Write answers** (`src/endpoints.rs`): one sentence each, such as
   `#1 urn:iki:ledger:default:item:…`, `commented on #1 (…)`, `linked #1 blocks #2`,
-  `closed #2 (done)`, `#1 claimed by worker-1`.
+  `closed #2 (done)`, `closed #2 done (2 evidence)`, `closed #2 duplicate of #1`,
+  `#1 claimed by worker-1`.
 - **The doctor and lifecycles**: the doctor's findings, each with a `remedy:` line; a
   lifecycle's states, one per line (`Lifecycle::plain` in `src/lifecycle.rs`).
 - **Refusals**: `InvalidArgument` naming the argument with a sentence that says what is

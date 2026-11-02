@@ -102,8 +102,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, ReprType,
-    Representation, Result, UriTemplate, Verb,
+    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
+    ListSeparator, ReprType, Representation, Result, UriTemplate, Verb,
 };
 use oxrdf::Graph;
 use sha2::{Digest, Sha256};
@@ -325,6 +325,7 @@ const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 
 mod across;
 mod counts;
+mod evidence;
 mod flight;
 mod history;
 
@@ -2094,15 +2095,17 @@ struct Removed {
 /// Everything that goes with an item when it goes: its own triples, the triples of its
 /// comments, and every edge POINTING AT it.
 ///
-/// ⚠ An event's `ledger:editTarget` is not an edge (ledger #2841): it is another item's history,
-/// saying what happened there and then, and that stays when the item it names goes, as its IRI
-/// stays on a tombstone. Its own events' targets go with their event, by `onItem`.
+/// ⚠ An event's `ledger:editTarget` is not an edge (ledger #2841), and neither is a close's
+/// `ledger:evidence` (ledger #2842): each is another item's history, saying what happened there
+/// and then, and that stays when the item it names goes, as its IRI stays on a tombstone. Its own
+/// events' targets go with their event, by `onItem`.
 fn removal_selector(subject: &str) -> String {
     format!(
-        "?s ?p ?o . FILTER(?s = {subject} || (?o = {subject} && ?p != <{target}>) || \
-         EXISTS {{ ?s <{on}> {subject} }})",
+        "?s ?p ?o . FILTER(?s = {subject} || (?o = {subject} && ?p NOT IN (<{target}>, \
+         <{evidence}>)) || EXISTS {{ ?s <{on}> {subject} }})",
         on = v::ON_ITEM,
         target = v::EDIT_TARGET,
+        evidence = v::EVIDENCE,
     )
 }
 
@@ -3357,6 +3360,9 @@ impl Endpoint for CloseEndpoint {
                     .join(", ")
             ),
         })?;
+        // What closed it (ledger #2842), every value checked before anything is written.
+        let evidence = evidence::resolve(inv, &client, &item).await?;
+        evidence::refuse_without_a_close_event(&client, &item, &evidence).await?;
         // ★ A CLOSE RELEASES THE CLAIM (ledger #1147, decided 2026-10-10). Closed work is
         // held by nobody, and a claim left on a closed item was the doctor's orphaned
         // machine claim and a holder `items holder=` went on listing. The release is in the
@@ -3441,6 +3447,9 @@ impl Endpoint for CloseEndpoint {
             release_event(&client, &item.iri, ReleaseReason::Closed, "", &who, now)?,
             replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
             replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
+            // After the status, so it finds the close that stands: this one's event, or, when
+            // the item was already closed, that close's.
+            evidence::record(&client, &item.iri, reason, &evidence),
             touch(&client, &item.iri, now),
         ];
         ops.extend(
@@ -3485,14 +3494,19 @@ impl Endpoint for CloseEndpoint {
             answer.comment = note_written;
             answer.released = released;
             answer.already_closed = (!closed_here).then_some(true);
+            evidence::answer(&mut answer, name, &evidence);
             return Ok(json_repr(json::render(&answer)?));
         }
+        let head = evidence::receipt(&item, name, &evidence);
         let mut said = match (released, closed_here) {
-            (Some(holder), _) => format!("closed {} ({name}), released {holder}\n", item.short()),
-            (None, true) => format!("closed {} ({name})\n", item.short()),
+            (Some(holder), _) => format!("{head}, released {holder}\n"),
+            (None, true) => format!("{head}\n"),
+            (None, false) if evidence.is_empty() => {
+                format!("{head}; it was already closed, so only the verdict changed\n")
+            }
             (None, false) => format!(
-                "closed {} ({name}); it was already closed, so only the verdict changed\n",
-                item.short()
+                "{head}; it was already closed, so the verdict changed and this evidence joined \
+                 that close\n"
             ),
         };
         said.push_str(&across::unreached(&item, &unreached));
@@ -3510,7 +3524,8 @@ impl Endpoint for CloseEndpoint {
                 "Close with a reason. Closing is NOT deleting: the item stays in the graph, \
                  stays queryable, and stops blocking whatever it blocked. A claim on it is \
                  released, and the release recorded as a comment naming the holder; a \
-                 hand-back awaiting the dispatcher is answered.",
+                 hand-back awaiting the dispatcher is answered. What closed it can be recorded \
+                 on the close's status event, `evidence=`.",
             )
             .verb(Verb::Meta)
             .action(write_scopes(
@@ -3556,6 +3571,15 @@ impl Endpoint for CloseEndpoint {
                                 "When the item closed at its source, for an import principal (ledger:Importer in the host's participants graph) only: an xsd:dateTime no later than now and no earlier than the item's filing. Dates closedAt and the close's status event, so the daily counts place it on that day, both marked closedAtSource import (ledger #2819). Anyone else sending it is refused.",
                             )
                             .class(v::ext::XSD_DATETIME)
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("evidence")
+                            .summary(
+                                "What closed it, repeatable: recorded as ledger:evidence on this close's status event, and kept there across a reopen (ledger #2842). A commit on a `done` close is the fix; an item on a `duplicate` or `superseded` close is its target; a test is the proof. An item (`#12`, `12`, `key:{key}`, its IRI, an alias's IRI, or `{ledger}#12`) must exist and be readable by the closer, or the close is refused; one in another ledger also takes `urn:cap:ledger:link-in:{ledger}`. Any other IRI is stored as given and never fetched. On an item already closed, it joins the close that stands.",
+                            )
+                            .class(v::ext::XSD_STRING)
+                            .list(ListSeparator::Whitespace)
                             .optional(),
                     )
                     .input(as_arg(&WRITE_FACES))
