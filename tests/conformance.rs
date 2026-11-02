@@ -37,13 +37,37 @@ use common::*;
 use std::sync::Arc;
 
 use ikigai_conformance::{Check, Fixture, Suite};
-use ikigai_core::{space_iri, Kernel, Verb};
+use ikigai_core::{space_iri, Capability, Fallback, Kernel, Space, Verb};
 use ikigai_ledger::policy::Leverage;
 use ikigai_ledger::SpaceConfig;
+use ikigai_store::DurableStore;
 
-/// A kernel with three items filed, and their ids.
+const PARTICIPANTS: &str = "urn:collab:conformance:participants";
+const IMPORTER: &str = "urn:iki:gonk:client:conformance-importer";
+
+/// A kernel with three items filed, and their ids. Its ledger reads enrollment from
+/// [`PARTICIPANTS`], where [`IMPORTER`] is an import principal, for `ledger-history`.
 fn seeded() -> (Kernel, String, String, String) {
-    let kernel = kernel();
+    let space = Fallback::new(vec![
+        Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>,
+        Arc::new(ikigai_ledger::space_with(
+            SpaceConfig::default().participants(PARTICIPANTS),
+        )) as Arc<dyn Space>,
+    ]);
+    let kernel =
+        Kernel::with_meta_renderer(Arc::new(space), Arc::new(ikigai_vocab::TurtleRenderer))
+            .with_clock(Arc::new(TickingClock::default()));
+    sink(
+        &kernel,
+        "urn:iki:store:update",
+        &[(
+            "content",
+            &format!(
+                "INSERT DATA {{ GRAPH <{PARTICIPANTS}> {{ <{IMPORTER}> a \
+                 <https://ikigai-rs.dev/ns/ledger#Importer> }} }}"
+            ),
+        )],
+    );
     let a = append_iri(&kernel, "The fixture item\n\nWhat the walk writes to.", &[]);
     let b = append_iri(&kernel, "A link target", &[]);
     let c = append_iri(&kernel, "A purge target", &[]);
@@ -125,6 +149,32 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         )
         .fixture(Fixture::new("ledger-item-closed", Verb::Exists).binding("id", b))
         .fixture(Fixture::new("ledger-item-history", Verb::Source).binding("id", b))
+        // An importer's history (ledger #2843) answers about its caller, so it is walked under
+        // the principal [`PARTICIPANTS`] enrolls. Its date is after B's filing, in the seeding's
+        // first ticks of the clock, and before the walk reaches it; a second firing is a re-send,
+        // which changes nothing.
+        .fixture(
+            Fixture::new("ledger-history", Verb::Sink)
+                .capability(
+                    Capability::scoped(vec![
+                        "urn:cap:ledger:write:default".to_string(),
+                        graph_read("default"),
+                        graph_write("default"),
+                        format!("urn:cap:store:read:graph:{PARTICIPANTS}"),
+                    ])
+                    .with_principal(IMPORTER)
+                    .unwrap(),
+                )
+                .arg("item", b)
+                .arg(
+                    "content",
+                    "<urn:conformance:event:1> \
+                     a <https://ikigai-rs.dev/ns/ledger#EditEvent> ; \
+                     <http://purl.org/dc/terms/created> \
+                     \"2026-09-15T00:00:30Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> ; \
+                     <https://ikigai-rs.dev/ns/ledger#editKind> \"defer\" .",
+                ),
+        )
         // `about` (ledger #398) points at B too: adding and removing a target leaves the
         // title, body and state the other parts read untouched.
         .fixture(
@@ -241,7 +291,7 @@ fn conforms() {
 fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
-    // `Suite::own("ledger-*")` walks only the twenty-two THIS crate binds, so the whole of
+    // `Suite::own("ledger-*")` walks only the twenty-six THIS crate binds, so the whole of
     // `walked` is the module; no filter stands between this list and what was checked.
     let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
     walked.sort_unstable();
@@ -257,6 +307,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-counts",
             "ledger-defer",
             "ledger-doctor",
+            "ledger-history",
             "ledger-item",
             "ledger-item-about",
             "ledger-item-closed",

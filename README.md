@@ -251,6 +251,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}:closed` | Exists | is it closed? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:about` | Sink · Delete | add / remove what it is about, title and body untouched | `about:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:item:{id}:history` | Source | every event on the item, oldest first, with what each edit changed | `read:{ledger}` |
+| `…:{ledger}:history` | Sink | an import principal's past claim, release, edit and status events for one item; history only | `write:{ledger}`, and enrolled as `ledger:Importer` |
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
 | `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
 | `urn:iki:ledger:lifecycle:{name}` | Source · Exists | the legal states, in order | any `read:*` |
@@ -310,7 +311,7 @@ because the data has to say which ledger it is in even when the request did not.
 
 ⚠ **The sugar costs a reserved-word list.** `urn:iki:ledger:items` has to mean *the
 default ledger's listing* rather than *a ledger called `items`*, and only one of those can
-be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and fifteen others are not
+be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and eighteen others are not
 available as ledger names, and a name that is refused says which word it must not use.
 Names are otherwise lowercase letters, digits, `-` and `_`; the shape is fixed because the
 name becomes a capability token that is matched **exactly**, and a token must not be
@@ -1248,6 +1249,99 @@ authored date, and urn:iki:gonk:passkey:dispatcher is not an import or sync prin
 stamps the time itself
 ```
 
+### An importer's history
+
+Since 0.18.0 (ledger #2843) an import principal can bring an item's history across, not only its
+dates. `…:{ledger}:history` takes one item's events as Turtle: `item=` names the item, and `content`
+holds up to 128 events and 512 KiB. A batch is recorded whole or not at all.
+
+```turtle
+@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<urn:kata:event:01JZ> a ledger:EditEvent ;
+    dcterms:created "2020-02-03T00:00:00Z"^^xsd:dateTime ;
+    ledger:author <urn:example:github:user:octocat> ;
+    ledger:editKind "label" ; ledger:editLabel "bug" .
+```
+
+```text
+$ sink urn:iki:ledger:acme:history item=1 < events.ttl
+acme#1: imported events recorded 3, already recorded 1; history only, so the item itself did not change
+$ source urn:iki:ledger:acme:item:1:history
+acme#1: 4 event(s)
+2020-02-03T00:00:00.000Z (claimed)  imported label bug  by urn:example:github:user:octocat (claimed by an importer)  committer urn:iki:gonk:client:importer
+2020-02-04T00:00:00.000Z (claimed)  imported state filed to queued  by urn:iki:gonk:client:importer
+```
+
+- ★ **History only.** No write here names the item as a subject, so its state, labels, claim, status
+  and `modified` stay as they are, and so do its faces, `next` and the daily counts. An imported
+  `link` writes no edge and no mirror. To change the item, write the change itself.
+- ★ **It moves no version.** A mirror's version counts status and edit events (#2829), and that
+  count leaves out imported ones. So an import writes no mirror, and the next real close or link
+  lands on the version it would have without the import. An imported status event carries no
+  `eventSequence` and does not count toward the next one, so a real close keeps its number, its
+  evidence goes on the real close, and `counts` never reads the imported one. A query that wants
+  only what happened in this ledger filters on `ledger:createdSource`; a query over `eventSequence`
+  sees real status events alone.
+- **Marked the way 0.15.0's claimed dates are**: `ledger:createdSource "import"` beside the true
+  `ledger:committedAt` and the `ledger:committer` the door stamped. `ledger:author` (optional, an
+  IRI) says who did it at the source, marked `ledger:authorSource "import"`. In JSON an event says
+  `imported`, `source_id`, `author` and `committed`.
+- **The date rules are `closed-at=`'s**: no later than now and no earlier than the item's filing,
+  for `dcterms:created` and a release's `ledger:claimedAt`.
+- ★ **A re-send changes nothing.** An event's subject is its id at the source, kept as
+  `ledger:eventKey` under the rules of a comment's key (ASCII letters, digits, `-`, `.`, `_`, `~`,
+  `:`, at most 256 characters) and unique in the ledger, whichever item it is sent for and whatever
+  else it says. It is checked inside the update, so concurrent re-sends record it once, and a batch
+  that is all re-sends is answered without a write. A delete frees its events' ids with them.
+- **Closed shapes, checked before the write.** Each class and each `editKind` names every term it
+  takes, and any other term is refused by name, so a batch cannot set `eventSequence`, `committer`
+  or `onItem`. Each `editKind` needs the object an 0.18.0 edit would name (`defer` and `resume` have
+  none), and `editField` names a field, never its value. A value is stored as given and never
+  fetched: an `editTarget` or `evidence` need not resolve. A string on more than one line is refused,
+  since a history prints one line per event. Events of one moment read in the batch's order.
+- **Bounded before it is parsed**: bytes first, then the store's nesting scan. A blank node is
+  refused, since it could not be re-sent as the same event. A batch whose update would pass the
+  store's 1 MiB bound is refused by name.
+- **Anyone else is refused, and told what to do**, before the batch is parsed:
+
+```text
+only an import or sync principal may record past-dated history, and
+urn:iki:gonk:passkey:dispatcher is not one (ledger:Importer in <urn:collab:participants>). Write
+the change itself instead (claim, release, label, link, state, close, reopen), and the ledger
+records its event as it happens
+```
+
+⚠ **At scale.** Measured in a release build on the in-memory store, one run on a shared machine
+(`cargo test --release --test imported_history -- --ignored --nocapture measure`):
+
+| 30,000 events, batches of 100 | on 300 items | on one item |
+| --- | --- | --- |
+| import | 4.9 s (about 6,100 events a second) | 4.7 s |
+| triples in the graph after (about 9 an event) | 273,602 | 270,014 |
+| `next` (one item, no events: 6 to 11 ms) | 23 ms | 6 ms |
+| item read, plain / JSON | 10 ms / under 1 ms | 56 ms / 15 ms |
+| `items` / `counts` / `doctor` | 75 / 3 / 23 ms | 26 / 1 / 17 ms |
+| a re-sent batch of ten | 15 ms | 6 ms |
+| `close` / `reopen` of an item | 177 / 374 ms | 496 / 613 ms |
+
+Three limits of the store's are easier to reach with this much history. None loses data, and each
+is refused with a sentence naming its bound:
+
+- **A graph past 250,000 quads refuses every `delete` and `purge`.** Their update observes the whole
+  graph, which the scoped door copies, and `DurableStore::with_max_scoped_copy_quads` is that bound.
+  Filing, commenting, labeling, claiming, closing and importing still work there. It is not the
+  import's: 45,000 filed items with no events reach it too. A host expecting this much history raises
+  the bound (at 1,000,000, a delete in the 273,602-triple graph took 1.9 s).
+- **An item with more than about 340 events cannot be deleted or purged the ordinary way.** Its
+  delete inlines its quads into one update, about 3 KB an event, and the store takes 1 MiB: 300
+  events deleted, 350 were refused. The item stays whole and live, and that refused delete leaves a
+  copy in the graveyard. Comments cost a delete the same way.
+- **An item with somewhere between 5,000 and 7,500 events cannot show its history.** The answer
+  passes the store's 16 MiB bound for an ordinary caller. A query with `LIMIT` still reads them.
+
 ### Evidence on a close
 
 Since 0.18.0 (ledger #2842) a close says what closed it. `evidence=<iri>` on `close`, repeatable,
@@ -1681,7 +1775,8 @@ one graph.
   disagree. ⚠ The exception is attribution (since 0.15.0, ledger #2819): who claimed,
   released, handed back and edited an item is a domain fact a work query asks for ("what did
   this agent do"), so those events are in the ledger's graph. They record who and when, never
-  a before and after.
+  a before and after. An import principal can record such events after the fact (ledger #2843),
+  marked as imported.
 - **No reaper.** A lease that runs out is reported (by `next` and the doctor) and taken over
   by an explicit act; nothing releases or reassigns a claim on its own, because "owned" has to
   mean something a reader can check.
@@ -1701,7 +1796,7 @@ is, the rules it follows, what is not tested, and how to report a barrier.
 
 ## Status
 
-All twenty-four resources are bound, tested, and walked clean by `ikigai-conformance`
+All twenty-six resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces). So are the two
 alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 
@@ -1729,6 +1824,16 @@ answers `closed #1 done (2 evidence)` or `closed #2 duplicate of #1`; JSON adds 
 `json::HistoryEvent` gains `evidence`, and its `reason` holds a close's verdict too. See "Evidence on
 a close". `ledger:closedReason` drops its `rdfs:domain`, and the vocabulary gains `ledger:evidence`:
 redeploy `/ns/ledger` for those as well.
+
+**An importer's history (#2843).** `…:{ledger}:history` takes one item's past claim, release, edit
+and status events as Turtle from a `ledger:Importer`, marked `ledger:createdSource "import"`, under
+the date rules of `closed-at=`, and a re-sent source id changes nothing. History only: the item, its
+mirrors' versions, the status sequence and the daily counts do not move, and each history face says
+imported. Anyone else is told to write the change itself. New: `ledger:eventKey` (redeploy
+`/ns/ledger`), `json::HistoryEvent`'s `imported`, `source_id`, `author` and `committed`,
+`json::Answer`'s `recorded` and `already_recorded`. ⚠ `history` is now a reserved ledger name, so a
+ledger already called that can no longer be addressed. See "An importer's history", with its
+measurements and the store limits it reaches.
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 

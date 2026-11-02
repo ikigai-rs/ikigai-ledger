@@ -46,10 +46,11 @@ pub(super) fn status_event_when(
     let triples = client.in_graph(&triples);
     let guard = client.in_graph(&format!("{} {guard}", live(item)));
     let previous = client.in_graph(&format!(
-        "?past <{}> <{}> ; <{}> <{item}> .",
+        "?past <{}> <{}> ; <{}> <{item}> . {}",
         v::ext::TYPE,
         v::STATUS_EVENT_CLASS,
-        v::ON_ITEM
+        v::ON_ITEM,
+        not_imported("?past")
     ));
     Ok((
         format!("INSERT {{ {triples} }} WHERE {{ {guard} {{ SELECT (COUNT(?past) + 1 AS ?sequence) WHERE {{ {previous} }} }} }}"),
@@ -74,7 +75,7 @@ pub(super) fn preserve_close(client: &StoreClient<'_, '_>, item: &str, now: u64)
     ));
     let guard = client.in_graph(&format!(
         "{} <{item}> <{}> <{}> ; <{}> ?at . OPTIONAL {{ <{item}> <{}> ?source }} \
-         FILTER NOT EXISTS {{ ?past <{}> <{}> ; <{}> <{item}> ; <{}> <{}> ; <{}> ?at }}",
+         FILTER NOT EXISTS {{ ?past <{}> <{}> ; <{}> <{item}> ; <{}> <{}> ; <{}> ?at . {} }}",
         live(item),
         v::STATUS,
         v::CLOSED,
@@ -85,7 +86,8 @@ pub(super) fn preserve_close(client: &StoreClient<'_, '_>, item: &str, now: u64)
         v::ON_ITEM,
         v::STATUS,
         v::CLOSED,
-        v::ext::CREATED
+        v::ext::CREATED,
+        not_imported("?past")
     ));
     Ok(format!("INSERT {{ {triples} }} WHERE {{ {guard} }}"))
 }

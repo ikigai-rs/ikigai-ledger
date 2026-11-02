@@ -40,6 +40,7 @@
 //! …:{ledger}:item:{id}:closed             Exists        is it closed?                    read
 //! …:{ledger}:item:{id}:about              Sink Delete   add / remove what it is about    write
 //! …:{ledger}:item:{id}:history            Source        every event, oldest first        read
+//! …:{ledger}:history                      Sink          an importer's past events        write
 //! ```
 //!
 //! # Composition: this crate owns no bytes

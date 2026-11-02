@@ -2,7 +2,8 @@
 //! on one item, oldest first, under the item's read grant.
 //!
 //! The events are the ones the item's updates wrote: claims, releases, closes and reopens, and
-//! edits with what they changed. This reads them and decides nothing.
+//! edits with what they changed, and any an importer recorded afterward (ledger #2843), which
+//! every face says are imported. This reads them and decides nothing.
 //!
 //! ⚠ **A ledger stays a boundary.** An event on a cross-ledger link names the other item by its
 //! IRI, which the link itself shows this ledger's readers, and this face looks up nothing of it,
@@ -111,11 +112,20 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
         "revision" => 3,
         _ => 4,
     });
+    let imported = node.one(v::CREATED_SOURCE).is_some();
     json::HistoryEvent {
         iri,
         kind,
         at: at.map(iso8601),
         committer: node.one(v::COMMITTER),
+        imported,
+        source_id: node.one(v::EVENT_KEY),
+        author: node.one(v::AUTHOR),
+        committed: imported
+            .then(|| node.one(v::COMMITTED_AT))
+            .flatten()
+            .and_then(|when| model::millis(&when))
+            .map(iso8601),
         label: node.one(v::EDIT_LABEL),
         state_from: node.one(v::STATE_FROM),
         state_to: node.one(v::STATE_TO),
@@ -198,13 +208,18 @@ fn line(event: &json::HistoryEvent) -> String {
         Some(object) => what.push_str(&format!(" {object}")),
         None => what.push_str(" (no object recorded: nothing changed, or written before 0.18.0)"),
     }
-    if let Some(committer) = &event.committer {
-        what.push_str(&format!("  by {committer}"));
+    match (&event.author, &event.committer) {
+        (Some(author), Some(committer)) => what.push_str(&format!(
+            "  by {author} (claimed by an importer)  committer {committer}"
+        )),
+        (_, Some(committer)) => what.push_str(&format!("  by {committer}")),
+        _ => {}
     }
-    format!(
-        "{}  {what}\n",
-        event.at.as_deref().unwrap_or("an unknown time")
-    )
+    let at = event.at.as_deref().unwrap_or("an unknown time");
+    if event.imported {
+        return format!("{at} (claimed)  imported {what}\n");
+    }
+    format!("{at}  {what}\n")
 }
 
 /// `urn:iki:ledger:{ledger}:item:{id}:history`.

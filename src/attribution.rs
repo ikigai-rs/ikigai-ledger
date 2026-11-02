@@ -436,6 +436,39 @@ pub async fn resolve_closed_at(
     Ok(Some(millis))
 }
 
+/// The import principal writing past-dated history (ledger #2843), or a refusal that says to
+/// write the change itself. A caller that cannot read the participants graph is refused the same
+/// way, since nothing it can read says it is enrolled.
+pub(crate) async fn require_importer(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    participants: Option<&str>,
+) -> Result<String> {
+    let why = match (Attribution::committer(inv)?.committer, participants) {
+        (None, _) => "this capability carries no principal, so nothing says it is one".to_string(),
+        (Some(committer), None) => {
+            format!("{committer} is not one: this host names no participants graph")
+        }
+        (Some(committer), Some(graph)) => {
+            if !inv.capability.allows(&ikigai_store::cap_read_graph(graph)) {
+                format!(
+                    "{committer} cannot read the participants graph <{graph}> that would say it \
+                     is one"
+                )
+            } else if enrolled_as_importer(client, participants, &committer).await? {
+                return Ok(committer);
+            } else {
+                format!("{committer} is not one (ledger:Importer in <{graph}>)")
+            }
+        }
+    };
+    Err(Error::Denied(format!(
+        "only an import or sync principal may record past-dated history, and {why}. Write the \
+         change itself instead (claim, release, label, link, state, close, reopen), and the ledger \
+         records its event as it happens"
+    )))
+}
+
 /// The explicit, one-time backfill of `ledger:handedBackBy` (ledger #2819), as two SPARQL
 /// texts over a ledger's graph `graph`: a `SELECT` counting what it would recover, and the
 /// `INSERT` that recovers it. Never run at startup, like the close-time backfill: an operator

@@ -200,6 +200,8 @@ term! {
     KEY => "key";
     /// `ledger:commentKey` — the caller's own name for a comment, apart from `ledger:key`.
     COMMENT_KEY => "commentKey";
+    /// `ledger:eventKey` — an imported event's id at its source, unique per ledger.
+    EVENT_KEY => "eventKey";
     /// `ledger:label`
     LABEL => "label";
     /// `ledger:author`
