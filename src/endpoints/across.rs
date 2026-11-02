@@ -41,6 +41,8 @@
 //! reach a target linked while that close was in flight (the close says so). A host's doctor
 //! sees both graphs and this crate does not; see `README.md`, "Links across ledgers".
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 /// The link types a mirror is kept for: `related` needs none, because nothing in the target
@@ -109,61 +111,89 @@ pub(crate) async fn outbound(
     client: &StoreClient<'_, '_>,
     subject: &str,
 ) -> Result<Vec<(String, String)>> {
-    let rows = client
-        .select(&format!(
-            "SELECT ?type ?target WHERE {{ {} }} ORDER BY ?type ?target",
-            client.in_graph(&format!(
-                "?link <{}> <{}> ; <{}> <{subject}> ; <{}> ?type ; <{}> ?target .",
-                v::ext::TYPE,
-                v::LINK_CLASS,
-                v::ON_ITEM,
-                v::LINK_TYPE,
-                v::LINK_TARGET
-            ))
-        ))
-        .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            Some((
-                row.get("type")?.value.clone(),
-                row.get("target")?.value.clone(),
-            ))
-        })
-        .collect())
+    Ok(outbound_of(client, &[subject])
+        .await?
+        .remove(subject)
+        .unwrap_or_default())
 }
 
-/// The present mirrors on `item`: `(predicate, subject, open)`, sorted.
-pub(crate) async fn inbound(
+/// [`outbound`] for a whole page of `subjects` at once, by subject: one query per `VALUES`
+/// list (one for any page a listing serves), never one per item (ledger #2927).
+pub(crate) async fn outbound_of(
     client: &StoreClient<'_, '_>,
-    item: &str,
-) -> Result<Vec<(String, String, bool)>> {
-    let rows = client
-        .select(&format!(
-            "SELECT ?type ?subject ?open WHERE {{ {} }} ORDER BY ?type ?subject",
-            client.in_graph(&format!(
-                "?mirror <{}> <{}> ; <{}> <{item}> ; <{}> ?type ; <{}> ?subject ; <{}> ?open ; \
-                 <{}> true .",
-                v::ext::TYPE,
-                v::MIRROR_CLASS,
-                v::ON_ITEM,
-                v::LINK_TYPE,
-                v::MIRROR_OF,
-                v::SUBJECT_OPEN,
-                v::LINK_PRESENT
+    subjects: &[&str],
+) -> Result<BTreeMap<String, Vec<(String, String)>>> {
+    let mut by_subject: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for values in model::values_lists(subjects)? {
+        let rows = client
+            .select(&format!(
+                "SELECT ?item ?type ?target WHERE {{ {} }} ORDER BY ?item ?type ?target",
+                client.in_graph(&format!(
+                    "VALUES ?item {{ {values} }}\n\
+                     ?link <{}> <{}> ; <{}> ?item ; <{}> ?type ; <{}> ?target .",
+                    v::ext::TYPE,
+                    v::LINK_CLASS,
+                    v::ON_ITEM,
+                    v::LINK_TYPE,
+                    v::LINK_TARGET
+                ))
             ))
-        ))
-        .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            Some((
-                row.get("type")?.value.clone(),
-                row.get("subject")?.value.clone(),
-                row.get("open")?.value == "true",
+            .await?;
+        for row in &rows {
+            if let (Some(item), Some(predicate), Some(target)) =
+                (row.get("item"), row.get("type"), row.get("target"))
+            {
+                by_subject
+                    .entry(item.value.clone())
+                    .or_default()
+                    .push((predicate.value.clone(), target.value.clone()));
+            }
+        }
+    }
+    Ok(by_subject)
+}
+
+/// The present mirrors on each of `items`, by item: `(predicate, subject, open)`, sorted. One
+/// query per `VALUES` list, as [`outbound_of`].
+pub(crate) async fn inbound_of(
+    client: &StoreClient<'_, '_>,
+    items: &[&str],
+) -> Result<BTreeMap<String, Vec<(String, String, bool)>>> {
+    let mut by_item: BTreeMap<String, Vec<(String, String, bool)>> = BTreeMap::new();
+    for values in model::values_lists(items)? {
+        let rows = client
+            .select(&format!(
+                "SELECT ?item ?type ?subject ?open WHERE {{ {} }} ORDER BY ?item ?type ?subject",
+                client.in_graph(&format!(
+                    "VALUES ?item {{ {values} }}\n\
+                     ?mirror <{}> <{}> ; <{}> ?item ; <{}> ?type ; <{}> ?subject ; <{}> ?open ; \
+                     <{}> true .",
+                    v::ext::TYPE,
+                    v::MIRROR_CLASS,
+                    v::ON_ITEM,
+                    v::LINK_TYPE,
+                    v::MIRROR_OF,
+                    v::SUBJECT_OPEN,
+                    v::LINK_PRESENT
+                ))
             ))
-        })
-        .collect())
+            .await?;
+        for row in &rows {
+            if let (Some(item), Some(predicate), Some(subject), Some(open)) = (
+                row.get("item"),
+                row.get("type"),
+                row.get("subject"),
+                row.get("open"),
+            ) {
+                by_item.entry(item.value.clone()).or_default().push((
+                    predicate.value.clone(),
+                    subject.value.clone(),
+                    open.value == "true",
+                ));
+            }
+        }
+    }
+    Ok(by_item)
 }
 
 /// An item as its own read shows it: its links into other ledgers beside its local edges, and
@@ -173,28 +203,50 @@ pub(super) async fn decorate(
     client: &StoreClient<'_, '_>,
     item: &mut Item,
 ) -> Result<()> {
-    for (predicate, target) in outbound(client, &item.iri).await? {
-        let list = match predicate.as_str() {
-            p if p == v::BLOCKS => &mut item.blocks,
-            p if p == v::PARENT => &mut item.parents,
-            _ => &mut item.related,
-        };
-        if !list.contains(&target) {
-            list.push(target);
-            list.sort();
-        }
+    decorate_all(inv, client, std::slice::from_mut(item)).await
+}
+
+/// [`decorate`] for a page of items, in two queries whatever its length: one for the links
+/// out and one for the mirrors in (ledger #2927). A listing row is the same item object its
+/// own read shows.
+pub(super) async fn decorate_all(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    items: &mut [Item],
+) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
     }
-    item.mirrored = inbound(client, &item.iri)
-        .await?
-        .into_iter()
-        .map(|(predicate, subject, open)| model::Mirrored {
-            kind: short(&predicate).to_string(),
-            readable: Ledger::of_subject(&subject)
-                .is_some_and(|l| inv.capability.allows(&l.cap_read())),
-            subject,
-            open,
-        })
-        .collect();
+    let iris: Vec<&str> = items.iter().map(|i| i.iri.as_str()).collect();
+    let mut outbound = outbound_of(client, &iris).await?;
+    let mut inbound = inbound_of(client, &iris).await?;
+    for item in items.iter_mut() {
+        for (predicate, target) in outbound.remove(&item.iri).unwrap_or_default() {
+            let list = match predicate.as_str() {
+                p if p == v::BLOCKS => &mut item.blocks,
+                p if p == v::PARENT => &mut item.parents,
+                _ => &mut item.related,
+            };
+            if !list.contains(&target) {
+                list.push(target);
+                list.sort();
+            }
+        }
+        // The caller's read on the subject's ledger decides whether the line says where to
+        // read more, as it always has on `item:{id}`.
+        item.mirrored = inbound
+            .remove(&item.iri)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(predicate, subject, open)| model::Mirrored {
+                kind: short(&predicate).to_string(),
+                readable: Ledger::of_subject(&subject)
+                    .is_some_and(|l| inv.capability.allows(&l.cap_read())),
+                subject,
+                open,
+            })
+            .collect();
+    }
     Ok(())
 }
 

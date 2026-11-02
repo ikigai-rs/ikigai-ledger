@@ -220,9 +220,9 @@ pub struct Item {
     #[serde(default)]
     pub children: Vec<ItemRef>,
     /// The INBOUND `blocks` and `parent` edges from items of OTHER ledgers, as this ledger's
-    /// mirror holds them: the subject's IRI and status, nothing else (ledger #2829). Only on
-    /// `item:{id}`. Added in 0.17.0; absent when empty, so earlier documents read and render
-    /// as before.
+    /// mirror holds them: the subject's IRI and status, nothing else (ledger #2829). On
+    /// `item:{id}` since 0.17.0 and on every `items` row since 0.18.0 (ledger #2927); not yet
+    /// on `next`'s items. Absent when empty, so earlier documents read and render as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mirrored: Vec<Mirrored>,
     /// Its comments, oldest first.

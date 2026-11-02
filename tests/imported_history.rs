@@ -1764,6 +1764,9 @@ fn measure_an_import_at_the_profile_of_ledger_2922() {
     timed("next, again", || read("next", &[]));
     timed("item read", || read("item:17", &[]));
     timed("items", || read("items", &[]));
+    timed("items, json", || {
+        read("items", &[("as", "application/json")])
+    });
     timed("counts", || read("counts", &[]));
     write("close #17", Verb::Sink, "close", &[("item", "17")]);
     write("reopen #17", Verb::Sink, "reopen", &[("item", "17")]);

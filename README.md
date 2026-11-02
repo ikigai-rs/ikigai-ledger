@@ -628,9 +628,11 @@ $ source urn:iki:ledger:acme:item:7                                    # under a
   ledger after every link, unlink, close and reopen of the subject. `blocks` and `parent` are
   mirrored and `related` is not. The target's `next` reads its own graph only and excludes an item
   with an open blocker elsewhere (`blocked_elsewhere` in JSON); a store write cuts its cache like
-  any other. The target's item faces show `blocked-by:` and `child:` lines (`mirrored` in JSON),
+  any other. The target's item faces show `blocked-by:` and `child:` lines (`mirrored` in JSON, on
+  `item:{id}` and, since 0.18.0, on every `items` row),
   saying "not readable under your grants" when the reader holds no read grant on the subject's
-  ledger; the subject's faces show the edge among its `blocks:`, `parent:` and `related:` lines.
+  ledger; the subject's faces show the edge among its `blocks:`, `parent:` and `related:` lines,
+  and its JSON and Turtle `items` rows carry it too (since 0.18.0).
 - **Closing or reopening the subject writes every mirror**, so a closer needs the target's store
   grants too; without them the close is refused before anything changes, naming the grants. A
   subject that carries a `blocks` or `parent` link across is not deleted until it is unlinked. Deleting the target
@@ -2060,6 +2062,14 @@ bound, where 0.17.0 refused past 250,000 quads and, with the bound raised, took 
 The removal is not batched, and each update stays atomic. An item with more than 250 dependents, or a
 blank-node one, falls back to the old form, inside the bound only. See "What a delete and a purge
 cost".
+
+**A listing row is the item its own read shows (#2927).** The JSON and Turtle `items` faces now
+carry an item's links into other ledgers and, in JSON, its `mirrored` edges, as `item:{id}` does;
+until 0.18.0 a row held only the links within its ledger and no `mirrored`. They are read for the
+whole page in two queries (links out, mirrors in), never one per item, with the same
+`not readable under your grants` rule. At #2922's profile (3,690 items, 447,332 triples) a JSON
+page of 50 took 0.017 s, against 0.019 s before, which is noise. ⚠ `next`'s items do not carry them
+yet. The plain face is unchanged.
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 
