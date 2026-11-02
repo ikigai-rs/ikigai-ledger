@@ -312,6 +312,22 @@ term! {
     ALIAS_VALUE => "aliasValue";
     /// `ledger:aliasOf` — the item an alias names.
     ALIAS_OF => "aliasOf";
+    /// `ledger:Link` — an edge to an item of ANOTHER ledger, in the subject's graph (ledger 2829).
+    LINK_CLASS => "Link";
+    /// `ledger:Mirror` — what the target's graph knows of such an edge (ledger #2829).
+    MIRROR_CLASS => "Mirror";
+    /// `ledger:linkType` — `ledger:blocks`, `ledger:parent` or `ledger:related`.
+    LINK_TYPE => "linkType";
+    /// `ledger:linkTarget` — the item of another ledger a `ledger:Link` points at.
+    LINK_TARGET => "linkTarget";
+    /// `ledger:mirrorOf` — the subject, in another ledger, a `ledger:Mirror` reflects.
+    MIRROR_OF => "mirrorOf";
+    /// `ledger:subjectOpen` — whether that subject is open.
+    SUBJECT_OPEN => "subjectOpen";
+    /// `ledger:linkPresent` — whether the edge a mirror reflects still exists.
+    LINK_PRESENT => "linkPresent";
+    /// `ledger:mirrorVersion` — the subject's event count the mirror was written from.
+    MIRROR_VERSION => "mirrorVersion";
 }
 
 /// The `@prefix` header every Turtle face this module emits carries.
@@ -325,7 +341,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 20] = [
+pub const STRUCTURAL_CLASSES: [&str; 22] = [
     COMMENT_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
@@ -346,6 +362,8 @@ pub const STRUCTURAL_CLASSES: [&str; 20] = [
     CLAIM_EVENT_CLASS,
     RELEASE_EVENT_CLASS,
     EDIT_EVENT_CLASS,
+    LINK_CLASS,
+    MIRROR_CLASS,
 ];
 
 /// The close reasons, as `(short name, IRI)` — the `one_of` an ArgSpec declares and the
