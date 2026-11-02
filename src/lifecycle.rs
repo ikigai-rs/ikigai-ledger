@@ -26,10 +26,14 @@
 //! move, the state resource refuses a `(from=, to=)` pair it does not declare; one that declares
 //! none, as [`Lifecycle::kata_flight`] does, lets any state move to any other.
 //!
+//! Every lifecycle says its version, and each transition's event records the version that judged
+//! it (`ledger:lifecycleVersion`), so a history keeps its meaning after the document changes.
+//!
 //! ```
 //! use ikigai_ledger::lifecycle::{Lifecycle, FILED};
 //! let flight = Lifecycle::kata_flight();
 //! assert_eq!(flight.name(), "kata-flight");
+//! assert_eq!(flight.version(), "1");
 //! let names: Vec<&str> = flight.states().iter().map(|s| s.name.as_str()).collect();
 //! assert_eq!(names, [FILED, "queued", "reviewed", "resolving", "refining", "shipping"]);
 //! assert!(flight.state("resolving").unwrap().in_flight);
@@ -86,6 +90,7 @@ pub struct LifecycleState {
 pub struct Lifecycle {
     name: String,
     iri: String,
+    version: String,
     summary: Option<String>,
     states: Vec<LifecycleState>,
     graph: Graph,
@@ -94,8 +99,9 @@ pub struct Lifecycle {
 impl Lifecycle {
     /// Parse a lifecycle from Turtle.
     ///
-    /// The document names exactly one `ledger:Lifecycle` at `urn:iki:ledger:lifecycle:{name}`
-    /// and lists its states with `ledger:hasState`. Each state carries `rdfs:label` (its name),
+    /// The document names exactly one `ledger:Lifecycle` at `urn:iki:ledger:lifecycle:{name}`,
+    /// says its version with `owl:versionInfo` or, if it has none, `ledger:lifecycleVersion`, and
+    /// lists its states with `ledger:hasState`. Each state carries `rdfs:label` (its name),
     /// `ledger:order`, `ledger:inFlight` and — when it is not in flight — `ledger:drain`, and may
     /// list the states it can move to with `ledger:movesTo`.
     ///
@@ -104,8 +110,8 @@ impl Lifecycle {
     /// [`Error::InvalidArgument`] naming what is wrong, for each of the rules the state
     /// resource relies on: a state's IRI is `{lifecycle IRI}:{name}`; names and orders are
     /// unique; a state is in flight or names a drain, never both and never neither; and
-    /// [`FILED`] is declared, first, and not in flight; and a `ledger:movesTo` goes from one of
-    /// these states to another of them.
+    /// [`FILED`] is declared, first, and not in flight; a `ledger:movesTo` goes from one of these
+    /// states to another of them; and the document has one version, on one line.
     pub fn parse(turtle: &str) -> Result<Lifecycle> {
         let bad = |detail: String| Error::InvalidArgument {
             name: "lifecycle".to_string(),
@@ -151,6 +157,7 @@ impl Lifecycle {
             .ok_or_else(|| bad(format!("`{iri}` is not under `{PREFIX}`")))?
             .to_string();
         check_name(&name, "lifecycle")?;
+        let version = read_version(&graph, &subject, &name)?;
 
         let literal = |s: &NamedNode, p: &str| -> Option<String> {
             match graph
@@ -250,6 +257,7 @@ impl Lifecycle {
         Ok(Lifecycle {
             name,
             iri,
+            version,
             summary,
             states,
             graph,
@@ -270,6 +278,11 @@ impl Lifecycle {
     /// `urn:iki:ledger:lifecycle:{name}`.
     pub fn iri(&self) -> &str {
         &self.iri
+    }
+
+    /// This document's version, which every transition checked against it records.
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     /// What it is for, in a sentence, when the document said.
@@ -347,6 +360,84 @@ impl Lifecycle {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// The version the document says it is: its `owl:versionInfo` or, if it has none, its
+/// `ledger:lifecycleVersion`.
+///
+/// ★ Required, so that every transition can record one and an event with none can only be older
+/// than the term. And the term is looked for across the whole document, as a move is: on anything
+/// but the lifecycle it would otherwise be dropped in silence.
+fn read_version(graph: &Graph, subject: &NamedNode, name: &str) -> Result<String> {
+    let bad = |detail: String| Error::InvalidArgument {
+        name: "lifecycle".to_string(),
+        detail,
+    };
+    let iri = subject.as_str();
+    let term = NamedNode::new_unchecked(v::LIFECYCLE_VERSION);
+    for triple in graph.iter().filter(|t| t.predicate == term.as_ref()) {
+        if triple.subject != subject.as_ref().into() {
+            let on = match triple.subject {
+                NamedOrBlankNodeRef::NamedNode(n) => n.as_str().to_string(),
+                blank => blank.to_string(),
+            };
+            return Err(bad(format!(
+                "`{on}` declares a ledger:lifecycleVersion and is not the lifecycle `{name}`; put \
+                 it on `{iri}`"
+            )));
+        }
+    }
+    let held = |predicate: &str| -> Vec<oxrdf::TermRef<'_>> {
+        graph
+            .objects_for_subject_predicate(
+                subject.as_ref(),
+                NamedNode::new_unchecked(predicate).as_ref(),
+            )
+            .collect()
+    };
+    let mut versions = held(v::ext::VERSION_INFO);
+    if versions.is_empty() {
+        versions = held(v::LIFECYCLE_VERSION);
+    }
+    let version = match versions.as_slice() {
+        [] => {
+            return Err(bad(format!(
+                "`{name}` declares no version, and every transition records the version it was \
+                 checked against: give `{iri}` an owl:versionInfo or, if the document has none, a \
+                 ledger:lifecycleVersion"
+            )))
+        }
+        [one] => *one,
+        many => {
+            let mut said: Vec<String> = many
+                .iter()
+                .map(|term| match term {
+                    oxrdf::TermRef::Literal(l) => l.value().to_string(),
+                    other => other.to_string(),
+                })
+                .collect();
+            said.sort();
+            return Err(bad(format!(
+                "`{name}` declares more than one version ({}); a document is one version of its \
+                 lifecycle",
+                said.join(", ")
+            )));
+        }
+    };
+    let oxrdf::TermRef::Literal(version) = version else {
+        return Err(bad(format!(
+            "the version of `{name}` is {version}, which is not a literal; it is text that every \
+             transition records"
+        )));
+    };
+    let version = version.value();
+    if version.trim().is_empty() || version.chars().any(char::is_control) {
+        return Err(bad(format!(
+            "the version of `{name}` is {version:?}; it must be one line with something on it, \
+             because a history prints it on an event's line"
+        )));
+    }
+    Ok(version.to_string())
 }
 
 /// Put each `ledger:movesTo` in the document on the state it leaves.
@@ -548,6 +639,7 @@ mod tests {
         @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
         <urn:iki:ledger:lifecycle:tiny> a ledger:Lifecycle ;
+            ledger:lifecycleVersion "1" ;
             ledger:hasState <urn:iki:ledger:lifecycle:tiny:filed>, <urn:iki:ledger:lifecycle:tiny:doing> .
         <urn:iki:ledger:lifecycle:tiny:filed> rdfs:label "filed" ; ledger:order 0 ;
             ledger:inFlight false ; ledger:drain "me" .

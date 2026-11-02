@@ -37,6 +37,13 @@
 //! did in between, the update leaves `from` or it does nothing (`tests/lifecycle_moves.rs` forces
 //! it).
 //!
+//! # An event says which document allowed it
+//!
+//! A transition's event records `ledger:lifecycleVersion`, the version of the lifecycle that judged
+//! it, in the same update (ledger #2864). A host loads one document at a time, so that is the
+//! version of the [`Lifecycle`] the pair was just checked against. It is what lets a rename cross
+//! two versions and still read back: `tests/lifecycle_version.rs` walks one.
+//!
 //! # The assertions are names, and Exists answers them
 //!
 //! A loop that has just claimed an item, moved it, or closed it asks `exists` on the name of
@@ -459,10 +466,12 @@ impl Endpoint for StateEndpoint {
                     let node = event_iri(&item.iri, "edit", now)?;
                     let mut event = edit_event_triples(&node, &item.iri, "state", &who, now);
                     event.push_str(&format!(
-                        "\n<{node}> <{}> ?left ; <{}> <{}> .",
+                        "\n<{node}> <{}> ?left ; <{}> <{}> ; <{}> {} .",
                         v::STATE_FROM,
                         v::STATE_TO,
-                        to.iri
+                        to.iri,
+                        v::LIFECYCLE_VERSION,
+                        literal(lifecycle.version()),
                     ));
                     client
                         .update(&cas(&client, &item.iri, from, to, &token, &event, now))

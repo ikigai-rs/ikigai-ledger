@@ -54,6 +54,8 @@ pub mod ext {
     pub const LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
     /// `rdfs:comment`
     pub const COMMENT: &str = "http://www.w3.org/2000/01/rdf-schema#comment";
+    /// `owl:versionInfo`
+    pub const VERSION_INFO: &str = "http://www.w3.org/2002/07/owl#versionInfo";
     /// `prov:generatedAtTime`
     pub const GENERATED_AT: &str = "http://www.w3.org/ns/prov#generatedAtTime";
     /// `prov:invalidatedAtTime`
@@ -127,6 +129,8 @@ term! {
     STATE_FROM => "stateFrom";
     /// `ledger:stateTo` — the state a `state` edit moved to.
     STATE_TO => "stateTo";
+    /// `ledger:lifecycleVersion` — the lifecycle version a `state` edit was checked against.
+    LIFECYCLE_VERSION => "lifecycleVersion";
     /// `ledger:editLabel` — the label a `label` or `unlabel` edit added or removed.
     EDIT_LABEL => "editLabel";
     /// `ledger:editTarget` — the other item of a link, or the target of an about.
@@ -454,6 +458,18 @@ mod tests {
         assert_eq!(MOVES_TO, "https://ikigai-rs.dev/ns/ledger#movesTo");
         assert!(ALL.contains(&MOVES_TO));
         assert!(VOCABULARY_TTL.contains("ledger:movesTo a rdf:Property"));
+    }
+
+    /// A lifecycle a host wrote may name this term and a query over the events does, so its
+    /// spelling is a contract.
+    #[test]
+    fn lifecycle_version_is_the_term_a_state_event_writes() {
+        assert_eq!(
+            LIFECYCLE_VERSION,
+            "https://ikigai-rs.dev/ns/ledger#lifecycleVersion"
+        );
+        assert!(ALL.contains(&LIFECYCLE_VERSION));
+        assert!(VOCABULARY_TTL.contains("ledger:lifecycleVersion a rdf:Property"));
     }
 
     #[test]

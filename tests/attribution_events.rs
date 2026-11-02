@@ -558,7 +558,14 @@ fn every_edit_that_creates_no_node_records_its_committer() {
             .into_iter()
             .filter(|key| {
                 !key.starts_with("state")
-                    && !["editLabel", "editTarget", "editLinkType", "editField"].contains(key)
+                    && ![
+                        "editLabel",
+                        "editTarget",
+                        "editLinkType",
+                        "editField",
+                        "lifecycleVersion",
+                    ]
+                    .contains(key)
             })
             .collect();
         assert_eq!(
