@@ -245,8 +245,8 @@ fn an_import_principal_claims_a_foreign_author_and_authored_dates() {
     has(&turtle, "ledger:modifiedSource \"import\"");
     has(&turtle, &format!("ledger:committer <{IMPORTER}>"));
 
-    // A comment with an authored `created`. Writing it stamps the item's `modified` with the
-    // kernel's time, which ends that claim.
+    // A comment with an authored `created`. Since 0.18.0 a claimed date moves the item's
+    // `modified` only forward (ledger #2928), so this earlier one leaves the claim standing.
     comment(
         &kernel,
         &writer(IMPORTER),
@@ -261,7 +261,7 @@ fn an_import_principal_claims_a_foreign_author_and_authored_dates() {
              committed by {IMPORTER}\n"
         ),
     );
-    lacks(&plain, "  updated:  2020");
+    has(&plain, "  updated:  2020-02-03T04:05:06.000Z (claimed)\n");
     let note = &json["item"]["comments"][0];
     assert_eq!(note["time"], "2020-01-05T00:00:00.000Z");
     assert_eq!(
@@ -270,7 +270,7 @@ fn an_import_principal_claims_a_foreign_author_and_authored_dates() {
     );
     assert_eq!(
         json["item"]["attribution"]["claimed_dates"],
-        serde_json::json!(["created"])
+        serde_json::json!(["created", "modified"])
     );
     has(&turtle, "ledger:createdSource \"import\"");
 }
@@ -429,4 +429,157 @@ fn a_write_without_a_principal_keeps_free_text_and_reads_it_as_claimed() {
     );
     has(&turtle, "ledger:author \"brian\"");
     lacks(&turtle, "ledger:committer");
+}
+
+// ------------------------- an importer's claimed dates and the item's `modified` (ledger #2928)
+
+/// The item's JSON `modified` and its claimed dates.
+fn modified(kernel: &Kernel, number: &str) -> (String, serde_json::Value) {
+    let json: serde_json::Value = serde_json::from_str(&source(
+        kernel,
+        &at(&format!("item:{number}")),
+        &[("as", "application/json")],
+    ))
+    .expect("JSON");
+    (
+        json["item"]["modified"].as_str().unwrap().to_string(),
+        json["item"]["attribution"]["claimed_dates"].clone(),
+    )
+}
+
+/// ★ The reproduction (ledger #2928): an importer files with the source's `modified`, then
+/// replays the item's past (a comment dated at the source, a close dated at the source). Until
+/// 0.18.0 each of those writes stamped the kernel's time, so `modified` ended at the import and
+/// `priority-recency` ranked the item as just updated. A claimed date moves `modified` only to
+/// the later of the two, so a past date leaves it where the filing put it.
+#[test]
+fn an_importers_past_comment_and_close_leave_the_claimed_modified() {
+    let kernel = kernel();
+    let importer = writer(IMPORTER);
+    file(
+        &kernel,
+        &importer,
+        &[
+            ("created", "2020-01-02T03:04:05Z"),
+            ("modified", "2020-02-03T04:05:06Z"),
+        ],
+    )
+    .unwrap();
+    comment(&kernel, &importer, &[("created", "2020-01-05T00:00:00Z")]).unwrap();
+    assert_eq!(
+        modified(&kernel, "1"),
+        (
+            "2020-02-03T04:05:06.000Z".to_string(),
+            serde_json::json!(["created", "modified"])
+        ),
+        "a past comment leaves the claimed modified"
+    );
+    try_as(
+        &kernel,
+        &importer,
+        Verb::Sink,
+        &at("close"),
+        &[("item", "1"), ("closed-at", "2020-01-20T00:00:00Z")],
+    )
+    .unwrap();
+    let (plain, json, turtle) = faces(&kernel);
+    assert_eq!(json["item"]["modified"], "2020-02-03T04:05:06.000Z");
+    has(&plain, "  updated:  2020-02-03T04:05:06.000Z (claimed)\n");
+    has(&turtle, "ledger:modifiedSource \"import\"");
+}
+
+/// A claimed date after the current `modified` moves it there, and the item says it is claimed.
+#[test]
+fn a_claimed_date_after_the_modified_moves_it_to_that_date() {
+    let kernel = kernel();
+    let importer = writer(IMPORTER);
+    file(
+        &kernel,
+        &importer,
+        &[
+            ("created", "2020-01-01T00:00:00Z"),
+            ("modified", "2020-02-03T04:05:06Z"),
+        ],
+    )
+    .unwrap();
+    comment(&kernel, &importer, &[("created", "2020-03-01T00:00:00Z")]).unwrap();
+    let (when, claimed) = modified(&kernel, "1");
+    assert_eq!(when, "2020-03-01T00:00:00.000Z");
+    assert_eq!(claimed, serde_json::json!(["created", "modified"]));
+    try_as(
+        &kernel,
+        &importer,
+        Verb::Sink,
+        &at("close"),
+        &[("item", "1"), ("closed-at", "2020-04-01T00:00:00Z")],
+    )
+    .unwrap();
+    assert_eq!(modified(&kernel, "1").0, "2020-04-01T00:00:00.000Z");
+}
+
+/// A write without a claimed date stamps the kernel's time, the importer's and anyone else's.
+#[test]
+fn a_write_without_a_claimed_date_still_stamps_now() {
+    let kernel = kernel();
+    file(
+        &kernel,
+        &writer(IMPORTER),
+        &[("modified", "2020-02-03T04:05:06Z")],
+    )
+    .unwrap();
+    comment(&kernel, &writer(IMPORTER), &[]).unwrap();
+    let (when, claimed) = modified(&kernel, "1");
+    assert!(
+        when.starts_with("2026-"),
+        "the importer's undated write: {when}"
+    );
+    assert_eq!(claimed, serde_json::json!([]));
+
+    file(
+        &kernel,
+        &writer(IMPORTER),
+        &[("modified", "2020-02-03T04:05:06Z")],
+    )
+    .unwrap();
+    try_as(
+        &kernel,
+        &writer(ADA),
+        Verb::Sink,
+        &at("comment"),
+        &[("item", "2"), ("content", "an ordinary note")],
+    )
+    .unwrap();
+    let (when, claimed) = modified(&kernel, "2");
+    assert!(
+        when.starts_with("2026-"),
+        "an ordinary principal's write: {when}"
+    );
+    assert_eq!(claimed, serde_json::json!([]));
+}
+
+/// `next` under `priority-recency` ranks an imported set as the source did: the item updated
+/// later at the source first, however its past was replayed.
+#[test]
+fn next_ranks_an_imported_set_as_the_source_did() {
+    let kernel = kernel();
+    let importer = writer(IMPORTER);
+    for (title, when) in [
+        ("Older at the source", "2020-01-01T00:00:00Z"),
+        ("Newer at the source", "2020-06-01T00:00:00Z"),
+    ] {
+        try_as(
+            &kernel,
+            &importer,
+            Verb::Sink,
+            &at("append"),
+            &[("content", title), ("modified", when)],
+        )
+        .unwrap();
+    }
+    // The older item's past, replayed after both were filed.
+    comment(&kernel, &importer, &[("created", "2019-12-31T00:00:00Z")]).unwrap();
+    let next = source(&kernel, &at("next"), &[]);
+    let newer = next.find("Newer at the source").expect(&next);
+    let older = next.find("Older at the source").expect(&next);
+    assert!(newer < older, "the source's order: {next}");
 }

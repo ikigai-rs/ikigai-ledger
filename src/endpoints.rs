@@ -930,20 +930,56 @@ fn touch(client: &StoreClient<'_, '_>, item: &str, now: u64) -> String {
 
 /// [`touch`], only while `guard` (a pattern over the ledger's graph) also holds.
 fn touch_when(client: &StoreClient<'_, '_>, item: &str, now: u64, guard: &str) -> String {
+    touch_dated(client, item, now, None, guard)
+}
+
+/// [`touch_when`] for a write that may carry a date an import principal claimed (a comment's
+/// `created=`, a close's `closed-at=`): see [`stamp_terms`].
+fn touch_dated(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    now: u64,
+    claimed: Option<u64>,
+    guard: &str,
+) -> String {
+    let (stamp, source, filter) = stamp_terms(item, now, claimed);
     format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
         client.in_graph(&format!("<{item}> <{}> ?was", v::ext::MODIFIED)),
+        client.in_graph(&format!("<{item}> <{}> {stamp}{source}", v::ext::MODIFIED)),
         client.in_graph(&format!(
-            "<{item}> <{}> {}",
-            v::ext::MODIFIED,
-            datetime(now)
-        )),
-        client.in_graph(&format!(
-            "{} {guard} OPTIONAL {{ <{item}> <{}> ?was }}",
+            "{} {guard} OPTIONAL {{ <{item}> <{}> ?was }}{filter}",
             live(item),
             v::ext::MODIFIED
         ))
     )
+}
+
+/// What a write stamps as the item's `modified`: the value, the triple that marks it claimed,
+/// and the `FILTER` on `?was`, the value it replaces.
+///
+/// ★ **A claimed date moves `modified` only FORWARD** (ledger #2928). An importer files an
+/// item with the source's `modified` and then replays its past: comments dated at the source,
+/// a close dated at the source. Until 0.18.0 each of those stamped the kernel's time, so
+/// `modified` ended at the import, and `priority-recency`, whose tie-break it is, ranked the
+/// item as just updated. Now a write that carries a claimed date sets `modified` to the later
+/// of its current value and that date, marked `ledger:modifiedSource "import"`; a past date
+/// changes nothing. A write with no claimed date stamps `now`, as every write always has, and
+/// the read already treats a `modified` at or after the commit as not claimed. An unreadable
+/// `?was` cannot be compared, and the claimed date replaces it.
+fn stamp_terms(item: &str, now: u64, claimed: Option<u64>) -> (String, String, String) {
+    match claimed {
+        None => (datetime(now), String::new(), String::new()),
+        Some(claimed) => (
+            datetime(claimed),
+            format!(
+                " . <{item}> <{}> {}",
+                v::MODIFIED_SOURCE,
+                literal(attribution::IMPORT)
+            ),
+            format!(" FILTER(COALESCE(?was < {}, true))", datetime(claimed)),
+        ),
+    }
 }
 
 /// Append a comment — the shared path behind `urn:iki:ledger:comment` and behind the
@@ -1059,7 +1095,7 @@ async fn write_keyed_comment(
             &[item],
             &batch(&[
                 insert_on_live(client, &[item], &triples),
-                touch(client, item, now),
+                touch_dated(client, item, now, who.created, ""),
                 handback_update(client, item, handback, "", now),
             ]),
         )
@@ -1107,18 +1143,15 @@ async fn write_keyed_comment(
     };
     // The stamp and the hand-back first: once the comment is in, the key is taken and the
     // guard is false, so a replay changes neither.
+    let (stamp, source, filter) = stamp_terms(item, now, who.created);
     client
         .update(&batch(&[
             format!(
                 "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} {free} }}",
                 client.in_graph(&format!("<{item}> <{}> ?was", v::ext::MODIFIED)),
+                client.in_graph(&format!("<{item}> <{}> {stamp}{source}", v::ext::MODIFIED)),
                 client.in_graph(&format!(
-                    "<{item}> <{}> {}",
-                    v::ext::MODIFIED,
-                    datetime(now)
-                )),
-                client.in_graph(&format!(
-                    "OPTIONAL {{ <{item}> <{}> ?was }}",
+                    "OPTIONAL {{ <{item}> <{}> ?was }}{filter}",
                     v::ext::MODIFIED
                 )),
             ),
@@ -3694,7 +3727,8 @@ impl Endpoint for CloseEndpoint {
             // After the status, so it finds the close that stands: this one's event, or, when
             // the item was already closed, that close's.
             evidence::record(&client, &item.iri, reason, &evidence),
-            touch(&client, &item.iri, now),
+            // A close dated at the source moves `modified` only forward (ledger #2928).
+            touch_dated(&client, &item.iri, now, claimed, ""),
         ];
         ops.extend(
             CLAIM_FIELDS
