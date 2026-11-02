@@ -43,7 +43,7 @@
 
 <https://ikigai-rs.dev/ns/ledger> a owl:Ontology ;
     rdfs:label "ikigai-ledger" ;
-    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841)." ;
+    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841); ledger:evidence: what closed an item, on that close's StatusEvent, beside its ledger:closedReason, which therefore drops its rdfs:domain (ledger #2842)." ;
     owl:versionInfo "0.17.0" .
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -120,11 +120,11 @@ ledger:wontfix a ledger:CloseReason ;
 
 ledger:duplicate a ledger:CloseReason ;
     rdfs:label "duplicate" ;
-    rdfs:comment "Another item covers it. Link the survivor with ledger:related so the pair stays navigable." .
+    rdfs:comment "Another item covers it. Name the survivor as ledger:evidence on the close (since 0.18.0, ledger #2842), which needs no note, about or related beside it." .
 
 ledger:superseded a ledger:CloseReason ;
     rdfs:label "superseded" ;
-    rdfs:comment "Overtaken by later work or a later decision." .
+    rdfs:comment "Overtaken by later work or a later decision, which ledger:evidence on the close can name (since 0.18.0, ledger #2842)." .
 
 ledger:auditNoChange a ledger:CloseReason ;
     rdfs:label "audit-no-change" ;
@@ -150,9 +150,9 @@ ledger:status a rdf:Property ;
     rdfs:comment "An item's current status, or a StatusEvent's resulting status. No domain: a dated event must not become an inferred Item." .
 
 ledger:closedReason a rdf:Property ;
-    rdfs:domain ledger:Item ;
     rdfs:range ledger:CloseReason ;
-    rdfs:label "closedReason" .
+    rdfs:label "closedReason" ;
+    rdfs:comment "An item's verdict while it is closed, removed on reopen. Since 0.18.0 also on the close's StatusEvent, where it stays (ledger #2842): the role of a ledger:evidence is read from it. No domain: a dated event must not become an inferred Item. A close written before 0.18.0 has none on its event." .
 
 ledger:priority a rdf:Property ;
     rdfs:domain ledger:Item ;
@@ -529,7 +529,11 @@ ledger:closedAtSource a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:comment "Where a close time came from, when it is not the kernel clock. The literal backfill marks an approximate legacy close time: present on the item and its backfilled StatusEvent, which retains this provenance after reopen, and DailyCounts observations through the latest estimated close day also carry it. The literal import (since 0.15.0, ledger #2819) marks a close date an import principal (ledger:Importer) claimed with closed-at=, on the item and on the StatusEvent dated by it; the StatusEvent's ledger:committedAt keeps the true time of the write." .
 ledger:StatusEvent a rdfs:Class ;
-    rdfs:comment "A dated close or reopen: onItem names its item, status its resulting status, and dcterms:created its kernel time (or, marked closedAtSource import, the source date an import principal claimed). Since 0.15.0 it carries ledger:committer and ledger:committedAt, so it says who closed or reopened, not only when. Skolemized beneath the item. Retained across reopen so historical daily counts remain true." .
+    rdfs:comment "A dated close or reopen: onItem names its item, status its resulting status, and dcterms:created its kernel time (or, marked closedAtSource import, the source date an import principal claimed). Since 0.15.0 it carries ledger:committer and ledger:committedAt, so it says who closed or reopened, not only when. Since 0.18.0 a close also carries ledger:closedReason and any ledger:evidence. Skolemized beneath the item. Retained across reopen so historical daily counts remain true." .
+
+ledger:evidence a rdf:Property ;
+    rdfs:label "evidence" ;
+    rdfs:comment "What closed an item, on that close's StatusEvent, written in the same update as the close and kept there across a reopen (ledger #2842). Repeatable. Its role is read from where it hangs and the target's kind: a commit on a done close is the fix, an item on a duplicate or superseded close is its target, a test is the proof. An item was resolved when the close was made; any other IRI is stored as given and never fetched. History, not an edge: a delete of the item it names leaves it, as it leaves ledger:editTarget." .
 
 # ---- attribution events (ledger #2819) ---------------------------------------
 # A claim is current state, retracted by its release; these record who claimed,

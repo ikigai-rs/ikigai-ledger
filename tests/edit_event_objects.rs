@@ -784,7 +784,7 @@ fn the_history_tells_the_claim_the_close_and_the_reopen_too() {
         shown,
         [
             "claim worker-1",
-            "closed",
+            "closed done",
             "release worker-1 (closed)",
             "reopened",
         ],

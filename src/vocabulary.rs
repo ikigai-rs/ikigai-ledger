@@ -107,6 +107,8 @@ term! {
     CLOSED_AT_SOURCE => "closedAtSource";
     /// `ledger:StatusEvent`
     STATUS_EVENT_CLASS => "StatusEvent";
+    /// `ledger:evidence` — what closed an item, on that close's status event (ledger #2842).
+    EVIDENCE => "evidence";
     /// `ledger:ClaimEvent` — a first claim or a takeover, as it was taken (ledger #2819).
     CLAIM_EVENT_CLASS => "ClaimEvent";
     /// `ledger:ReleaseEvent` — a claim released, by whom and why (ledger #2819).

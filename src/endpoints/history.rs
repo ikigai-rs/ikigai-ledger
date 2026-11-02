@@ -7,7 +7,8 @@
 //! ⚠ **A ledger stays a boundary.** An event on a cross-ledger link names the other item by its
 //! IRI, which the link itself shows this ledger's readers, and this face looks up nothing of it,
 //! neither its title nor whether it still exists. The target's own history has no event for a
-//! link it only mirrors.
+//! link it only mirrors. A close's evidence is the same (ledger #2842): its IRIs, as the close
+//! stored them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -124,8 +125,40 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
         targets: node.all(v::EDIT_TARGET),
         fields,
         holder: node.one(v::CLAIMED_BY),
-        reason: node.one(v::RELEASE_REASON),
+        reason: node.one(v::RELEASE_REASON).or_else(|| {
+            let reason = node.one(v::CLOSED_REASON)?;
+            v::close_reason_name(&reason).map(str::to_string)
+        }),
+        evidence: node.all(v::EVIDENCE),
     }
+}
+
+/// What a close names: its verdict and its evidence, with an item on a `duplicate` or
+/// `superseded` close named as its target. Empty for a close written before 0.18.0, which holds
+/// neither.
+fn closed(event: &json::HistoryEvent) -> String {
+    let Some(reason) = &event.reason else {
+        return String::new();
+    };
+    let words = evidence::target_words(reason);
+    let (targets, rest): (Vec<&String>, Vec<&String>) = event
+        .evidence
+        .iter()
+        .partition(|iri| words.is_some() && Ledger::item_iri(iri).is_some());
+    let join = |iris: &[&String]| {
+        iris.iter()
+            .map(|iri| iri.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut said = match words {
+        Some(words) if !targets.is_empty() => format!("{words} {}", join(&targets)),
+        _ => reason.clone(),
+    };
+    if !rest.is_empty() {
+        said.push_str(&format!(", evidence {}", join(&rest)));
+    }
+    said
 }
 
 /// An event's line: its time, then what happened in words, then who.
@@ -156,7 +189,8 @@ fn line(event: &json::HistoryEvent) -> String {
             Some(reason) => format!("{holder} ({reason})"),
             None => holder.clone(),
         }),
-        // A defer, a resume, a close and a reopen have nothing more to name.
+        "closed" => Some(closed(event)),
+        // A defer, a resume and a reopen have nothing more to name.
         _ => Some(String::new()),
     };
     match object {
@@ -215,11 +249,11 @@ impl Endpoint for HistoryEndpoint {
         Description::new("ledger-item-history")
             .title("An item's history")
             .summary(
-                "Every event on one item, oldest first: its claims, releases, closes and reopens, \
-                 and its edits with what each changed (the label, the states before and after, \
-                 the link and the other item, the about target, the names of the fields, never \
-                 their values). The other item of a link across ledgers is named by its IRI and \
-                 nothing else.",
+                "Every event on one item, oldest first: its claims, releases, closes with their \
+                 verdict and evidence, reopens, and its edits with what each changed (the label, \
+                 the states before and after, the link and the other item, the about target, the \
+                 names of the fields, never their values). The other item of a link across \
+                 ledgers, and a close's evidence, are named by IRI and nothing else.",
             )
             .verb(Verb::Meta)
             .action(read_action(

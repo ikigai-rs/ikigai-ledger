@@ -500,6 +500,14 @@ pub struct Answer {
     /// grant. Added in 0.8.0 (ledger #1199).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handback: Option<String>,
+    /// What closed it, as stored: item IRIs and other IRIs (`close` with `evidence=` only).
+    /// Added in 0.18.0 (ledger #2842).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    /// The items in `evidence` a `duplicate` or `superseded` close names as its target.
+    /// Added in 0.18.0 (ledger #2842).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<ItemRef>,
 }
 
 /// `…:item:{id}:state` — read, or the answer of a transition.
@@ -584,9 +592,14 @@ pub struct HistoryEvent {
     /// The holder a `claim` took it as, or whose claim a `release` ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder: Option<String>,
-    /// Why a `release` happened: `released`, `closed` or `takeover`.
+    /// Why a `release` happened: `released`, `closed` or `takeover`; or the verdict of a
+    /// `closed`: `done`, `duplicate` …, missing on a close written before 0.18.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What closed it, on a `closed`: IRIs, as the close stored them, and nothing looked up.
+    /// Added in 0.18.0 (ledger #2842).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
 }
 
 /// `…:{ledger}:doctor` — every problem the doctor found, at once.
@@ -873,5 +886,7 @@ pub(crate) fn answer(ledger: &Ledger, outcome: &str, item: ItemRef) -> Answer {
         released: None,
         already_closed: None,
         handback: None,
+        evidence: Vec::new(),
+        targets: Vec::new(),
     }
 }

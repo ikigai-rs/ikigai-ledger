@@ -201,6 +201,44 @@ fn holders(kernel: &Kernel, item: &str) -> Vec<String> {
     )
 }
 
+/// ★ Evidence on closes that race (ledger #2842): one close is recorded, and each loser's evidence
+/// joins that close rather than going nowhere, because the update decides where it lands.
+#[test]
+fn racing_closes_record_one_event_with_all_their_evidence() {
+    const CLOSES: usize = 4;
+    let (cell, schedule) = scheduled();
+    let kernel = cell.get().unwrap();
+    let item = append_iri(kernel, "probe", &[]);
+    schedule.width.store(CLOSES, Ordering::SeqCst);
+    *schedule.gated.lock().unwrap() = CLOSES;
+    let proofs: Vec<String> = (0..CLOSES).map(|k| format!("urn:test:proof:{k}")).collect();
+    let root = Capability::root();
+    let answers = block_on(futures::future::join_all(proofs.iter().map(|proof| {
+        kernel.issue(
+            request(
+                Verb::Sink,
+                "urn:iki:ledger:close",
+                &[("item", "#1"), ("evidence", proof)],
+            ),
+            &root,
+        )
+    })));
+    assert_eq!(schedule.arrived.load(Ordering::SeqCst), CLOSES);
+    assert!(answers.iter().all(|a| a.is_ok()), "{answers:?}");
+    assert_eq!(close_events(kernel, &item).len(), 1, "one close event");
+    assert_eq!(
+        values(
+            kernel,
+            &format!(
+                "SELECT ?v WHERE {{ GRAPH <{LIVE}> {{ ?e <{NS}onItem> <{item}> ; \
+                 <{NS}evidence> ?v }} }} ORDER BY ?v"
+            ),
+        ),
+        proofs,
+        "no close lost what it was given"
+    );
+}
+
 /// ★ The reporter's shape: claim, then four closes at once, every one of them reading the
 /// item open and claimed before any writes. Exactly one close releases the claim and records
 /// it, and exactly one close is recorded; the other three are verdict edits and say so. On

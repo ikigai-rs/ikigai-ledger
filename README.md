@@ -236,7 +236,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` of `{ledger}` |
 | `…:{ledger}:append` | Sink | file a new item | `write:{ledger}` |
 | `…:{ledger}:comment` | Sink | append a comment, optionally under your own key | `comment:{ledger}` or `write:{ledger}` |
-| `…:{ledger}:close` | Sink | close with a reason, releasing any claim | `close:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:close` | Sink | close with a reason and any evidence, releasing any claim | `close:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:reopen` | Sink | undo a close | `close:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:claim` | Sink · Delete | take it (optionally on a lease) / hand it back / take over an expired lease | `claim:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:defer` | Sink · Delete | not now / now again | `write:{ledger}` |
@@ -1016,6 +1016,8 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   open, so the reopen changed nothing` (or `…, so the reopen only added the note` when it
   carried one). Concurrent reopens of one closed item record one reopen, and a close and a
   reopen at once leave one of the two orders.
+- **And it can say what closed it** (since 0.18.0, ledger #2842): `evidence=<iri>`, repeatable, on
+  that close's status event. See "Evidence on a close".
 - ★ **And a closed item cannot be claimed** (since 0.11.1, ledger #1419). A claim, a renewal
   and a takeover on a closed item are each refused with a `Conflict` naming the item and its
   state; until 0.11.1 a claim took it, and the held-closed state the close had just removed
@@ -1245,6 +1247,84 @@ authored date, and urn:iki:gonk:passkey:dispatcher is not an import or sync prin
 (ledger:Importer in <urn:collab:participants>). Send it without `closed-at`, and the ledger
 stamps the time itself
 ```
+
+### Evidence on a close
+
+Since 0.18.0 (ledger #2842) a close says what closed it. `evidence=<iri>` on `close`, repeatable,
+is recorded as `ledger:evidence` on that close's `ledger:StatusEvent`, in the same update as the
+close, beside the close's `ledger:closedReason`, so a reopen, which takes the reason off the item,
+leaves both on the event.
+
+```text
+$ sink urn:iki:ledger:cli:close item=12 evidence=https://github.com/o/r/commit/abc evidence=https://github.com/o/r/pull/9
+closed cli#12 done (2 evidence)
+$ sink urn:iki:ledger:cli:close item=13 reason=duplicate evidence=cli#12
+closed cli#13 duplicate of cli#12
+$ source urn:iki:ledger:cli:item:13:history
+cli#13: 1 event(s)
+2026-11-01T09:00:00.000Z  closed duplicate of urn:iki:ledger:cli:item:01M…  by urn:iki:gonk:client:aaaa
+```
+
+**The role is read, never stored:** from where it hangs and the target's kind. A commit on a `done`
+close is the fix, an item on a `duplicate` or `superseded` close is its target, a test is the
+proof. A `duplicate` or `superseded` close needs no target (a note can still say why), and a target
+no longer has to be written into the note, `about` and `related` as well.
+
+- ★ **An item must exist, and the closer must be able to read it, or the close is refused** and
+  nothing is written. That is decided for every reason, not only `duplicate` and `superseded`. It is
+  named as a link's object is: `#12`, `12`, `key:{key}`, its IRI, an alias's IRI, or `acme#12`, and
+  stored as the item's IRI. An item is not evidence of its own close. In another ledger it is
+  #2829's rule: `urn:cap:ledger:link-in:{ledger}` and that graph's read grant, with the grant
+  checked before the lookup, so a caller without it learns nothing and `write` there does not stand
+  in. There is no mirror: nothing in that ledger reads a close here, and nothing is written there.
+- ★ **Any other IRI is stored as given and never fetched**, under no grant beyond the close. That
+  includes the short alias spelling `gh:acme/web#12`, which cannot be told from a foreign IRI
+  without reading the aliases graph. An alias's own IRI resolves.
+- ★ **A close of an item already closed loses nothing.** It records no second close (0.14.1), so
+  its evidence joins the close that stands, and that event's reason follows the verdict, decided in
+  the update: closes that race record one event holding all their evidence, and each loser says
+  `closed #1 done (1 evidence); it was already closed, so the verdict changed and this evidence
+  joined that close`. After a reopen, the earlier close is no longer the one that stands. A close
+  recorded with no status event (written before they existed, or by a raw store write) has nothing
+  to hold evidence, so that is refused, with the remedy: reopen it and close it again.
+- **A reopen keeps each close's evidence on that close's event**, and a second close starts its own.
+- **Evidence is history, not an edge.** Deleting the item it names leaves the close and the IRI,
+  including when that delete lands while the close is in flight, as `editTarget` does (a delete and
+  a close in two ledgers cannot be one update). Deleting the closed item takes its events with it.
+- **An import principal sends `closed-at=` and `evidence=` together**: the dated event holds both.
+- **A close written before 0.18.0 holds no reason and no evidence** on its event, and its history
+  line says only `closed`.
+
+`…:item:{id}:history` shows each close's verdict and evidence, plain and JSON (`reason`, `evidence`),
+by IRI and looking up nothing. The close's JSON answer adds `evidence` (the IRIs stored) and `targets`
+(the items a `duplicate` or `superseded` close names). A close with no evidence answers as it always
+did: `closed #12 (done)`.
+
+```sparql
+# Fixes that did not hold: closes whose evidence commit was followed by a reopen
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+SELECT DISTINCT ?item ?commit ?closed ?reopened WHERE {
+  GRAPH <urn:iki:ledger:graph:default> {
+    ?close a ledger:StatusEvent ; ledger:onItem ?item ; ledger:status ledger:closed ;
+           ledger:closedReason ledger:done ; ledger:evidence ?commit ;
+           ledger:eventSequence ?closing ; dcterms:created ?closed .
+    FILTER(CONTAINS(STR(?commit), "/commit/"))
+    ?reopen a ledger:StatusEvent ; ledger:onItem ?item ; ledger:status ledger:open ;
+            ledger:eventSequence ?reopening ; dcterms:created ?reopened .
+    FILTER(?reopening > ?closing)
+    # The first reopen after that close, not every one since.
+    FILTER NOT EXISTS {
+      ?earlier a ledger:StatusEvent ; ledger:onItem ?item ; ledger:status ledger:open ;
+               ledger:eventSequence ?between .
+      FILTER(?between > ?closing && ?between < ?reopening)
+    }
+  }
+} ORDER BY ?reopened
+```
+
+`eventSequence` and not the dates, because an importer's close carries its source date. What counts
+as a commit is the query's to say; this one reads GitHub's `/commit/` from the IRI.
 
 ### Explicit one-time backfill of `handedBackBy` (never at startup)
 
@@ -1639,6 +1719,16 @@ its event and names no object. New: the resource `…:item:{id}:history` (plain 
 `editTarget`, `editLinkType` and `editField`. A delete leaves `editTarget` on other items' events.
 See "What an edit changed, and an item's history" above. Redeploy `/ns/ledger` after this release:
 it gains the six terms.
+
+**Evidence on a close (#2842).** `close` takes `evidence=<iri>`, repeatable, recorded as
+`ledger:evidence` on that close's status event, with `ledger:closedReason` beside it, in the same
+update. A reopen keeps both there. An item as evidence must resolve or the close is refused (across
+ledgers, `link-in`); any other IRI is stored as given and never fetched. A close with evidence
+answers `closed #1 done (2 evidence)` or `closed #2 duplicate of #1`; JSON adds `evidence` and
+`targets`. A close's history line now names its verdict (`closed done`), where #2841 said `closed`;
+`json::HistoryEvent` gains `evidence`, and its `reason` holds a close's verdict too. See "Evidence on
+a close". `ledger:closedReason` drops its `rdfs:domain`, and the vocabulary gains `ledger:evidence`:
+redeploy `/ns/ledger` for those as well.
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 
