@@ -807,7 +807,44 @@ read and the commit makes the commit match nothing, and the delete reads, archiv
 commits again, so the write is archived with the item. Through 0.14.1 it was kept in the live
 graph beside the tombstone instead, an orphan that no later purge could reach. A purge
 still removes by selector — it is asked to leave nothing of the item — so a write racing a
-purge goes with it.
+purge goes with it, except a new comment or event, which makes the purge read again (below).
+
+### What a delete and a purge cost: the item, not the ledger
+
+Since 0.18.0 (ledger #2922) every read and update a delete or a purge sends names the item, or one
+of its dependents (the comments, events and links that hang off it by `ledger:onItem`), in each
+pattern. The store's scoped door copies only the quads an update's patterns can match, so it copies
+the item and nothing else, and a read looks up those quads and no others. Through 0.17.0 the set was
+written `?s ?p ?o . FILTER(…)`, a pattern with no constant in it, so the door copied the WHOLE graph
+for a delete's commit and for both of a purge's removals, and refused past 250,000 quads
+(`DurableStore::with_max_scoped_copy_quads`): a large ledger could delete and purge nothing, a pasted
+secret included.
+
+Measured in a release build on the in-memory store, one run on a shared machine, an item of about 66
+quads (ten comments, a label, a link) in a ledger of 996,147 quads with 120,000 in its graveyard
+(`cargo test --release --test delete_at_scale -- --ignored --nocapture measure`; the 0.17.0 columns
+ran the same test on that release):
+
+| | quads the store copies | peak memory | time |
+| --- | --- | --- | --- |
+| 0.17.0, default bound: delete | the whole graph, refused at 250,001 | +326 MiB | 0.69 s, refused |
+| 0.17.0, default bound: purge | the whole graph, refused at 250,001 | +248 MiB | 1.06 s, refused |
+| 0.17.0, bound raised to 2,000,000: delete | 996,147 | +1,940 MiB | 4.04 s |
+| 0.17.0, bound raised: purge of the deleted item / of a live one | 120,000 / 996,147 + 120,000 | +148 / +1,107 MiB | 0.75 / 4.67 s |
+| 0.18.0, default bound: delete | 67 | +1 MiB | 0.07 s |
+| 0.18.0, default bound: purge of the deleted item / of a live one | 66 / 65 | under 1 MiB | 0.07 / 0.08 s |
+
+The bound stays a safety net for an update that really does observe the whole graph (`CLEAR`,
+`DROP`, a pattern with no constant): the scoped door still refuses one past it.
+
+⚠ **What naming the dependents costs.** They are read first (one narrow read), then named, three of
+the store's 1,024 algebra operators each. A dependent written after that read is still caught: its
+own `onItem` edge points at the item, and every commit holds only while the item has no dependent it
+did not name. A recoverable delete then reads and commits again, as for any racing write, and so
+does a purge. Past 250 dependents, or with a dependent that is a blank node (which has no name to put
+in a pattern, and which this crate never writes), a delete and a purge fall back to the 0.17.0 form,
+which copies the whole graph and works only in a graph inside the bound. Nothing is batched: each
+removal is still one update, so it is atomic, and the ~340-event limit below did not move.
 
 ⚠ **The graveyard is touched first and the live graph last, deliberately: the live graph is
 the commit point.** Every read here looks at the live graph and none looks at the graveyard,
@@ -1430,18 +1467,34 @@ records its event as it happens
 | a re-sent batch of ten | 15 ms | 6 ms |
 | `close` / `reopen` of an item | 177 / 374 ms | 496 / 613 ms |
 
-Three limits of the store's are easier to reach with this much history. None loses data, and each
+At ledger #2922's profile, in one ledger: 3,690 items, 10,940 comments and 33,000 past events,
+the share of one ledger of 4,200 items, 12,461 comments and about 37,600 events in all (`cargo test
+--release --test imported_history -- --ignored --nocapture profile`):
+
+| 33,000 events on 3,690 items, with 10,940 comments | |
+| --- | --- |
+| import: items and comments one write each, events one batch of 8 or 9 an item | 3.9 s / 22.7 s / 9.6 s (about 3,400 events a second) |
+| triples in the graph after | 447,332 |
+| `next`, first / again (cached) | 100 ms / under 1 ms |
+| item read / `items` | 4 ms / 98 ms |
+| `counts` | 5.0 s |
+| `close` / `reopen` / another `close` | 160 / 286 / 147 ms |
+| `delete`, then `purge` of the deleted item, at the default bound | 6 ms, 3 ms |
+| `purge` of a live item, at the default bound | 5 ms |
+
+Some limits of the store's are easier to reach with this much history. None loses data, and each
 is refused with a sentence naming its bound:
 
-- **A graph past 250,000 quads refuses every `delete` and `purge`.** Their update observes the whole
-  graph, which the scoped door copies, and `DurableStore::with_max_scoped_copy_quads` is that bound.
-  Filing, commenting, labeling, claiming, closing and importing still work there. It is not the
-  import's: 45,000 filed items with no events reach it too. A host expecting this much history raises
-  the bound (at 1,000,000, a delete or a purge in the 273,602-triple graph took 1.9 s).
+- **A graph past 250,000 quads deletes and purges as any other since 0.18.0** (ledger #2922): their
+  updates copy the item, not the graph, and the 447,332-triple ledger above deleted and purged at the
+  default bound. Through 0.17.0 it refused every `delete` and `purge`. What remains is an item with
+  more than 250 comments and events in such a graph, which falls back to copying the whole graph and
+  is refused there (see "What a delete and a purge cost").
 - **An item with more than about 340 events cannot be deleted.** Its delete inlines its quads into
   one update, about 3 KB an event, and the store takes 1 MiB: 300 events deleted, 350 were refused.
   The item stays whole and live, and that refused delete leaves a copy in the graveyard. Comments
-  cost a delete the same way. A purge inlines nothing, and took an item of 5,000 events.
+  cost a delete the same way. A purge inlines nothing, and took an item of 5,000 events in a graph
+  inside the copy bound.
 - **An item with somewhere between 5,000 and 7,500 events cannot show its history.** The answer
   passes the store's 16 MiB bound for an ordinary caller. A query with `LIMIT` still reads them. At
   30,000 events on one item, a delete and a purge refuse on the same bound.
@@ -1955,6 +2008,14 @@ its states. A lifecycle with none behaves as it did, and built-in `kata-flight` 
 added on upgrade; built-in `kata-flight` is version `1`. New: `Lifecycle::version`,
 `json::HistoryEvent`'s `lifecycle_version` and the term `ledger:lifecycleVersion` (redeploy
 `/ns/ledger`). See "A state event names the lifecycle's version".
+
+**Delete and purge in proportion to the item (#2922).** A delete and a purge name the item, or one of
+its comments, events and links, in every pattern they send, so the store's scoped door copies the
+item and nothing else: on a 996,147-quad ledger a delete takes 0.07 s and about 1 MiB at the default
+bound, where 0.17.0 refused past 250,000 quads and, with the bound raised, took 4.0 s and 1.9 GiB.
+The removal is not batched, and each update stays atomic. An item with more than 250 dependents, or a
+blank-node one, falls back to the old form, inside the bound only. See "What a delete and a purge
+cost".
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 

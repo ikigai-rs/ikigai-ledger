@@ -2100,21 +2100,241 @@ struct Removed {
     archived: usize,
 }
 
+/// The most dependents (the comments, events and links that hang off an item by
+/// `ledger:onItem`) a [`Selector`] names one by one (ledger #2922). Each costs three of the
+/// store's 1,024 algebra operators (`MAX_ALGEBRA_NODES`) in a read and in a recoverable
+/// delete's commit, so 250 leaves room for the rest of the update. Past it the selector is
+/// [`Selector::Whole`], which costs a few operators and observes the whole graph.
+const NARROW_DEPENDENTS: usize = 250;
+
+/// Which of a ledger's two graphs an operation is about.
+#[derive(Clone, Copy)]
+enum LedgerGraph {
+    Live,
+    Graveyard,
+}
+
+impl LedgerGraph {
+    fn wrap(self, client: &StoreClient<'_, '_>, body: &str) -> String {
+        match self {
+            LedgerGraph::Live => client.in_graph(body),
+            LedgerGraph::Graveyard => client.in_deleted_graph(body),
+        }
+    }
+
+    async fn select(self, client: &StoreClient<'_, '_>, query: &str) -> Result<Vec<sparql::Row>> {
+        match self {
+            LedgerGraph::Live => client.select(query).await,
+            LedgerGraph::Graveyard => client.select_deleted(query).await,
+        }
+    }
+
+    async fn update(self, client: &StoreClient<'_, '_>, update: &str) -> Result<()> {
+        match self {
+            LedgerGraph::Live => client.update(update).await,
+            LedgerGraph::Graveyard => client.update_deleted(update).await,
+        }
+    }
+}
+
 /// Everything that goes with an item when it goes: its own triples, the triples of its
-/// comments, and every edge POINTING AT it.
+/// dependents (its comments, events and links, which hang off it by `ledger:onItem`), and every
+/// edge POINTING AT it.
 ///
 /// ⚠ An event's `ledger:editTarget` is not an edge (ledger #2841), and neither is a close's
 /// `ledger:evidence` (ledger #2842): each is another item's history, saying what happened there
 /// and then, and that stays when the item it names goes, as its IRI stays on a tombstone. Its own
 /// events' targets go with their event, by `onItem`.
-fn removal_selector(subject: &str) -> String {
-    format!(
-        "?s ?p ?o . FILTER(?s = {subject} || (?o = {subject} && ?p NOT IN (<{target}>, \
-         <{evidence}>)) || EXISTS {{ ?s <{on}> {subject} }})",
-        on = v::ON_ITEM,
-        target = v::EDIT_TARGET,
-        evidence = v::EVIDENCE,
-    )
+///
+/// # ★ Why the dependents are read first and named one by one (ledger #2922)
+///
+/// The store's narrow write door evaluates an update against a private copy of the quads it can
+/// observe, found by the constants in each triple pattern (`ikigai_store::confine`), and refuses
+/// past `DurableStore::max_scoped_copy_quads`, 250,000 by default. Through 0.17.0 this set was
+/// written `?s ?p ?o . FILTER(?s = <item> || …)`: a pattern with no constant, which observes the
+/// graph as a whole. So a delete's commit and a purge's removals copied every quad of their graph,
+/// and a ledger past the bound could delete and purge nothing. Here every pattern is anchored: the
+/// item as subject, the item as object, and each dependent as subject. The store's copy is then
+/// the item's own quads and nothing else; reads, which copy nothing, cost in proportion to the
+/// item too, where the filter scanned the graph.
+///
+/// The dependents are what this cannot anchor without reading them first: `?s <onItem> <item> .
+/// ?s ?p ?o` has a pattern with no constant, whatever the join says. So they are read (a narrow
+/// read) and named. A dependent written after that read is still seen: its own `onItem` edge
+/// points at the item, so the item-as-object pattern matches it, and each use below says what it
+/// does about one.
+///
+/// ⚠ [`Selector::Whole`] keeps the old form for the two cases naming cannot serve: more than
+/// [`NARROW_DEPENDENTS`] dependents, and a dependent that is a blank node, which has no name to
+/// put in a pattern (this crate writes none; one can only come from a write through the broad
+/// door). Those behave exactly as 0.17.0 did, bound included.
+enum Selector {
+    Narrow {
+        /// The item, as a SPARQL term.
+        item: String,
+        /// Each dependent, as a SPARQL term.
+        dependents: Vec<String>,
+    },
+    Whole {
+        item: String,
+    },
+}
+
+impl Selector {
+    /// Read `item`'s dependents in `graph` and name them, or fall back to [`Selector::Whole`].
+    async fn read(
+        client: &StoreClient<'_, '_>,
+        graph: LedgerGraph,
+        item: &str,
+    ) -> Result<Selector> {
+        let item = sparql::iri(item, "item")?;
+        let rows = graph
+            .select(
+                client,
+                &format!(
+                    "SELECT DISTINCT ?s WHERE {{ {} }}",
+                    graph.wrap(client, &format!("?s <{}> {item}", v::ON_ITEM))
+                ),
+            )
+            .await?;
+        if rows.len() > NARROW_DEPENDENTS {
+            return Ok(Selector::Whole { item });
+        }
+        let mut dependents = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let Some(s) = row.get("s") else { continue };
+            if s.kind != "uri" {
+                return Ok(Selector::Whole { item });
+            }
+            dependents.push(sparql::term(&s.term("s")?));
+        }
+        Ok(Selector::Narrow { item, dependents })
+    }
+
+    /// The edges pointing at the item that go with it: every one but another item's history.
+    fn inbound_filter(predicate: &str, also: &str) -> String {
+        format!(
+            "FILTER({predicate} NOT IN (<{}>, <{}>{also}))",
+            v::EDIT_TARGET,
+            v::EVIDENCE
+        )
+    }
+
+    /// A pattern binding `?s ?p ?o` to each quad of the set, possibly more than once (a
+    /// dependent's own `onItem` edge is also an edge pointing at the item): `SELECT DISTINCT`
+    /// over it. ⚠ ONE line, like [`rows_as_values`] and for the same reason (ledger #2819).
+    fn pattern(&self) -> String {
+        match self {
+            Selector::Narrow { item, dependents } => {
+                let mut branches = vec![
+                    format!("{{ {item} ?p ?o BIND({item} AS ?s) }}"),
+                    format!(
+                        "{{ ?s ?p {item} {} BIND({item} AS ?o) }}",
+                        Self::inbound_filter("?p", "")
+                    ),
+                ];
+                branches.extend(
+                    dependents
+                        .iter()
+                        .map(|d| format!("{{ {d} ?p ?o BIND({d} AS ?s) }}")),
+                );
+                branches.join(" UNION ")
+            }
+            Selector::Whole { item } => format!(
+                "?s ?p ?o . FILTER(?s = {item} || (?o = {item} && ?p NOT IN (<{target}>, \
+                 <{evidence}>)) || EXISTS {{ ?s <{on}> {item} }})",
+                on = v::ON_ITEM,
+                target = v::EDIT_TARGET,
+                evidence = v::EVIDENCE,
+            ),
+        }
+    }
+
+    /// `DELETE … WHERE` of the whole set in `graph`, under `guard` (a pattern over `graph`).
+    ///
+    /// A dependent written after [`Selector::read`] is left WHOLE, its `onItem` edge included,
+    /// rather than half removed: a narrow removal names no pattern for its other quads, so taking
+    /// its edge alone would orphan them where no later read could find them. With
+    /// `refuse_unnamed`, the removal instead matches nothing at all while such a dependent exists,
+    /// and its caller reads again.
+    fn removal(
+        &self,
+        client: &StoreClient<'_, '_>,
+        graph: LedgerGraph,
+        guard: &str,
+        refuse_unnamed: bool,
+    ) -> String {
+        match self {
+            Selector::Narrow { item, dependents } => {
+                let mut template = format!("{item} ?p0 ?o0 . ?s1 ?p1 {item} .");
+                let mut branches = vec![
+                    format!("{{ {item} ?p0 ?o0 }}"),
+                    format!(
+                        "{{ ?s1 ?p1 {item} {} }}",
+                        Self::inbound_filter("?p1", &format!(", <{}>", v::ON_ITEM))
+                    ),
+                ];
+                for (k, d) in dependents.iter().enumerate() {
+                    template.push_str(&format!(" {d} ?d{k}p ?d{k}o ."));
+                    branches.push(format!("{{ {d} ?d{k}p ?d{k}o }}"));
+                }
+                let unnamed = if refuse_unnamed {
+                    self.no_unnamed_dependent()
+                } else {
+                    String::new()
+                };
+                format!(
+                    "DELETE {{ {} }} WHERE {{ {} }}",
+                    graph.wrap(client, &template),
+                    graph.wrap(
+                        client,
+                        &format!("{guard} {unnamed} {}", branches.join(" UNION "))
+                    )
+                )
+            }
+            Selector::Whole { .. } => format!(
+                "DELETE {{ {} }} WHERE {{ {} }}",
+                graph.wrap(client, "?s ?p ?o"),
+                graph.wrap(client, &format!("{guard} {}", self.pattern()))
+            ),
+        }
+    }
+
+    /// A filter that holds only while the item has no dependent this selector did not name: one
+    /// written after [`Selector::read`]. Empty for [`Selector::Whole`], which names none and
+    /// matches every dependent whenever it is evaluated.
+    ///
+    /// ★ A commit that removes what was read needs it as well as its rows check (ledger #2922):
+    /// a dependent written between the read of the dependents and the read of the rows put its
+    /// `onItem` edge, and only that, into the rows, so the rows check passed and the rest of it
+    /// stayed live as an orphan. Found by `comment_delete_race`, 1 round in 300.
+    fn no_unnamed_dependent(&self) -> String {
+        match self {
+            Selector::Narrow { item, dependents } => format!(
+                "FILTER NOT EXISTS {{ ?x <{}> {item} MINUS {{ VALUES ?x {{ {} }} }} }}",
+                v::ON_ITEM,
+                dependents.join(" ")
+            ),
+            Selector::Whole { .. } => String::new(),
+        }
+    }
+
+    /// The quads of the set in `graph`, sorted, each once.
+    async fn rows(
+        &self,
+        client: &StoreClient<'_, '_>,
+        graph: LedgerGraph,
+    ) -> Result<Vec<sparql::Row>> {
+        graph
+            .select(
+                client,
+                &format!(
+                    "SELECT DISTINCT ?s ?p ?o WHERE {{ {} }} ORDER BY ?s ?p ?o",
+                    graph.wrap(client, &format!("{{ {} }}", self.pattern()))
+                ),
+            )
+            .await
+    }
 }
 
 /// The tombstone's hash: a canonical form of exactly the rows given — sorted triples,
@@ -2202,7 +2422,7 @@ const DELETE_ATTEMPTS: usize = 16;
 /// ★ The three sets that go together, because leaving any behind is a lie about what was
 /// deleted: the item's own triples, the triples of its comments, and every edge POINTING
 /// AT it (a `blocks` from another item would otherwise name something that no longer
-/// resolves). [`removal_selector`] is that set.
+/// resolves). [`Selector`] is that set.
 ///
 /// # ★ Why this is TWO updates, and what a reader sees between them
 ///
@@ -2258,8 +2478,20 @@ const DELETE_ATTEMPTS: usize = 16;
 /// item fully live and re-purgeable, rather than leaving an orphan in a graveyard that no
 /// resource can name once the live item it belonged to is gone. ⚠ A purge's live removal
 /// stays `DELETE … WHERE`, on purpose: a purge is asked to leave nothing of the item, a
-/// hand-written blank node included (which `DELETE DATA` cannot name), so a write racing a
-/// purge is destroyed with it and is not in the tombstone's count.
+/// hand-written blank node as an object included (which `DELETE DATA` cannot name), so a write
+/// racing a purge is destroyed with it and is not in the tombstone's count. Since ledger #2922
+/// that removal names the item's dependents one by one ([`Selector`]), so it holds only while
+/// the item has no dependent it did not read: a comment or event written in between makes it
+/// match nothing, and the purge reads again, as a recoverable delete does.
+///
+/// # ★ What it costs (ledger #2922)
+///
+/// Every read and every update here names the item, or one of its dependents, in each
+/// pattern, so the store's scoped door copies the item's quads and nothing more, and a read
+/// looks up those and no others. Measured on a 996,147-quad ledger in a release build: a delete
+/// in 0.07 s and about 1 MiB, a purge in 0.08 s, at the default copy bound. Through 0.17.0 the
+/// same delete copied the whole graph, refused past 250,000 quads, and took 4.0 s and 1.9 GiB
+/// with the bound raised to let it. Past [`NARROW_DEPENDENTS`] dependents it is that again.
 ///
 /// ⚠ A purge that runs whole inside a recoverable delete's window, between its read and its
 /// archive, empties the graveyard before the archive lands (ledger #2779). The delete cannot
@@ -2293,21 +2525,19 @@ async fn delete_item(
     now: u64,
     destroy: bool,
 ) -> Result<Option<Removed>> {
-    let subject = sparql::iri(&item.iri, "item")?;
-    let selector = removal_selector(&subject);
     let id = item.iri.rsplit(':').next().unwrap_or("unknown").to_string();
     let tombstone = client.ledger().tombstone(&id);
     // What an earlier attempt archived, so a retry can take back what it no longer removes.
     let mut archived_before: Option<String> = None;
+    // What a purge destroyed in the graveyard, over every attempt.
+    let mut archived_total = 0;
     let mut attempt = 0;
     let (rows, digest, archived, archive) = loop {
         attempt += 1;
-        let rows = client
-            .select(&format!(
-                "SELECT ?s ?p ?o WHERE {{ {} }} ORDER BY ?s ?p ?o",
-                client.in_graph(&selector)
-            ))
-            .await?;
+        // Read again on every attempt: a retry is for a write that landed, a new dependent
+        // among them.
+        let selector = Selector::read(client, LedgerGraph::Live, &item.iri).await?;
+        let rows = selector.rows(client, LedgerGraph::Live).await?;
         let digest = content_hash(&rows);
 
         // Step 1 of 2 — the graveyard, which no read in this crate can see, so nothing a
@@ -2316,28 +2546,18 @@ async fn delete_item(
         // ⚠ The DELETE TEMPLATE is a quad pattern and may not carry a FILTER — the selector
         // belongs in the WHERE clause only. Putting it in both is a parse error at the store,
         // which is at least loud.
-        let mut archived = 0;
         let mut archive = None;
         let removal = if destroy {
             // Everything an earlier recoverable delete quarantined. Read first, so the answer
             // can say how much it destroyed — and so the graveyard's READ grant, which the
             // store requires of a `DELETE … WHERE` over it, is a requirement here too rather
             // than a surprise at the next store upgrade.
-            archived = client
-                .select_deleted(&format!(
-                    "SELECT ?s ?p ?o WHERE {{ {} }}",
-                    client.in_deleted_graph(&selector)
-                ))
-                .await?
-                .len();
-            clear_archive(client, &selector).await?;
+            archived_total += clear_archive(client, &item.iri).await?;
             // Only while the item is live: once another delete committed, the selector's
-            // `?o = <item>` would take that delete's tombstone edge with it.
-            format!(
-                "DELETE {{ {} }} WHERE {{ {} }}",
-                client.in_graph("?s ?p ?o"),
-                client.in_graph(&format!("{} {selector}", live(&item.iri)))
-            )
+            // `?o = <item>` would take that delete's tombstone edge with it. And only while
+            // it has no dependent this attempt did not read: one written since matches
+            // nothing here, and the purge reads again below.
+            selector.removal(client, LedgerGraph::Live, &live(&item.iri), true)
         } else if rows.is_empty() {
             String::new()
         } else {
@@ -2377,8 +2597,10 @@ async fn delete_item(
                 "DELETE {{ {} }} WHERE {{ {} }}",
                 client.in_graph(&data),
                 client.in_graph(&format!(
-                    "{} FILTER NOT EXISTS {{ {{ {selector} }} MINUS {{ VALUES (?s ?p ?o) {{ {} }} }} }}",
+                    "{} {} FILTER NOT EXISTS {{ {{ {} }} MINUS {{ VALUES (?s ?p ?o) {{ {} }} }} }}",
                     live(&item.iri),
+                    selector.no_unnamed_dependent(),
+                    selector.pattern(),
                     rows_as_values(&rows)?
                 ))
             );
@@ -2452,15 +2674,15 @@ async fn delete_item(
                 ),
             ]))
             .await?;
-        // A purge's removal is re-evaluated at its commit, so nothing races it; a recoverable
-        // delete whose item is still live lost its commit to a write, and reads again.
-        if destroy
-            || archive.is_none()
+        // An item still live after its commit lost the commit to a write, and is read again:
+        // for a recoverable delete any write since the read, for a purge a new dependent (the
+        // rest of a purge's removal is re-evaluated at its commit, so nothing else races it).
+        if (!destroy && archive.is_none())
             || !client
                 .ask(&format!("ASK {{ {} }}", client.in_graph(&live(&item.iri))))
                 .await?
         {
-            break (rows, digest, archived, archive);
+            break (rows, digest, archived_total, archive);
         }
         if attempt == DELETE_ATTEMPTS {
             return Err(Error::Conflict(format!(
@@ -2499,7 +2721,7 @@ async fn delete_item(
     if destroy {
         // The purge's half of the same handshake: a recoverable delete whose archive landed
         // after the clear above, and before the commit, is removed here.
-        clear_archive(client, &selector).await?;
+        clear_archive(client, &item.iri).await?;
     }
     // Whose tombstone it is: this delete's stamp and hash, or another delete's that committed
     // first. Two deletes in one millisecond over the same quads are indistinguishable here,
@@ -2550,18 +2772,7 @@ async fn purge_archived(
     who: &Attribution,
     now: u64,
 ) -> Result<usize> {
-    let subject = sparql::iri(&found.item, "item")?;
-    let selector = removal_selector(&subject);
-    let archived = client
-        .select_deleted(&format!(
-            "SELECT ?s ?p ?o WHERE {{ {} }}",
-            client.in_deleted_graph(&selector)
-        ))
-        .await?
-        .len();
-    if archived > 0 {
-        clear_archive(client, &selector).await?;
-    }
+    let archived = clear_archive(client, &found.item).await?;
     let mut operations = vec![
         replace_one_of(
             client,
@@ -2601,20 +2812,32 @@ async fn purge_archived(
     // read the item live before another delete committed may archive it after the clear
     // above. If its archive lands before this clear, this clear removes it; if after, that
     // delete sees the mark and removes it itself (see `delete_item`).
-    clear_archive(client, &selector).await?;
+    clear_archive(client, &found.item).await?;
     Ok(archived)
 }
 
-/// Destroy every quad the `selector` matches in the graveyard.
-async fn clear_archive(client: &StoreClient<'_, '_>, selector: &str) -> Result<()> {
-    client
-        .update_deleted(&format!(
-            "DELETE {{ {} }} WHERE {{ {} }}",
-            client.in_deleted_graph("?s ?p ?o"),
-            client.in_deleted_graph(selector),
-        ))
-        .await?;
-    Ok(())
+/// Destroy what the graveyard holds of `item` (its [`Selector`] there), and answer how many
+/// quads that was when read.
+///
+/// Read first, so the answer can say how much it destroyed, and so the graveyard's READ grant,
+/// which the store requires of a `DELETE … WHERE` over it, is a requirement here too rather than
+/// a surprise at the next store upgrade. Nothing is written when nothing is there.
+///
+/// A dependent archived after the read is left whole, never half removed (see
+/// [`Selector::removal`]): the next clear, or the recoverable delete that archived it, takes it
+/// (ledger #2779's handshake, which is about the order of the read and the purge's mark).
+async fn clear_archive(client: &StoreClient<'_, '_>, item: &str) -> Result<usize> {
+    let selector = Selector::read(client, LedgerGraph::Graveyard, item).await?;
+    let archived = selector.rows(client, LedgerGraph::Graveyard).await?.len();
+    if archived > 0 {
+        LedgerGraph::Graveyard
+            .update(
+                client,
+                &selector.removal(client, LedgerGraph::Graveyard, "", false),
+            )
+            .await?;
+    }
+    Ok(archived)
 }
 
 // -------------------------------------------------------------------------- append

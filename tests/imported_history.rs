@@ -1415,6 +1415,67 @@ fn a_few_thousand_events_import_and_the_reads_still_answer() {
     assert!(source(&kernel, &at("item:1:history"), &[]).starts_with("acme#1: 200 event(s)\n"));
 }
 
+/// An item with 245 imported events, just under the 250 dependents a delete names one by one
+/// (ledger #2922), in a graph past a small copy bound: the update that inlines its quads and
+/// names its dependents fits the store's text and algebra bounds, and a delete and a purge
+/// succeed. (The item itself is about 2,300 quads, so the bound here is 5,000.)
+#[test]
+fn an_item_with_hundreds_of_events_is_deleted_and_purged_in_a_graph_past_the_bound() {
+    let kernel = seeded_over(
+        DurableStore::in_memory()
+            .unwrap()
+            .with_max_scoped_copy_quads(5_000),
+    );
+    for first in (0..245).step_by(100) {
+        let batch: String = (first..(first + 100).min(245))
+            .map(|k| event_of_kind(1, k))
+            .collect();
+        import(&kernel, &batch);
+    }
+    let mut data = String::new();
+    for k in 0..2_000 {
+        data.push_str(&format!(
+            "<urn:iki:ledger:acme:item:bulk{k}> a <{NS}Item> ; <{NS}number> {} ; \
+             <http://purl.org/dc/terms/title> \"t\" ; <{NS}status> <{NS}open> .\n",
+            k + 10
+        ));
+    }
+    sink(
+        &kernel,
+        "urn:iki:store:update",
+        &[(
+            "content",
+            &format!("INSERT DATA {{ GRAPH <{LIVE}> {{ {data} }} }}"),
+        )],
+    );
+    assert!(triple_count(&kernel) > 10_000);
+    let grant = Capability::scoped({
+        let mut scopes = grants(&["read", "write", "delete", "purge"]);
+        scopes.push(graveyard_write(LEDGER));
+        scopes.push(graveyard_read(LEDGER));
+        scopes
+    })
+    .with_principal(DISPATCHER)
+    .unwrap();
+    let deleted = try_as(&kernel, &grant, Verb::Delete, &at("item:1"), &[])
+        .unwrap_or_else(|e| panic!("delete of an item with 245 events: {e}"));
+    assert!(deleted.contains("deleted acme#1"), "{deleted}");
+    let purged = try_as(
+        &kernel,
+        &grant,
+        Verb::Delete,
+        &at("purge"),
+        &[("content", "1")],
+    )
+    .unwrap_or_else(|e| panic!("purge of it: {e}"));
+    assert!(purged.contains("archived quad(s) destroyed"), "{purged}");
+    assert!(rows(
+        &kernel,
+        &format!("SELECT ?e WHERE {{ GRAPH ?g {{ ?e <{NS}eventKey> ?k }} }}")
+    )
+    .is_empty());
+}
+
 /// A kernel like [`seeded`]'s over `store`.
 fn seeded_over(store: DurableStore) -> Kernel {
     let ledger = ikigai_ledger::space_with(SpaceConfig::default().participants(PARTICIPANTS));
@@ -1563,4 +1624,162 @@ fn measure_an_import_of_tens_of_thousands_of_events() {
         try_verb(&kernel, Verb::Delete, &at("item:1"), &[])
             .map_err(|e| e.to_string()[..160].to_string())
     );
+}
+
+/// The ten event kinds of [`whole_history`], one per index, with this item's source IRIs and
+/// dates.
+fn event_of_kind(item: usize, k: usize) -> String {
+    let day = 1 + k % 28;
+    let when = format!(
+        "\"2021-{:02}-{day:02}T00:00:00Z\"^^xsd:dateTime",
+        1 + (k / 28) % 12
+    );
+    let body = match k % 10 {
+        0 => format!(
+            "a ledger:ClaimEvent ; dcterms:created {when} ; ledger:author <{ACTOR}> ; \
+             ledger:claimedBy \"worker\" ; ledger:claimKind ledger:agent"
+        ),
+        1 => format!(
+            "a ledger:ReleaseEvent ; dcterms:created {when} ; ledger:claimedBy \"worker\" ; \
+             ledger:releaseReason \"released\""
+        ),
+        2 => format!(
+            "a ledger:EditEvent ; dcterms:created {when} ; ledger:editKind \"label\" ; \
+             ledger:editLabel \"l{k}\""
+        ),
+        3 => format!(
+            "a ledger:EditEvent ; dcterms:created {when} ; ledger:editKind \"link\" ; \
+             ledger:editLinkType ledger:blocks ; ledger:editTarget <urn:iki:ledger:acme:item:src{}>",
+            item + 1
+        ),
+        4 => format!(
+            "a ledger:StatusEvent ; dcterms:created {when} ; ledger:status ledger:closed ; \
+             ledger:closedReason ledger:done"
+        ),
+        5 => format!(
+            "a ledger:StatusEvent ; dcterms:created {when} ; ledger:status ledger:open"
+        ),
+        6 => format!(
+            "a ledger:EditEvent ; dcterms:created {when} ; ledger:editKind \"edit\" ; \
+             ledger:editField \"title\""
+        ),
+        7 => format!(
+            "a ledger:EditEvent ; dcterms:created {when} ; ledger:editKind \"about\" ; \
+             ledger:editTarget <urn:repo:file:x{k}>"
+        ),
+        8 => format!(
+            "a ledger:EditEvent ; dcterms:created {when} ; ledger:editKind \"defer\""
+        ),
+        _ => format!(
+            "a ledger:EditEvent ; dcterms:created {when} ; ledger:editKind \"label\" ; \
+             ledger:editLabel \"m{k}\""
+        ),
+    };
+    format!("<urn:src:{item}:{k}> {body} .\n")
+}
+
+/// ★ The import at ledger #2922's profile, in one ledger: 4,200 items, 12,461 comments and
+/// about 37,600 past events in all, about 33,000 of them in one ledger. This builds that one
+/// ledger at its share (3,690 items, 10,940 comments, 33,000 events; the rest live in other
+/// ledgers, which are other graphs and cost this one nothing), then times `next` and `close`,
+/// and a delete and a purge at the store's DEFAULT copy bound. Not in the default run:
+/// `cargo test --release --test imported_history -- --ignored --nocapture profile`.
+#[test]
+#[ignore = "a measurement: run it in release, with --nocapture"]
+fn measure_an_import_at_the_profile_of_ledger_2922() {
+    const ITEMS: usize = 3_690;
+    const COMMENTS: usize = 10_940;
+    const EVENTS: usize = 33_000;
+    let kernel = seeded_over(DurableStore::in_memory().unwrap());
+    let who = importer();
+    let grant = Capability::scoped({
+        let mut scopes = grants(&["read", "write", "delete", "purge"]);
+        scopes.push(graveyard_write(LEDGER));
+        scopes.push(graveyard_read(LEDGER));
+        scopes
+    })
+    .with_principal(DISPATCHER)
+    .unwrap();
+
+    let started = Instant::now();
+    for k in 1..ITEMS {
+        file(&kernel, &format!("Imported item {}", k + 1));
+    }
+    let items_s = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    for k in 0..COMMENTS {
+        let item = (k % ITEMS + 1).to_string();
+        try_as(
+            &kernel,
+            &who,
+            Verb::Sink,
+            &at("comment"),
+            &[
+                ("item", &item),
+                ("content", &format!("imported note {k}")),
+                ("created", "2021-03-01T00:00:00Z"),
+            ],
+        )
+        .unwrap();
+    }
+    let comments_s = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    let per_item = EVENTS / ITEMS;
+    let extra = EVENTS % ITEMS;
+    let mut sent = 0;
+    for item in 1..=ITEMS {
+        let n = per_item + usize::from(item <= extra);
+        let batch: String = (0..n).map(|k| event_of_kind(item, k)).collect();
+        send(&kernel, &who, &item.to_string(), &batch).unwrap();
+        sent += n;
+    }
+    let events_s = started.elapsed().as_secs_f64();
+    println!(
+        "imported {ITEMS} items in {items_s:.1}s, {COMMENTS} comments in {comments_s:.1}s, \
+         {sent} events in {events_s:.1}s ({:.0} a second); {} triples in the graph",
+        sent as f64 / events_s,
+        triple_count(&kernel)
+    );
+
+    let read = |resource: &str, args: &[(&str, &str)]| {
+        try_as(&kernel, &grant, Verb::Source, &at(resource), args)
+            .unwrap_or_else(|e| format!("refused: {e}"))
+    };
+    let write = |what: &str, verb: Verb, resource: &str, args: &[(&str, &str)]| {
+        let started = Instant::now();
+        let answer = try_as(&kernel, &grant, verb, &at(resource), args);
+        println!(
+            "{what}: {:.3}s, {}",
+            started.elapsed().as_secs_f64(),
+            match answer {
+                Ok(answer) => answer.trim().lines().next().unwrap_or("").to_string(),
+                Err(refused) => format!(
+                    "REFUSED {}",
+                    refused.to_string().chars().take(160).collect::<String>()
+                ),
+            }
+        );
+    };
+    timed("next", || read("next", &[]));
+    timed("next, again", || read("next", &[]));
+    timed("item read", || read("item:17", &[]));
+    timed("items", || read("items", &[]));
+    timed("counts", || read("counts", &[]));
+    write("close #17", Verb::Sink, "close", &[("item", "17")]);
+    write("reopen #17", Verb::Sink, "reopen", &[("item", "17")]);
+    write("close #18", Verb::Sink, "close", &[("item", "18")]);
+    write("delete #17", Verb::Delete, "item:17", &[]);
+    write(
+        "purge #17 (deleted)",
+        Verb::Delete,
+        "purge",
+        &[("content", "17")],
+    );
+    write(
+        "purge #19 (live)",
+        Verb::Delete,
+        "purge",
+        &[("content", "19")],
+    );
+    println!("{} triples in the graph after", triple_count(&kernel));
 }
