@@ -250,6 +250,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}:holder:{holder}` | Exists | is it held by that holder? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:closed` | Exists | is it closed? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:about` | Sink · Delete | add / remove what it is about, title and body untouched | `about:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:item:{id}:history` | Source | every event on the item, oldest first, with what each edit changed | `read:{ledger}` |
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
 | `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
 | `urn:iki:ledger:lifecycle:{name}` | Source · Exists | the legal states, in order | any `read:*` |
@@ -1137,7 +1138,7 @@ as a node of its own (ledger #2819), so "what did this agent do" is a query over
 |---|---|---|
 | `ledger:ClaimEvent` `{item}:claim:{id}` | a first claim, or a takeover (never a renewal) | `claimedBy` (the holder label), `claimPrincipal`, `claimKind`, and `takeoverFrom` on a takeover |
 | `ledger:ReleaseEvent` `{item}:release:{id}` | a release (by the holder or a dispatcher), a close, a takeover, when there was a claim | the released claim's `claimedBy`, `claimPrincipal`, `claimKind` and `claimedAt`, and `releaseReason` `released`, `closed` or `takeover` |
-| `ledger:EditEvent` `{item}:edit:{id}` | `label`, `link`, `defer`, `item:{id}:about`, an item edit, a `state` transition | `editKind`: `label`, `unlabel`, `link`, `unlink`, `defer`, `resume`, `about`, `unabout`, `edit` or `state` |
+| `ledger:EditEvent` `{item}:edit:{id}` | `label`, `link`, `defer`, `item:{id}:about`, an item edit, a `state` transition | `editKind`: `label`, `unlabel`, `link`, `unlink`, `defer`, `resume`, `about`, `unabout`, `edit` or `state`, and what it changed (below) |
 | `ledger:StatusEvent` (since 0.14.0) | a close or a reopen | now also its committer |
 | `ledger:handedBackBy` on the hand-back comment | `comment handback=true` | the holder label of the claim the hand-back found |
 
@@ -1164,6 +1165,70 @@ SELECT ?holder (COUNT(DISTINCT ?item) AS ?items) WHERE {
     ?claim a ledger:ClaimEvent ; ledger:claimedBy ?holder ; ledger:onItem ?item .
   }
 } GROUP BY ?holder
+```
+
+### What an edit changed, and an item's history
+
+Since 0.18.0 (ledger #2841) an edit event names its object, because the state and the labels are
+replaced in place and nothing else remembers them:
+
+| `editKind` | carries |
+|---|---|
+| `label`, `unlabel` | `editLabel`: the label |
+| `state` | `stateFrom`, `stateTo`: the states before and after, as IRIs (`filed` included, though an item in it holds no state) |
+| `link`, `unlink` | `editLinkType`: the link predicate, and `editTarget`: the other item's IRI, possibly in another ledger |
+| `about`, `unabout` | `editTarget`: each target IRI |
+| `edit` | `editField`: the name of each field changed (`title`, `body`, `priority`, `revision`, `about`), never its value |
+
+- ★ **Decided inside the update, never read and then written.** A transition's `stateFrom` is what
+  its compare-and-set's `WHERE` bound, so the events of an item's transitions form one unbroken
+  chain whatever races (`tests/edit_event_objects.rs` forces two).
+- **An object means something changed.** Each is guarded by the change it records, so removing a
+  label the item does not have, or sending a title it already has, still writes its event (every
+  write has a who) and names no object. A query over objects counts only real changes.
+- **An event written before 0.18.0 has no object** and cannot be given one: nothing kept it.
+- **`editTarget` is history, not an edge.** A delete takes the edges pointing at its item, but an
+  event on another item keeps naming the deleted item's IRI, as a tombstone does. An item's own
+  events go with it.
+
+`…:item:{id}:history` shows them all under `read:{ledger}`, in plain text and JSON, oldest first:
+each claim, release, close and reopen as well as each edit. It names the other item of a link
+across ledgers by its IRI, which the link already shows this ledger's readers, and looks up
+nothing else of it; the target's history has no event for a link it only mirrors.
+
+```text
+$ source urn:iki:ledger:item:12:history
+#12: 3 event(s)
+2026-11-01T09:00:00.000Z  label bug  by urn:iki:gonk:client:aaaa
+2026-11-01T09:05:00.000Z  state filed to queued  by urn:iki:gonk:client:aaaa
+2026-11-01T09:06:00.000Z  edit title, body  by urn:iki:gonk:client:aaaa
+```
+
+```sparql
+# When did item N leave state S
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+SELECT ?when ?to WHERE {
+  GRAPH <urn:iki:ledger:graph:default> {
+    ?item ledger:number 12 .
+    ?event ledger:onItem ?item ; dcterms:created ?when ;
+           ledger:stateFrom <urn:iki:ledger:lifecycle:kata-flight:queued> ; ledger:stateTo ?to .
+  }
+} ORDER BY ?when
+```
+
+```sparql
+# When was label L removed
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+SELECT ?when ?who WHERE {
+  GRAPH <urn:iki:ledger:graph:default> {
+    ?item ledger:number 12 .
+    ?event ledger:onItem ?item ; dcterms:created ?when ;
+           ledger:editKind "unlabel" ; ledger:editLabel "wip" .
+    OPTIONAL { ?event ledger:committer ?who }
+  }
+} ORDER BY ?when
 ```
 
 ### An importer's close date
@@ -1563,6 +1628,17 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### 0.18.0: an edit event names what it changed (ledger #2841)
+
+**What an edit changed (#2841).** A `ledger:EditEvent` now records its object in the update that
+makes the change: the label, the states before and after, the link type and the other item, the
+about target, the names of the fields and never their values. A write that changed nothing keeps
+its event and names no object. New: the resource `…:item:{id}:history` (plain and JSON, under
+`read:{ledger}`), `json::HistoryDocument`, and the terms `stateFrom`, `stateTo`, `editLabel`,
+`editTarget`, `editLinkType` and `editField`. A delete leaves `editTarget` on other items' events.
+See "What an edit changed, and an item's history" above. Redeploy `/ns/ledger` after this release:
+it gains the six terms.
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 

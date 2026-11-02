@@ -231,6 +231,11 @@ async fn closed_transition_refusal(
 ///
 /// `event` is the transition's edit event (ledger #2819), inserted by the same operation
 /// under the same compare-and-set, so a transition that loses records nothing.
+///
+/// ★ The `WHERE` binds `?left`, the state the item is leaving, for `event` to record as its
+/// `ledger:stateFrom` (ledger #2841): a value this update found, never one read before it, so a
+/// chain of events cannot disagree with the moves that wrote it (the 0.14.x races, ledger #2764,
+/// #2766). An item in `filed` holds no state, and `from` is then its IRI.
 fn cas(
     client: &StoreClient<'_, '_>,
     item: &str,
@@ -283,13 +288,15 @@ fn cas(
              OPTIONAL {{ <{item}> <{state}> ?s }}\n\
              OPTIONAL {{ <{item}> <{token}> ?t }}\n\
              OPTIONAL {{ <{item}> <{at}> ?a }}\n\
-             OPTIONAL {{ <{item}> <{modified}> ?m }}",
+             OPTIONAL {{ <{item}> <{modified}> ?m }}\n\
+             BIND(COALESCE(?s, <{filed}>) AS ?left)",
             type_ = v::ext::TYPE,
             class = v::ITEM_CLASS,
             state = v::STATE,
             token = v::STATE_TOKEN,
             at = v::STATE_AT,
             modified = v::ext::MODIFIED,
+            filed = from.iri,
         )),
     )
 }
@@ -409,7 +416,14 @@ impl Endpoint for StateEndpoint {
                     "unchanged"
                 } else {
                     let token = mint_id(now)?;
-                    let event = edit_event_triples(&item.iri, "state", &who, now)?;
+                    let node = event_iri(&item.iri, "edit", now)?;
+                    let mut event = edit_event_triples(&node, &item.iri, "state", &who, now);
+                    event.push_str(&format!(
+                        "\n<{node}> <{}> ?left ; <{}> <{}> .",
+                        v::STATE_FROM,
+                        v::STATE_TO,
+                        to.iri
+                    ));
                     client
                         .update(&cas(&client, &item.iri, from, to, &token, &event, now))
                         .await?;

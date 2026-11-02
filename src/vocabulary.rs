@@ -121,6 +121,18 @@ term! {
     HANDED_BACK_BY => "handedBackBy";
     /// `ledger:editKind` — which edit an edit event records.
     EDIT_KIND => "editKind";
+    /// `ledger:stateFrom` — the state a `state` edit left, as the update found it.
+    STATE_FROM => "stateFrom";
+    /// `ledger:stateTo` — the state a `state` edit moved to.
+    STATE_TO => "stateTo";
+    /// `ledger:editLabel` — the label a `label` or `unlabel` edit added or removed.
+    EDIT_LABEL => "editLabel";
+    /// `ledger:editTarget` — the other item of a link, or the target of an about.
+    EDIT_TARGET => "editTarget";
+    /// `ledger:editLinkType` — the link type of a `link` or `unlink` edit.
+    EDIT_LINK_TYPE => "editLinkType";
+    /// `ledger:editField` — the name of a field an `edit` changed, never its value.
+    EDIT_FIELD => "editField";
     /// `ledger:DailyCounts`
     DAILY_COUNTS_CLASS => "DailyCounts";
     /// `ledger:date`

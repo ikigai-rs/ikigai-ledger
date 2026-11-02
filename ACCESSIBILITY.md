@@ -28,6 +28,10 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
 - **`urn:iki:ledger:next`** (`Selection::plain` in `src/select.rs`): ranked item lines, each
   with its score and its reasons in words, then the policy and what was excluded and why
   (`not #1: blocked by #2`), or `nothing is ready (…)` with the reasons.
+- **An item's history** (`src/endpoints/history.rs`): a first line with the item and a count
+  (`#1: 3 event(s)`), or the sentence `#1 has no recorded events`, then one line per event,
+  oldest first: its time, what happened in words (`state filed to queued`, `edit title, body`)
+  and `by` who. An edit with no object says so in words.
 - **Write answers** (`src/endpoints.rs`): one sentence each, such as
   `#1 urn:iki:ledger:default:item:…`, `commented on #1 (…)`, `linked #1 blocks #2`,
   `closed #2 (done)`, `#1 claimed by worker-1`.

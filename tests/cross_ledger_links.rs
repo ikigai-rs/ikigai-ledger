@@ -619,6 +619,35 @@ fn a_link_whose_mirror_lands_after_a_close_does_not_leave_it_stale() {
     assert!(next(kernel, TARGET).starts_with(" 1. acme#1"));
 }
 
+/// ★ A link whose target is deleted while it is in flight is taken back, and its history says
+/// so (ledger #2841): the `link` event stands, with an `unlink` beside it naming the same item.
+#[test]
+fn a_link_taken_back_is_an_unlink_in_the_history() {
+    let (cell, armed) = scheduled();
+    let kernel = cell.get().unwrap();
+    file(kernel, SUBJECT, "Ship the CLI flag");
+    let target = file(kernel, TARGET, "Document the flag");
+    arm(&armed, Verb::Delete, &at(TARGET, "item:1"), &[]);
+    let refused = try_verb(
+        kernel,
+        Verb::Sink,
+        &at(SUBJECT, "link"),
+        &[("item", "1"), ("content", &target), ("type", "blocks")],
+    );
+    assert!(matches!(refused, Err(Error::NotFound(_))), "{refused:?}");
+    let history = source(kernel, &at(SUBJECT, "item:1:history"), &[]);
+    let lines: Vec<&str> = history.lines().collect();
+    assert_eq!(lines.len(), 3, "{history}");
+    assert!(
+        lines[1].ends_with(&format!("  link blocks {target}")),
+        "{history}"
+    );
+    assert!(
+        lines[2].ends_with(&format!("  unlink blocks {target}")),
+        "{history}"
+    );
+}
+
 /// ★ A close racing an unlink: the close read the link present, a whole unlink ran before the
 /// close's mirror landed, and the edge must stay removed rather than come back from the
 /// close's older snapshot.
