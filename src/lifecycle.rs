@@ -300,6 +300,18 @@ impl Lifecycle {
         self.states.iter().find(|s| s.name == name)
     }
 
+    /// Every drain a state names, in the order of the states that first name it. Several states
+    /// may share one; a state in flight names none.
+    pub fn drains(&self) -> Vec<&str> {
+        let mut seen = Vec::new();
+        for drain in self.states.iter().filter_map(|s| s.drain.as_deref()) {
+            if !seen.contains(&drain) {
+                seen.push(drain);
+            }
+        }
+        seen
+    }
+
     /// The state a stored `ledger:state` value names, when it is one of this lifecycle's.
     pub fn state_by_iri(&self, iri: &str) -> Option<&LifecycleState> {
         self.states.iter().find(|s| s.iri == iri)
@@ -612,6 +624,18 @@ impl Lifecycles {
                 if !seen.contains(&state.name.as_str()) {
                     seen.push(state.name.as_str());
                 }
+            }
+        }
+        seen
+    }
+
+    /// Every drain any of these lifecycles names, in first-seen order — the `one_of` `next`
+    /// advertises. The ledger's own lifecycle is what it enforces.
+    pub fn drain_names(&self) -> Vec<&str> {
+        let mut seen = Vec::new();
+        for drain in self.all.iter().flat_map(|l| l.drains()) {
+            if !seen.contains(&drain) {
+                seen.push(drain);
             }
         }
         seen

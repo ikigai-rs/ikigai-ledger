@@ -13,9 +13,11 @@
 //! 5. Partition what is left: ready (not awaiting its dispatcher, unclaimed, not deferred,
 //!    no open blocker) versus excluded, and keep the exclusion reasons — one per item, the
 //!    first that applies in that order.
-//! 6. Hand the ready set to the [`OrderingPolicy`].
+//! 6. Narrow to the caller's `drain=` and `state=`, which are judged against the ledger's
+//!    lifecycle, so `urn:iki:ledger:next` applies them to the [`ReadySet`] (ledger #2865).
+//! 7. Hand the ready set to the [`OrderingPolicy`].
 //!
-//! ⚠ **Steps 2 and 3 run over the whole ledger and step 4 comes after them, and that
+//! ⚠ **Steps 2 and 3 run over the whole ledger and steps 4 and 6 come after them, and that
 //! order is the fix for two defects.** Until 0.2.1 the pool was loaded with the caller's
 //! filters applied and through the listing's 500-row bound, and "blocked" was computed over
 //! that pool. So a blocker that did not carry the filter's label was invisible and the item
@@ -44,6 +46,7 @@ use oxrdf::{Graph, NamedNode, Triple};
 use sha2::{Digest, Sha256};
 
 use crate::ledger::Ledger;
+use crate::lifecycle::{Lifecycle, LifecycleState, FILED};
 use crate::model::{self, Filter, Item};
 use crate::policy::{Candidate, OrderingPolicy, Ranked, SelectionInputs};
 use crate::sparql::{self, StoreClient};
@@ -140,6 +143,34 @@ pub struct ReadySet {
     pub excluded: Vec<(Item, Excluded)>,
     /// Leverage per item IRI: how many open items it transitively unblocks.
     pub leverage: BTreeMap<String, (usize, usize)>,
+}
+
+impl ReadySet {
+    /// Keep only the items whose one current state `admits` accepts: what `next drain=` and
+    /// `next state=` ask. `leverage` keeps every item, because it is a fact about the ledger.
+    ///
+    /// ★ An item whose current state cannot be said is admitted by nothing: it holds several, or
+    /// a value `lifecycle` does not declare, and the doctor reports it.
+    pub(crate) fn in_states(
+        mut self,
+        lifecycle: &Lifecycle,
+        admits: impl Fn(&LifecycleState) -> bool,
+    ) -> ReadySet {
+        let keep = |item: &Item| current_state(lifecycle, item).is_some_and(&admits);
+        self.ready.retain(keep);
+        self.excluded.retain(|(item, _)| keep(item));
+        self
+    }
+}
+
+/// The state `item` is in, compared by IRI: a name alone would match another lifecycle's state of
+/// that name.
+fn current_state<'l>(lifecycle: &'l Lifecycle, item: &Item) -> Option<&'l LifecycleState> {
+    match item.state_values.as_slice() {
+        [] => lifecycle.state(FILED),
+        [one] if one.kind == "uri" => lifecycle.state_by_iri(&one.value),
+        _ => None,
+    }
 }
 
 /// Compute the ready set among the open items a filter admits — with "blocked", the cycle

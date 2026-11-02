@@ -875,7 +875,7 @@ for every ordinary delete. The authority difference gets its own IRI, exactly as
 Two stages, kept apart:
 
 1. **The ready set is deterministic and is a query**: open, unclaimed, not deferred, not
-   blocked by an open item, plus the caller's label / `about` / level filters. No policy is
+   blocked by an open item, plus the caller's label / `about` / level / drain / state filters. No policy is
    involved, and most of the value is here. ⚠ **"Blocked", the cycle check and leverage
    are computed over EVERY open item, and the filters narrow afterwards** — a blocker
    without the filter's label still blocks, and a ledger of any size is read whole. Until
@@ -923,6 +923,43 @@ Two things that were designed in rather than discovered later:
 
 ⚠ **Selection OFFERS; it never authorizes.** `next` naming an item is an affordance. Acting
 on it still requires the actor's own capability, checked by the kernel at that action.
+
+### Asking one step for its work: `drain=` and `state=`
+
+Since 0.18.0 (ledger #2865) `next drain=<name>` admits only the open items whose current state's
+`ledger:drain` is `<name>`, and `next state=<state>` only those in that state. So a step of a loop
+can ask what is waiting for it without labeling anything:
+
+```text
+$ source urn:iki:ledger:next drain=review-gate
+ 1.    #1  open    p1  Review the schema change
+    p1 — priority 1; last updated 2026-09-15T00:00:43.000Z
+
+policy: priority-recency (weighs priority, recency, number)
+ready: 1   excluded: 1
+  not #2: blocked by #3
+$ source urn:iki:ledger:next drain=triag
+invalid argument `drain`: `triag` is not a drain of the lifecycle `kata-flight` this ledger uses; one of triage, review-gate, ship (see `urn:iki:ledger:lifecycle:kata-flight`)
+```
+
+- ★ **They apply the way `labels=` does: after blocked items, cycles and leverage are computed over
+  the whole ledger.** A filter chooses which items you are asking about and never changes what ranks
+  them. A blocker in another state still blocks, a candidate is credited for what it unblocks in
+  another state, and a cycle anywhere still refuses. The answer is the unfiltered ranking with the
+  other items taken out (`tests/next_state_filter.rs`).
+- **`filed` counts.** An item that holds no `ledger:state` is in `filed`, so `drain=triage` and
+  `state=filed` admit it. A state in flight has no drain, so only `state=` asks about one.
+- **A drain may be shared.** It admits every state that names it. Given both, an item must satisfy
+  both, and a pair no state satisfies is the usual `nothing is ready` sentence.
+- **Each value is judged against the lifecycle of the ledger being asked**, from the arguments
+  alone, before anything is read. An unknown name or an empty value is refused with a sentence
+  naming the lifecycle's drains or states, and a value that cannot be read is refused too, so neither
+  is read as "no filter". The contract's `one_of` is the union across the lifecycles a host configured,
+  as the state Sink's is, because one contract describes every ledger. So a value the contract accepts
+  can still be refused by the ledger it was sent to.
+- ⚠ **An item whose current state cannot be said is admitted by no filter**: two `ledger:state`
+  values, a literal, or a value this lifecycle does not declare. The unfiltered `next` still offers
+  it, it still blocks what it blocks, and the doctor reports it (`two-states`, `unknown-state`).
 
 ## Lifecycle state: one value, moved by one update
 
@@ -1981,6 +2018,13 @@ answers `closed #1 done (2 evidence)` or `closed #2 duplicate of #1`; JSON adds 
 `json::HistoryEvent` gains `evidence`, and its `reason` holds a close's verdict too. See "Evidence on
 a close". `ledger:closedReason` drops its `rdfs:domain`, and the vocabulary gains `ledger:evidence`:
 redeploy `/ns/ledger` for those as well.
+
+**`next drain=` and `next state=` (#2865).** `next` narrows to the open items whose current state
+drains to a step, or is a state, after blocked items, cycles and leverage are computed over the
+whole ledger, so the filtered ranking is the unfiltered one with the other items taken out. An
+unknown name is refused with a sentence naming the lifecycle's drains or states. New:
+`Lifecycle::drains` and `Lifecycles::drain_names`. See "Asking one step for its work". Without either
+argument `next` answers as it did.
 
 **An importer's history (#2843).** `…:{ledger}:history` takes one item's past claim, release, edit
 and status events as Turtle from a `ledger:Importer`, marked `ledger:createdSource "import"`, under
