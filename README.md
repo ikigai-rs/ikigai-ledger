@@ -619,7 +619,8 @@ $ source urn:iki:ledger:acme:item:7                                    # under a
   the store's read and write grants for the target's graph (the mirror's update reads and writes
   it). `write:{target}` does NOT stand in: a link in decides what the target's `next` offers, so
   whoever issues grants decides who may add one. It is checked before the object is looked up,
-  so a caller without it learns nothing of the other ledger. Unlinking takes the same grants.
+  so a caller without it learns nothing of the other ledger. Unlinking takes the same grants; without the target's store grants a `blocks` or `parent` link or unlink is refused before
+  anything changes, naming them, because the edge and its mirror are two writes.
 - **The mirror** is a `ledger:Mirror` in the target's graph (`onItem` the target, `linkType`,
   `mirrorOf` the subject's IRI, `subjectOpen`, `linkPresent`, `mirrorVersion`), written by the
   ledger after every link, unlink, close and reopen of the subject. `blocks` and `parent` are

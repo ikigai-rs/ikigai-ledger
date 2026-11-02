@@ -685,3 +685,60 @@ fn a_related_link_across_does_not_hold_back_a_delete() {
     );
     delete(&kernel, &at(SUBJECT, "item:1"), &[]);
 }
+
+/// A link or unlink across is refused before anything is written when the caller cannot write
+/// the mirror: holding `link-in` and the target's store READ grant is not enough. Without this
+/// check the edge was committed and the mirror's write then refused, leaving an edge the target
+/// never learned of (a link) or a mirror that goes on naming a removed edge (an unlink).
+#[test]
+fn a_link_that_cannot_reach_the_mirror_is_refused_and_changes_nothing() {
+    let kernel = kernel();
+    file(&kernel, SUBJECT, "Ship the CLI flag");
+    let target = file(&kernel, TARGET, "Document the flag");
+    let reads_only = Capability::scoped(vec![
+        format!("urn:cap:ledger:read:{SUBJECT}"),
+        format!("urn:cap:ledger:write:{SUBJECT}"),
+        graph_read(SUBJECT),
+        graph_write(SUBJECT),
+        format!("urn:cap:ledger:link-in:{TARGET}"),
+        graph_read(TARGET),
+    ]);
+    match try_as(
+        &kernel,
+        &reads_only,
+        Verb::Sink,
+        &at(SUBJECT, "link"),
+        &[("item", "1"), ("content", "acme#1"), ("type", "blocks")],
+    ) {
+        Err(Error::Denied(why)) => {
+            assert!(why.contains(&graph_write(TARGET)), "{why}");
+            assert!(why.contains("Nothing was changed"), "{why}");
+        }
+        other => panic!("expected Denied, got {other:?}"),
+    }
+    assert!(!source(&kernel, &at(SUBJECT, "item:1"), &[]).contains("blocks:"));
+    assert!(mirrors(&kernel, &target).is_empty());
+
+    // The unlink is held to the same rule: linked by a holder of every grant, it is not
+    // removed by a caller that could not clear the mirror.
+    try_as(
+        &kernel,
+        &linker(),
+        Verb::Sink,
+        &at(SUBJECT, "link"),
+        &[("item", "1"), ("content", "acme#1"), ("type", "blocks")],
+    )
+    .expect("the linker holds every grant");
+    match try_as(
+        &kernel,
+        &reads_only,
+        Verb::Delete,
+        &at(SUBJECT, "link"),
+        &[("item", "1"), ("content", "acme#1"), ("type", "blocks")],
+    ) {
+        Err(Error::Denied(why)) => assert!(why.contains(&graph_write(TARGET)), "{why}"),
+        other => panic!("expected Denied, got {other:?}"),
+    }
+    assert!(source(&kernel, &at(SUBJECT, "item:1"), &[]).contains("blocks:"));
+    assert!(next(&kernel, TARGET).starts_with("nothing is ready"));
+}

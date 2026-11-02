@@ -455,8 +455,31 @@ pub(super) async fn link(
     now: u64,
 ) -> Result<Representation> {
     let there = grant_for(inv, there, Need::LinkIn)?;
-    let target_client = StoreClient::new(inv, there.clone());
     let sink = inv.request.verb == Verb::Sink;
+    // The edge and its mirror are two writes, so a caller that cannot write the mirror is
+    // refused before the edge is: otherwise a link lands that the target never learns of, or
+    // an unlink leaves a mirror naming a removed edge.
+    if mirrored(predicate) {
+        let missing: Vec<String> = store_grants(&there)
+            .into_iter()
+            .filter(|scope| !inv.capability.allows(scope))
+            .collect();
+        if !missing.is_empty() {
+            return Err(Error::Denied(format!(
+                "{} a `{name}` link {} the ledger {} also writes its mirror in that ledger's \
+                 graph, and this capability does not hold {}. Nothing was changed",
+                if sink { "Adding" } else { "Removing" },
+                if sink { "into" } else { "from" },
+                there.name(),
+                missing
+                    .iter()
+                    .map(|s| format!("`{s}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )));
+        }
+    }
+    let target_client = StoreClient::new(inv, there.clone());
     // The object must be a live item to link to it; an unlink only needs its IRI, because
     // removing an edge to a deleted item is a cleanup.
     let (target, number) = if sink {
