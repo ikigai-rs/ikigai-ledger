@@ -1290,6 +1290,13 @@ Every item, comment and tombstone a write creates records who made it the way gi
   `dcterms:created` and `dcterms:modified`, so ranking tie-breaks imported items as their
   source did, marked `ledger:createdSource` / `ledger:modifiedSource` `"import"` beside the
   true `ledger:committedAt`. Any other caller that sends a date is refused, and told why.
+- **Which writes move `modified`, and how** (since 0.18.0, ledger #2928): a write that carries a
+  claimed date (a comment's `created=`, a close's `closed-at=`) sets the item's `modified` to the
+  LATER of its current value and that date, marked `ledger:modifiedSource "import"`, so an
+  importer that files with the source's `modified` and then replays the item's past leaves it at
+  the source's value. Every other write, an importer's undated one included, stamps the kernel's
+  time, and a `modified` at or after the commit reads as not claimed. An imported history
+  (`…:history`) touches no item at all.
 
 The host names the participants graph with `SpaceConfig::participants(graph)`. It is read
 through the store's narrow door with the caller's own capability, so a delegate or an importer
@@ -2070,6 +2077,14 @@ whole page in two queries (links out, mirrors in), never one per item, with the 
 `not readable under your grants` rule. At #2922's profile (3,690 items, 447,332 triples) a JSON
 page of 50 took 0.017 s, against 0.019 s before, which is noise. ⚠ `next`'s items do not carry them
 yet. The plain face is unchanged.
+
+**An importer's past keeps the source's `modified` (#2928).** A comment with `created=` or a close
+with `closed-at=` from an import principal moves the item's `modified` only forward, to the later of
+its current value and the claimed date, instead of stamping the kernel's time; undated writes, and
+every write by anyone else, stamp the time as before. On 0.17.0 an importer that filed with the
+source's `modified` and then replayed comments and a close ended every such item at the import time,
+so `priority-recency` ranked imported open items as just updated. See "Which writes move
+`modified`" under attribution.
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 
