@@ -185,6 +185,13 @@ pub const CAP_ALIAS: &str = "urn:cap:ledger:alias:*";
 /// enforced, never the reverse.
 pub const CAP_ANY: &str = "urn:cap:ledger:*";
 
+/// Linking an item of another ledger to one of the named ledger's items (ledger #2829):
+/// [`Ledger::cap_link_in`] names it for one ledger. **Not declared by any action**: the link
+/// resource declares [`CAP_WRITE`], the grant every link needs, and enforces this one only
+/// when the object is in another ledger, which the kernel's pre-check cannot see. A link
+/// within one ledger never needs it, and `write:{ledger}` does not stand in for it.
+pub const CAP_LINK_IN: &str = "urn:cap:ledger:link-in:*";
+
 /// Removing an item from view. Separate from [`CAP_WRITE`] because a delete takes work
 /// OUT of the ledger, and the everyday grant should not carry it.
 pub const CAP_DELETE: &str = "urn:cap:ledger:delete:*";
@@ -210,6 +217,9 @@ pub(crate) enum Need {
     About,
     /// Give an item an alias: `alias:{ledger}`, or `write:{ledger}` (ledger #2828).
     Alias,
+    /// Link an item of another ledger to one of this ledger's: `link-in:{ledger}` and nothing
+    /// else (ledger #2829).
+    LinkIn,
 }
 
 impl Need {
@@ -225,6 +235,7 @@ impl Need {
             Need::Close => ledger.cap_close(),
             Need::About => ledger.cap_about(),
             Need::Alias => ledger.cap_alias(),
+            Need::LinkIn => ledger.cap_link_in(),
         }
     }
 
@@ -246,6 +257,7 @@ impl Need {
             Need::Delete => CAP_DELETE,
             Need::Purge => CAP_PURGE,
             Need::Claim | Need::Comment | Need::Close | Need::About | Need::Alias => CAP_ANY,
+            Need::LinkIn => CAP_LINK_IN,
         }
     }
 }
@@ -310,6 +322,7 @@ const READ_FACES: [&str; 3] = [PLAIN, TURTLE, JSON];
 /// answer is a receipt, not a graph, and the graph is one read away.
 const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 
+mod across;
 mod counts;
 mod flight;
 
@@ -728,11 +741,10 @@ fn split_content(content: &str) -> Result<(String, String)> {
 /// item.
 ///
 /// ★ **Every reference resolves inside THIS client's ledger, and a reference to another
-/// one is refused rather than looked up.** That is where the cross-ledger question is
-/// actually settled: a `blocks` edge to an item in another ledger cannot be filed,
-/// because the object cannot be named here. The reasoning is in
-/// [`LinkEndpoint::describe`]; the refusal is here, once, for every endpoint that takes
-/// an item.
+/// one is refused rather than looked up.** The refusal is here, once, for every endpoint
+/// that takes an item. The one exception is the link resource's object, which since 0.17.0
+/// may be an item of another ledger under that ledger's `link-in` grant (ledger #2829): it
+/// is resolved by `across::link` before it ever reaches this function.
 pub(crate) async fn require_item(client: &StoreClient<'_, '_>, reference: &str) -> Result<Item> {
     let iri = item_iri(client, reference, "item").await?;
     if let Some(item) = model::load_item(client, &iri).await? {
@@ -1691,7 +1703,8 @@ impl Endpoint for ItemEndpoint {
         match inv.request.verb {
             Verb::Source => {
                 let want = wanted_face(inv, &READ_FACES)?;
-                let item = require_item(&client, id).await?;
+                let mut item = require_item(&client, id).await?;
+                across::decorate(inv, &client, &mut item).await?;
                 if want == JSON {
                     let doc = json::ItemDocument {
                         schema: json::SCHEMA,
@@ -1811,6 +1824,7 @@ impl Endpoint for ItemEndpoint {
             Verb::Delete => {
                 let now = now_ms(inv)?;
                 let item = require_item(&client, id).await?;
+                across::refuse_delete_with_links(&client, &item).await?;
                 let reason = inv.inline_str("reason").unwrap_or("").to_string();
                 let who = attribution::resolve(
                     inv,
@@ -3310,6 +3324,9 @@ impl Endpoint for CloseEndpoint {
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let name = inv.inline_str("reason").unwrap_or("done");
+        // Every mirror of it in another ledger follows the close, so the caller must be able
+        // to write them all; refused before anything is written (ledger #2829).
+        across::require_mirror_grants(inv, &client, &item).await?;
         let reason = v::close_reason(name).ok_or_else(|| Error::InvalidArgument {
             name: "reason".to_string(),
             detail: format!(
@@ -3421,6 +3438,9 @@ impl Endpoint for CloseEndpoint {
             &datetime(now),
         ));
         guarded_update(&client, &[&item.iri], &batch(&ops)).await?;
+        // Even when another close got there first: a write from the latest snapshot is never
+        // wrong, and it repairs a mirror an interrupted writer left behind.
+        let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
         let closed_here = client
             .ask(&format!(
                 "ASK {{ {} }}",
@@ -3448,14 +3468,16 @@ impl Endpoint for CloseEndpoint {
             answer.already_closed = (!closed_here).then_some(true);
             return Ok(json_repr(json::render(&answer)?));
         }
-        Ok(plain(match (released, closed_here) {
+        let mut said = match (released, closed_here) {
             (Some(holder), _) => format!("closed {} ({name}), released {holder}\n", item.short()),
             (None, true) => format!("closed {} ({name})\n", item.short()),
             (None, false) => format!(
                 "closed {} ({name}); it was already closed, so only the verdict changed\n",
                 item.short()
             ),
-        }))
+        };
+        said.push_str(&across::unreached(&item, &unreached));
+        Ok(plain(said))
     }
 
     fn name(&self) -> &str {
@@ -3549,6 +3571,7 @@ impl Endpoint for ReopenEndpoint {
         // "the item is closed" in its own `WHERE`, ahead of the operation that sets it open:
         // under the store's write lock exactly one update finds it closed. Reading back the
         // event IRI minted here is how this request learns whether it was that one.
+        across::require_mirror_grants(inv, &client, &item).await?;
         let still_closed = format!("<{}> <{}> <{}> .", item.iri, v::STATUS, v::CLOSED);
         let (event, event_iri) =
             counts::status_event_when(&client, &item.iri, v::OPEN, now, &still_closed, &who, None)?;
@@ -3582,6 +3605,7 @@ impl Endpoint for ReopenEndpoint {
             ]),
         )
         .await?;
+        let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
         let reopened_here = client
             .ask(&format!(
                 "ASK {{ {} }}",
@@ -3595,7 +3619,7 @@ impl Endpoint for ReopenEndpoint {
                 noted = true;
             }
         }
-        Ok(plain(match (reopened_here, noted) {
+        let mut said = match (reopened_here, noted) {
             (true, _) => format!("reopened {}\n", item.short()),
             (false, false) => format!(
                 "{} was already open, so the reopen changed nothing\n",
@@ -3605,7 +3629,9 @@ impl Endpoint for ReopenEndpoint {
                 "{} was already open, so the reopen only added the note\n",
                 item.short()
             ),
-        }))
+        };
+        said.push_str(&across::unreached(&item, &unreached));
+        Ok(plain(said))
     }
 
     fn name(&self) -> &str {
@@ -4764,7 +4790,6 @@ impl Endpoint for LinkEndpoint {
         let want = wanted_face(inv, &WRITE_FACES)?;
         let now = now_ms(inv)?;
         let from = require_item(&client, inv.inline_str("item")?).await?;
-        let to = require_item(&client, inv.inline_str("content")?).await?;
         let name = inv.inline_str("type").unwrap_or("related");
         let predicate = v::link_predicate(name).ok_or_else(|| Error::InvalidArgument {
             name: "type".to_string(),
@@ -4777,6 +4802,19 @@ impl Endpoint for LinkEndpoint {
                     .join(", ")
             ),
         })?;
+        // ★ An object in another ledger is a typed link across ledgers (ledger #2829): admitted
+        // by `link-in` on that ledger, written as a link node here and mirrored there.
+        let reference = inv.inline_str("content")?;
+        if let Some(there) = across::other_ledger(client.ledger(), reference) {
+            if !matches!(inv.request.verb, Verb::Sink | Verb::Delete) {
+                return Err(unsupported("ledger-link", inv.request.verb));
+            }
+            return across::link(
+                inv, &client, &from, reference, there, name, predicate, want, now,
+            )
+            .await;
+        }
+        let to = require_item(&client, reference).await?;
         // Refused on Sink only. A self-block can still arrive out of band, and `next` then
         // refuses naming this resource's Delete as the remedy — which must not be refused
         // for the same reason (0.2.1 refused it, so the ledger's own fix could not run).
