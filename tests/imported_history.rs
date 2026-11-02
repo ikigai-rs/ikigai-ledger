@@ -1438,8 +1438,9 @@ fn measure_an_import_of_tens_of_thousands_of_events() {
         };
         let kernel = seeded_over(store);
         let grant = Capability::scoped({
-            let mut scopes = grants(&["read", "write", "delete"]);
+            let mut scopes = grants(&["read", "write", "delete", "purge"]);
             scopes.push(graveyard_write(LEDGER));
+            scopes.push(graveyard_read(LEDGER));
             scopes
         })
         .with_principal(DISPATCHER)
@@ -1514,6 +1515,12 @@ fn measure_an_import_of_tens_of_thousands_of_events() {
         write("release", Verb::Delete, "claim", &[("item", "1")]);
         write("close", Verb::Sink, "close", &[("item", "1")]);
         write("reopen", Verb::Sink, "reopen", &[("item", "1")]);
+        write(
+            "purge of another item",
+            Verb::Delete,
+            "purge",
+            &[("content", "2")],
+        );
         write("delete", Verb::Delete, "item:1", &[]);
     }
 

@@ -1334,13 +1334,14 @@ is refused with a sentence naming its bound:
   graph, which the scoped door copies, and `DurableStore::with_max_scoped_copy_quads` is that bound.
   Filing, commenting, labeling, claiming, closing and importing still work there. It is not the
   import's: 45,000 filed items with no events reach it too. A host expecting this much history raises
-  the bound (at 1,000,000, a delete in the 273,602-triple graph took 1.9 s).
-- **An item with more than about 340 events cannot be deleted or purged the ordinary way.** Its
-  delete inlines its quads into one update, about 3 KB an event, and the store takes 1 MiB: 300
-  events deleted, 350 were refused. The item stays whole and live, and that refused delete leaves a
-  copy in the graveyard. Comments cost a delete the same way.
+  the bound (at 1,000,000, a delete or a purge in the 273,602-triple graph took 1.9 s).
+- **An item with more than about 340 events cannot be deleted.** Its delete inlines its quads into
+  one update, about 3 KB an event, and the store takes 1 MiB: 300 events deleted, 350 were refused.
+  The item stays whole and live, and that refused delete leaves a copy in the graveyard. Comments
+  cost a delete the same way. A purge inlines nothing, and took an item of 5,000 events.
 - **An item with somewhere between 5,000 and 7,500 events cannot show its history.** The answer
-  passes the store's 16 MiB bound for an ordinary caller. A query with `LIMIT` still reads them.
+  passes the store's 16 MiB bound for an ordinary caller. A query with `LIMIT` still reads them. At
+  30,000 events on one item, a delete and a purge refuse on the same bound.
 
 ### Evidence on a close
 
