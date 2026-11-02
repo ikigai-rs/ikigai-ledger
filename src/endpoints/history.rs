@@ -113,6 +113,7 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
         _ => 4,
     });
     let imported = node.one(v::CREATED_SOURCE).is_some();
+    let lifecycle_version = (kind == "state" && !imported).then(|| node.one(v::LIFECYCLE_VERSION));
     json::HistoryEvent {
         iri,
         kind,
@@ -129,6 +130,7 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
         label: node.one(v::EDIT_LABEL),
         state_from: node.one(v::STATE_FROM),
         state_to: node.one(v::STATE_TO),
+        lifecycle_version,
         link_type: node
             .one(v::EDIT_LINK_TYPE)
             .map(|predicate| across::short(&predicate).to_string()),
@@ -208,6 +210,11 @@ fn line(event: &json::HistoryEvent) -> String {
         Some(object) => what.push_str(&format!(" {object}")),
         None => what.push_str(" (no object recorded: nothing changed, or written before 0.18.0)"),
     }
+    match &event.lifecycle_version {
+        Some(Some(version)) => what.push_str(&format!("  lifecycle version {version}")),
+        Some(None) => what.push_str("  no lifecycle version recorded (written before 0.18.0)"),
+        None => {}
+    }
     match (&event.author, &event.committer) {
         (Some(author), Some(committer)) => what.push_str(&format!(
             "  by {author} (claimed by an importer)  committer {committer}"
@@ -267,7 +274,8 @@ impl Endpoint for HistoryEndpoint {
                 "Every event on one item, oldest first: its claims, releases, closes with their \
                  verdict and evidence, reopens, and its edits with what each changed (the label, \
                  the states before and after, the link and the other item, the about target, the \
-                 names of the fields, never their values). The other item of a link across \
+                 names of the fields, never their values; a state change also names the version \
+                 of the lifecycle it was checked against). The other item of a link across \
                  ledgers, and a close's evidence, are named by IRI and nothing else.",
             )
             .verb(Verb::Meta)

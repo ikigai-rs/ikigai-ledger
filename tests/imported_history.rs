@@ -747,6 +747,13 @@ fn what_a_shape_does_not_name_is_refused() {
             "stateFrom",
         ),
         (
+            "a lifecycle version, since this ledger checked the move against nothing",
+            format!(
+                r#"<urn:s> a ledger:EditEvent ; {date} ; ledger:editKind "state" ; ledger:stateFrom <urn:q> ; ledger:stateTo <urn:r> ; ledger:lifecycleVersion "1" ."#
+            ),
+            "lifecycleVersion",
+        ),
+        (
             "a field's value, which an edit event never holds",
             format!(
                 r#"<urn:s> a ledger:EditEvent ; {date} ; ledger:editKind "edit" ; ledger:editField "the new title" ."#
@@ -982,6 +989,9 @@ fn the_json_history_says_imported_and_a_written_event_says_nothing_new() {
     .unwrap();
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 11);
+    // This ledger checked an imported move against no lifecycle, so it does not speak of a version.
+    let moved = events.iter().find(|e| e["kind"] == "state").unwrap();
+    assert!(moved.get("lifecycle_version").is_none(), "{moved}");
     let first = &events[0];
     assert_eq!(first["imported"], true);
     assert_eq!(first["source_id"], "urn:src:1");

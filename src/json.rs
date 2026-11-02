@@ -600,6 +600,16 @@ pub struct HistoryEvent {
     /// The IRI of the state a `state` edit moved to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_to: Option<String>,
+    /// The version of the lifecycle a `state` edit was checked against, as the document says it.
+    /// On a state event this ledger wrote, `null` when it holds none, because it was written
+    /// before 0.18.0. Absent on every other event, an imported one included: nothing here checked
+    /// those against a lifecycle. Added in 0.18.0 (ledger #2864).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "said_or_null"
+    )]
+    pub lifecycle_version: Option<Option<String>>,
     /// A `link` or `unlink`'s type: `blocks`, `parent` or `related`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_type: Option<String>,
@@ -620,6 +630,14 @@ pub struct HistoryEvent {
     /// Added in 0.18.0 (ledger #2842).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
+}
+
+/// A field that is there is `Some`, even as `null`; `default` covers one that is not.
+fn said_or_null<'de, D>(deserializer: D) -> std::result::Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// `…:{ledger}:doctor` — every problem the doctor found, at once.

@@ -507,6 +507,7 @@ fn a_host_assigns_its_own_lifecycle_to_a_ledger() {
         r#"@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
            <urn:iki:ledger:lifecycle:tiny> a ledger:Lifecycle ;
+               ledger:lifecycleVersion "1" ;
                ledger:hasState <urn:iki:ledger:lifecycle:tiny:filed>, <urn:iki:ledger:lifecycle:tiny:doing> .
            <urn:iki:ledger:lifecycle:tiny:filed> rdfs:label "filed" ; ledger:order 0 ;
                ledger:inFlight false ; ledger:drain "me" .

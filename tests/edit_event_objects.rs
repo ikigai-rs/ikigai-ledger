@@ -178,7 +178,11 @@ fn a_state_change_names_the_state_before_and_after_as_iris() {
             last(&kernel, 1),
             Recorded {
                 kind: "state".to_string(),
-                object: object(&[("stateFrom", &[&state(from)]), ("stateTo", &[&state(to)])]),
+                object: object(&[
+                    ("stateFrom", &[&state(from)]),
+                    ("stateTo", &[&state(to)]),
+                    ("lifecycleVersion", &["1"]),
+                ]),
             }
         );
     }
@@ -721,7 +725,7 @@ fn the_plain_history_shows_each_object_in_words() {
         [
             "label bug",
             "unlabel bug",
-            "state filed to queued",
+            "state filed to queued  lifecycle version 1",
             format!("link blocks {other}").as_str(),
             format!("unlink blocks {other}").as_str(),
             "about urn:example:a",

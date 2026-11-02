@@ -30,6 +30,7 @@ const GATED: &str = r#"
     @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
     @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
     <urn:iki:ledger:lifecycle:gated> a ledger:Lifecycle ;
+        ledger:lifecycleVersion "1" ;
         ledger:hasState <urn:iki:ledger:lifecycle:gated:filed>,
                         <urn:iki:ledger:lifecycle:gated:queued>,
                         <urn:iki:ledger:lifecycle:gated:reviewed>,
@@ -58,6 +59,7 @@ const NO_MOVES: &str = r#"
     @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
     @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
     <urn:iki:ledger:lifecycle:gated> a ledger:Lifecycle ;
+        ledger:lifecycleVersion "1" ;
         ledger:hasState <urn:iki:ledger:lifecycle:gated:filed>,
                         <urn:iki:ledger:lifecycle:gated:queued>,
                         <urn:iki:ledger:lifecycle:gated:reviewed>,

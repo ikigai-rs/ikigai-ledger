@@ -20,11 +20,15 @@
 # remedies move items out of flight wherever they stand.
 
 @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
 
+# Every state event records this version (ledger #2864). Change it with the document's states or
+# moves, because it is how an old event says which document allowed it.
 <urn:iki:ledger:lifecycle:kata-flight> a ledger:Lifecycle ;
     rdfs:label "kata-flight" ;
+    owl:versionInfo "1" ;
     rdfs:comment "kata-flight's shipping loop: select a wave, review-gate it, then per item claim it, resolve it in a worktree, refine it, ship it and close it." ;
     ledger:hasState
         <urn:iki:ledger:lifecycle:kata-flight:filed> ,

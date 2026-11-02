@@ -966,8 +966,8 @@ lifecycle decides which values a state may hold, and two of them in one ledger w
 writers disagree about what is legal. `Lifecycle::parse` refuses, at boot, every shape the
 state resource relies on not having: a state whose IRI is not `{lifecycle}:{name}`, duplicate
 names or orders, a state outside the flight with no drain, a state in flight with one, a
-lifecycle that does not declare `filed` first, and a `ledger:movesTo` that is not a move between
-two of its states.
+lifecycle that does not declare `filed` first, a `ledger:movesTo` that is not a move between
+two of its states, and a document that does not say its one version.
 
 ### A lifecycle may declare its moves
 
@@ -1012,6 +1012,61 @@ conflict: The lifecycle `gated` declares no move from `filed` to `done`, so noth
   and, if it were the only move, would turn enforcement off.
 - `close` and `reopen` do not move state, and an importer's history records what happened elsewhere
   as history only, so neither is checked against the moves.
+
+### A state event names the lifecycle's version
+
+Since 0.18.0 (ledger #2864) every transition's edit event records the version of the lifecycle
+document the move was checked against, as `ledger:lifecycleVersion`, in the update that makes the
+move. So when a document changes, an old event can still say which document allowed it. The version
+comes from the document: its `owl:versionInfo`, or a `ledger:lifecycleVersion` on the lifecycle if
+the document has none.
+
+```turtle
+<urn:iki:ledger:lifecycle:gated> a ledger:Lifecycle ;
+    owl:versionInfo "2" ;
+    ledger:hasState <urn:iki:ledger:lifecycle:gated:filed> , <urn:iki:ledger:lifecycle:gated:doing> .
+```
+
+⚠ **A lifecycle must say its version.** `Lifecycle::parse` refuses, at boot and with a sentence, a
+document with no version, with more than one, with one that is not a literal or not one line with
+something on it, and a `ledger:lifecycleVersion` on anything but the lifecycle. A host with its own
+lifecycle adds one line when it upgrades. Refusing is what makes "every transition" true: an event
+with no version can only be older than the term. The built-in `kata-flight` is version `1`.
+
+The version is whatever text the document says. Nothing here compares versions or orders them, and
+nothing notices a document that changed and kept its version, so change it with the document's states
+or moves. A host loads one document per lifecycle at a time, so the version an event records is the
+one the host was running.
+
+**Renaming a state takes two versions**, and items move across by ordinary transitions:
+
+1. Version 2 declares both names and a move from the old to the new. With `ledger:movesTo`, it can
+   also stop anything else from entering the old name.
+2. Move each item with `from=old to=new`. Each event records version 2.
+3. Version 3 drops the old name. The events keep it, and the history still reads
+   `state queue to backlog`, because the name comes from the IRI the event holds.
+
+```text
+$ source urn:iki:ledger:item:1:history
+#1: 3 event(s)
+2026-11-01T09:00:00.000Z  state filed to queue  lifecycle version 1  by urn:iki:gonk:client:aaaa
+2026-11-02T09:00:00.000Z  state queue to backlog  lifecycle version 2  by urn:iki:gonk:client:aaaa
+2026-11-03T09:00:00.000Z  state backlog to doing  lifecycle version 3  by urn:iki:gonk:client:aaaa
+```
+
+An item still in the old name when version 3 loads cannot be moved by the state resource, because
+`queue` is no longer a state to name. The doctor reports it as `unknown-state`, and it takes one
+SPARQL update over the ledger's graph, so check with the doctor before dropping a name.
+`tests/lifecycle_version.rs` walks the whole sequence across restarts over one durable store.
+
+- **An event from before 0.18.0 has none**, cannot be given one, and says so: the plain history ends
+  its object with `no lifecycle version recorded (written before 0.18.0)`, and JSON has
+  `"lifecycle_version": null`.
+- **Only a state event this ledger wrote speaks of one.** On any other event, the field is absent
+  from JSON and the plain line does not mention it.
+- **An importer's history carries none.** Its events were not checked against this ledger's lifecycle,
+  so a batch naming `ledger:lifecycleVersion` is refused, and an imported state event's line and JSON
+  do not mention one.
 
 ## Claims: a lease, a kind, and a takeover
 
@@ -1226,7 +1281,7 @@ replaced in place and nothing else remembers them:
 | `editKind` | carries |
 |---|---|
 | `label`, `unlabel` | `editLabel`: the label |
-| `state` | `stateFrom`, `stateTo`: the states before and after, as IRIs (`filed` included, though an item in it holds no state) |
+| `state` | `stateFrom`, `stateTo`: the states before and after, as IRIs (`filed` included, though an item in it holds no state), and `lifecycleVersion`: the version of the lifecycle it was checked against (see "A state event names the lifecycle's version") |
 | `link`, `unlink` | `editLinkType`: the link predicate, and `editTarget`: the other item's IRI, possibly in another ledger |
 | `about`, `unabout` | `editTarget`: each target IRI |
 | `edit` | `editField`: the name of each field changed (`title`, `body`, `priority`, `revision`, `about`), never its value |
@@ -1251,7 +1306,7 @@ nothing else of it; the target's history has no event for a link it only mirrors
 $ source urn:iki:ledger:item:12:history
 #12: 3 event(s)
 2026-11-01T09:00:00.000Z  label bug  by urn:iki:gonk:client:aaaa
-2026-11-01T09:05:00.000Z  state filed to queued  by urn:iki:gonk:client:aaaa
+2026-11-01T09:05:00.000Z  state filed to queued  lifecycle version 1  by urn:iki:gonk:client:aaaa
 2026-11-01T09:06:00.000Z  edit title, body  by urn:iki:gonk:client:aaaa
 ```
 
@@ -1891,6 +1946,15 @@ lifecycle face names each state's moves. `Lifecycle::parse` refuses a move that 
 its states. A lifecycle with none behaves as it did, and built-in `kata-flight` declares none. New:
 `LifecycleState::moves_to`, `Lifecycle::declares_moves`, `Lifecycle::allows_move` and the term
 `ledger:movesTo` (redeploy `/ns/ledger`). See "A lifecycle may declare its moves".
+
+**A state event names the lifecycle's version (#2864).** Every transition's `ledger:EditEvent` records
+`ledger:lifecycleVersion`, read from the document's `owl:versionInfo` or, if it has none, a
+`ledger:lifecycleVersion` on the lifecycle, in the update that makes the move. The history shows it:
+`state filed to queued  lifecycle version 1`, and an older event says it has none (`null` in JSON).
+⚠ `Lifecycle::parse` now refuses a document with no version, so a host's own lifecycle needs one line
+added on upgrade; built-in `kata-flight` is version `1`. New: `Lifecycle::version`,
+`json::HistoryEvent`'s `lifecycle_version` and the term `ledger:lifecycleVersion` (redeploy
+`/ns/ledger`). See "A state event names the lifecycle's version".
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 
