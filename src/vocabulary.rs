@@ -276,6 +276,8 @@ term! {
     IN_FLIGHT => "inFlight";
     /// `ledger:drain` — who picks an item up from a state outside the flight.
     DRAIN => "drain";
+    /// `ledger:movesTo` — a state an item may go to from this one.
+    MOVES_TO => "movesTo";
     /// `ledger:state` — the one lifecycle state an item is in; absent means `filed`.
     STATE => "state";
     /// `ledger:stateAt` — when the item entered its current state.
@@ -444,6 +446,14 @@ mod tests {
             "these terms are written by the code and defined nowhere in vocabulary.ttl: \
              {missing:?}"
         );
+    }
+
+    /// A lifecycle a host wrote names this term, so its spelling is a contract.
+    #[test]
+    fn moves_to_is_the_term_a_lifecycle_document_writes() {
+        assert_eq!(MOVES_TO, "https://ikigai-rs.dev/ns/ledger#movesTo");
+        assert!(ALL.contains(&MOVES_TO));
+        assert!(VOCABULARY_TTL.contains("ledger:movesTo a rdf:Property"));
     }
 
     #[test]

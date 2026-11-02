@@ -14,6 +14,10 @@
 #
 # Every state's IRI is the lifecycle's IRI plus `:{name}`; the loader refuses anything else,
 # because the state Sink writes the IRI it builds from a name.
+#
+# It declares no `ledger:movesTo`, so any state may move to any other. That is on purpose: an
+# importer places an item straight from `filed` into the state its label names, and the doctor's
+# remedies move items out of flight wherever they stand.
 
 @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
 @prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .

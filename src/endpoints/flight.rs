@@ -29,6 +29,14 @@
 //! won and the answer is a typed [`Error::Conflict`] naming the state the item is in now. A
 //! state read alone could not tell two racers apart when both asked for the same `to=`.
 //!
+//! # A lifecycle may declare the moves
+//!
+//! When the ledger's lifecycle lists `ledger:movesTo`, a `(from, to)` pair it does not declare is
+//! refused from the arguments alone, before anything is read or written. That one check is enough
+//! for the write that follows because the compare-and-set pins the item to `from`: whatever a racer
+//! did in between, the update leaves `from` or it does nothing (`tests/lifecycle_moves.rs` forces
+//! it).
+//!
 //! # The assertions are names, and Exists answers them
 //!
 //! A loop that has just claimed an item, moved it, or closed it asks `exists` on the name of
@@ -315,6 +323,35 @@ fn named_state<'l>(lifecycle: &'l Lifecycle, arg: &str, name: &str) -> Result<&'
     })
 }
 
+/// The refusal for a pair the lifecycle does not declare, and every move it does from `from`.
+///
+/// ★ A `Conflict`, not an `InvalidArgument`: each argument is a good state of this lifecycle, and
+/// it is the state machine that says no, like a closed item refusing to enter flight. A caller
+/// that named a bad value hears `InvalidArgument` from [`named_state`].
+fn undeclared_move(lifecycle: &Lifecycle, from: &LifecycleState, to: &LifecycleState) -> Error {
+    let legal = if from.moves_to.is_empty() {
+        format!("It allows no move out of `{}`", from.name)
+    } else {
+        format!(
+            "From `{}` it allows moves to {}",
+            from.name,
+            from.moves_to
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    Error::Conflict(format!(
+        "The lifecycle `{}` declares no move from `{}` to `{}`, so nothing was written. {legal} \
+         (see `{}`)",
+        lifecycle.name(),
+        from.name,
+        to.name,
+        lifecycle.iri()
+    ))
+}
+
 /// The state document, for a read or a transition's answer.
 fn state_document(
     client: &StoreClient<'_, '_>,
@@ -382,6 +419,9 @@ impl Endpoint for StateEndpoint {
                 // Every argument is checked before anything is read or written.
                 let to = named_state(lifecycle, "to", inv.inline_str("to")?)?;
                 let from = named_state(lifecycle, "from", inv.inline_str("from")?)?;
+                if !lifecycle.allows_move(from, to) {
+                    return Err(undeclared_move(lifecycle, from, to));
+                }
                 let now = now_ms(inv)?;
                 let item = require_item(&client, id).await?;
                 let who = attribution::resolve(
@@ -513,8 +553,11 @@ impl Endpoint for StateEndpoint {
                     .summary(
                         "Move the item from `from` to `to` — only if it is in `from` now. A \
                          mismatch is a Conflict naming the state it is in; a `to` outside the \
-                         lifecycle is refused before anything is written. A closed item refuses \
-                         entry into an in-flight state, with a Conflict naming its close.",
+                         lifecycle is refused before anything is written. When the lifecycle \
+                         declares moves (`ledger:movesTo`), a pair it does not declare is a \
+                         Conflict naming every legal move from `from`, also before anything is \
+                         written. A closed item refuses entry into an in-flight state, with a \
+                         Conflict naming its close.",
                     )
                     .input(item_id_input())
                     .input(state_arg("to", "The state to move the item to."))
@@ -762,8 +805,9 @@ impl Endpoint for LifecycleEndpoint {
             .summary(
                 "The legal states of an item, in order: which are in flight (worked under a \
                  claim) and, for every other state, the drain that owns an item parked there. \
-                 `filed` is the state of an item that holds none. Each ledger uses one, fixed \
-                 by the host; `urn:iki:ledger:{ledger}:item:{id}:state` enforces it.",
+                 `filed` is the state of an item that holds none, and a lifecycle may declare \
+                 which moves are legal. Each ledger uses one, fixed by the host; \
+                 `urn:iki:ledger:{ledger}:item:{id}:state` enforces it.",
             )
             .verb(Verb::Meta)
             .action(
