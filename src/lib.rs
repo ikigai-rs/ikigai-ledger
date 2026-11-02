@@ -39,6 +39,7 @@
 //! …:{ledger}:item:{id}:holder:{holder}    Exists        is it held by that holder?       read
 //! …:{ledger}:item:{id}:closed             Exists        is it closed?                    read
 //! …:{ledger}:item:{id}:about              Sink Delete   add / remove what it is about    write
+//! …:{ledger}:item:{id}:history            Source        every event, oldest first        read
 //! ```
 //!
 //! # Composition: this crate owns no bytes

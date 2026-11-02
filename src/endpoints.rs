@@ -23,6 +23,7 @@
 //! urn:iki:ledger:{ledger}:item:{id}:state:{value}    Exists       is it in that state?
 //! urn:iki:ledger:{ledger}:item:{id}:holder:{holder}  Exists       is it held by them?
 //! urn:iki:ledger:{ledger}:item:{id}:closed           Exists       is it closed?
+//! urn:iki:ledger:{ledger}:item:{id}:history          Source       every event, oldest first
 //! ```
 //!
 //! Omit the `{ledger}` segment and you address the ledger called `default`, through the
@@ -325,6 +326,7 @@ const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 mod across;
 mod counts;
 mod flight;
+mod history;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
 pub const SPACE_ID: &str = "urn:iki:space:ledger";
@@ -481,6 +483,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             },
         )
         .bind(ItemPartGrammar::part("about"), AboutEndpoint)
+        .bind(ItemPartGrammar::part("history"), history::HistoryEndpoint)
         .bind(
             LedgerGrammar::with_id("item"),
             ItemEndpoint {
@@ -1754,6 +1757,7 @@ impl Endpoint for ItemEndpoint {
                 let now = now_ms(inv)?;
                 let item = require_item(&client, id).await?;
                 let mut updates = Vec::new();
+                let mut fields = Vec::new();
                 // ★ **An EMPTY `content` is no content** (ledger #398). The engine's `sink`
                 // always sends `content` — the piped value, or the empty string when nothing
                 // was piped (`ikigai-engine`'s `write_request`) — so `sink …:item:12
@@ -1764,42 +1768,31 @@ impl Endpoint for ItemEndpoint {
                 let given = inv.inline_str("content").ok();
                 if let Some(content) = given.filter(|c| !c.trim().is_empty()) {
                     let (title, body) = split_content(content)?;
-                    updates.push(replace_one(
-                        &client,
-                        &item.iri,
-                        v::ext::TITLE,
-                        &literal(&title),
-                    ));
-                    updates.push(replace_one(&client, &item.iri, v::BODY, &literal(&body)));
+                    let (title, body) = (literal(&title), literal(&body));
+                    updates.push(replace_one(&client, &item.iri, v::ext::TITLE, &title));
+                    fields.push(edited_field(&item.iri, "title", v::ext::TITLE, &title));
+                    updates.push(replace_one(&client, &item.iri, v::BODY, &body));
+                    fields.push(edited_field(&item.iri, "body", v::BODY, &body));
                 }
                 if let Ok(priority) = inv.inline_str("priority") {
-                    updates.push(replace_one(
-                        &client,
-                        &item.iri,
-                        v::PRIORITY,
-                        &integer(parse_priority(priority)?),
-                    ));
+                    let priority = integer(parse_priority(priority)?);
+                    updates.push(replace_one(&client, &item.iri, v::PRIORITY, &priority));
+                    fields.push(edited_field(&item.iri, "priority", v::PRIORITY, &priority));
                 }
                 if let Ok(revision) = inv.inline_str("revision") {
-                    updates.push(replace_one(
-                        &client,
-                        &item.iri,
-                        v::REVISION,
-                        &literal(revision),
-                    ));
+                    let revision = literal(revision);
+                    updates.push(replace_one(&client, &item.iri, v::REVISION, &revision));
+                    fields.push(edited_field(&item.iri, "revision", v::REVISION, &revision));
                 }
                 if let Ok(about) = inv.inline_str("about") {
                     for target in about.split_whitespace() {
+                        let target = sparql::iri(target, "about")?;
                         updates.push(insert_on_live(
                             &client,
                             &[&item.iri],
-                            &format!(
-                                "<{}> <{}> {} .",
-                                item.iri,
-                                v::ABOUT,
-                                sparql::iri(target, "about")?
-                            ),
+                            &format!("<{}> <{}> {target} .", item.iri, v::ABOUT),
                         ));
+                        fields.push(edited_field(&item.iri, "about", v::ABOUT, &target));
                     }
                 }
                 if updates.is_empty() {
@@ -1811,13 +1804,18 @@ impl Endpoint for ItemEndpoint {
                     return Err(Error::MissingArgument("content".to_string()));
                 }
                 updates.push(touch(&client, &item.iri, now));
-                updates.push(edit_event(
-                    &client,
-                    &item.iri,
-                    "edit",
-                    &Attribution::committer(inv)?,
-                    now,
-                )?);
+                updates.insert(
+                    0,
+                    edit_event_naming(
+                        &client,
+                        &item.iri,
+                        &[&item.iri],
+                        "edit",
+                        &Attribution::committer(inv)?,
+                        now,
+                        &fields,
+                    )?,
+                );
                 guarded_update(&client, &[&item.iri], &batch(&updates)).await?;
                 Ok(plain(format!("updated {} {}\n", item.short(), item.iri)))
             }
@@ -1970,6 +1968,21 @@ impl Endpoint for ItemEndpoint {
     }
 }
 
+/// The name of a field an item edit is about to set to `value`, recorded only when that changes
+/// it, and never its value (ledger #2841). An empty value and no value are the same here: an item
+/// filed without a body holds no `ledger:body`, and a retitle writes an empty one.
+fn edited_field(item: &str, name: &str, predicate: &'static str, value: &str) -> EditObject {
+    EditObject {
+        predicate: v::EDIT_FIELD,
+        value: literal(name),
+        changes: if value == literal("") {
+            format!("<{item}> <{predicate}> ?held . FILTER(STR(?held) != \"\")")
+        } else {
+            absent(&format!("<{item}> <{predicate}> {value}"))
+        },
+    }
+}
+
 /// Replace a single-valued property of a live item ([`live`]).
 fn replace_one(client: &StoreClient<'_, '_>, item: &str, predicate: &str, value: &str) -> String {
     replace_one_of(client, item, v::ITEM_CLASS, predicate, value)
@@ -2080,10 +2093,16 @@ struct Removed {
 
 /// Everything that goes with an item when it goes: its own triples, the triples of its
 /// comments, and every edge POINTING AT it.
+///
+/// ⚠ An event's `ledger:editTarget` is not an edge (ledger #2841): it is another item's history,
+/// saying what happened there and then, and that stays when the item it names goes, as its IRI
+/// stays on a tombstone. Its own events' targets go with their event, by `onItem`.
 fn removal_selector(subject: &str) -> String {
     format!(
-        "?s ?p ?o . FILTER(?s = {subject} || ?o = {subject} || EXISTS {{ ?s <{on}> {subject} }})",
+        "?s ?p ?o . FILTER(?s = {subject} || (?o = {subject} && ?p != <{target}>) || \
+         EXISTS {{ ?s <{on}> {subject} }})",
         on = v::ON_ITEM,
+        target = v::EDIT_TARGET,
     )
 }
 
@@ -3880,29 +3899,76 @@ fn edit_event(
     who: &Attribution,
     now: u64,
 ) -> Result<String> {
-    Ok(insert_on_live(
+    edit_event_naming(client, item, &[item], kind, who, now, &[])
+}
+
+/// One fact an edit event records about what it changed (ledger #2841).
+struct EditObject {
+    predicate: &'static str,
+    value: String,
+    /// The pattern that holds only while this write will change something: see
+    /// [`edit_event_naming`].
+    changes: String,
+}
+
+/// The pattern "`triple` is not there yet": an insert of it is a change.
+fn absent(triple: &str) -> String {
+    format!("FILTER NOT EXISTS {{ {triple} }}")
+}
+
+/// An [`edit_event`] that names its object (ledger #2841), live while all of `ends` are.
+///
+/// ★ **Whether this write changes anything is decided inside the update, never read and then
+/// written** (the 0.14.x races, ledger #2764, #2766): each object is its own operation, whose
+/// `WHERE` is evaluated under the store's write lock. So this goes AHEAD of the change in the
+/// batch: its guards read the graph as the change finds it. A write that changes nothing still
+/// has its event, since every write has a who, and names no object, so "when was this label
+/// removed" is not answered by the removal of a label the item never had.
+fn edit_event_naming(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    ends: &[&str],
+    kind: &str,
+    who: &Attribution,
+    now: u64,
+    objects: &[EditObject],
+) -> Result<String> {
+    let event = event_iri(item, "edit", now)?;
+    let guard: String = ends.iter().map(|end| live(end)).collect();
+    let mut operations = vec![insert_on_live(
         client,
-        &[item],
-        &edit_event_triples(item, kind, who, now)?,
-    ))
+        ends,
+        &edit_event_triples(&event, item, kind, who, now),
+    )];
+    operations.extend(objects.iter().map(|object| {
+        format!(
+            "INSERT {{ {} }} WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "<{event}> <{}> {} .",
+                object.predicate, object.value
+            )),
+            client.in_graph(&format!("{guard} {}", object.changes))
+        )
+    }));
+    Ok(batch(&operations))
 }
 
 /// The triples of an [`edit_event`], for an update that carries its own guard (a lifecycle
 /// transition's compare-and-set).
 pub(super) fn edit_event_triples(
+    event: &str,
     item: &str,
     kind: &str,
     who: &Attribution,
     now: u64,
-) -> Result<String> {
-    let event = event_iri(item, "edit", now)?;
-    let mut triples = event_triples(&event, v::EDIT_EVENT_CLASS, item, who, now);
+) -> String {
+    let mut triples = event_triples(event, v::EDIT_EVENT_CLASS, item, who, now);
     triples.push_str(&format!(
         "\n<{event}> <{}> {} .",
         v::EDIT_KIND,
         literal(kind)
     ));
-    Ok(triples)
+    triples
 }
 
 /// The holder whose claim the update that wrote [`release_record`] `record` released, read
@@ -4780,6 +4846,22 @@ impl Endpoint for DeferEndpoint {
 
 // ---------------------------------------------------------------------------- link
 
+/// What a link or an unlink's edit event names: the link's type and the other item, by its IRI.
+fn link_objects(predicate: &str, other: &str, changes: &str) -> [EditObject; 2] {
+    [
+        EditObject {
+            predicate: v::EDIT_LINK_TYPE,
+            value: format!("<{predicate}>"),
+            changes: changes.to_string(),
+        },
+        EditObject {
+            predicate: v::EDIT_TARGET,
+            value: format!("<{other}>"),
+            changes: changes.to_string(),
+        },
+    ]
+}
+
 #[derive(Clone)]
 struct LinkEndpoint;
 
@@ -4849,14 +4931,24 @@ impl Endpoint for LinkEndpoint {
         } else {
             &[&from.iri]
         };
+        let changes = if inv.request.verb == Verb::Sink {
+            absent(&triple)
+        } else {
+            triple.clone()
+        };
+        let event = edit_event_naming(
+            &client,
+            &from.iri,
+            ends,
+            edit,
+            &Attribution::committer(inv)?,
+            now,
+            &link_objects(predicate, &to.iri, &changes),
+        )?;
         guarded_update(
             &client,
             ends,
-            &batch(&[
-                update,
-                touch(&client, &from.iri, now),
-                edit_event(&client, &from.iri, edit, &Attribution::committer(inv)?, now)?,
-            ]),
+            &batch(&[event, update, touch(&client, &from.iri, now)]),
         )
         .await?;
         if want == JSON {
@@ -4980,14 +5072,28 @@ impl Endpoint for LabelEndpoint {
             ),
             other => return Err(unsupported("ledger-label", other)),
         };
+        let object = EditObject {
+            predicate: v::EDIT_LABEL,
+            value: literal(label),
+            changes: if inv.request.verb == Verb::Sink {
+                absent(&triple)
+            } else {
+                triple.clone()
+            },
+        };
+        let event = edit_event_naming(
+            &client,
+            &item.iri,
+            &[&item.iri],
+            edit,
+            &Attribution::committer(inv)?,
+            now,
+            &[object],
+        )?;
         guarded_update(
             &client,
             &[&item.iri],
-            &batch(&[
-                update,
-                touch(&client, &item.iri, now),
-                edit_event(&client, &item.iri, edit, &Attribution::committer(inv)?, now)?,
-            ]),
+            &batch(&[event, update, touch(&client, &item.iri, now)]),
         )
         .await?;
         Ok(plain(format!("{said} {} {label}\n", item.short())))
@@ -5077,30 +5183,41 @@ impl Endpoint for AboutEndpoint {
             });
         }
         let mut updates = Vec::new();
+        let mut objects = Vec::new();
         for target in &targets {
-            let triple = format!(
-                "<{}> <{}> {} .",
-                item.iri,
-                v::ABOUT,
-                sparql::iri(target, "content")?
-            );
+            let target = sparql::iri(target, "content")?;
+            let triple = format!("<{}> <{}> {target} .", item.iri, v::ABOUT);
+            objects.push(EditObject {
+                predicate: v::EDIT_TARGET,
+                value: target,
+                changes: if inv.request.verb == Verb::Sink {
+                    absent(&triple)
+                } else {
+                    triple.clone()
+                },
+            });
             updates.push(match inv.request.verb {
                 Verb::Sink => insert_on_live(&client, &[&item.iri], &triple),
                 _ => format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
             });
         }
         updates.push(touch(&client, &item.iri, now));
-        updates.push(edit_event(
-            &client,
-            &item.iri,
-            if inv.request.verb == Verb::Sink {
-                "about"
-            } else {
-                "unabout"
-            },
-            &Attribution::committer(inv)?,
-            now,
-        )?);
+        updates.insert(
+            0,
+            edit_event_naming(
+                &client,
+                &item.iri,
+                &[&item.iri],
+                if inv.request.verb == Verb::Sink {
+                    "about"
+                } else {
+                    "unabout"
+                },
+                &Attribution::committer(inv)?,
+                now,
+                &objects,
+            )?,
+        );
         guarded_update(&client, &[&item.iri], &batch(&updates)).await?;
         Ok(plain(format!(
             "{} {said} {}\n",

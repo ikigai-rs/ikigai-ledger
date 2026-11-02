@@ -124,6 +124,7 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .binding("holder", "none"),
         )
         .fixture(Fixture::new("ledger-item-closed", Verb::Exists).binding("id", b))
+        .fixture(Fixture::new("ledger-item-history", Verb::Source).binding("id", b))
         // `about` (ledger #398) points at B too: adding and removing a target leaves the
         // title, body and state the other parts read untouched.
         .fixture(
@@ -193,6 +194,7 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-item-state-is")
         .cacheable("ledger-item-holder-is")
         .cacheable("ledger-item-closed")
+        .cacheable("ledger-item-history")
         .cacheable("ledger-doctor")
         .pure("ledger-policy")
         .pure("ledger-lifecycle")
@@ -258,6 +260,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-item",
             "ledger-item-about",
             "ledger-item-closed",
+            "ledger-item-history",
             "ledger-item-holder-is",
             "ledger-item-state",
             "ledger-item-state-is",

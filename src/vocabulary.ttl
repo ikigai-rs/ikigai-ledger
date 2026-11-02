@@ -43,7 +43,7 @@
 
 <https://ikigai-rs.dev/ns/ledger> a owl:Ontology ;
     rdfs:label "ikigai-ledger" ;
-    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829)." ;
+    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841)." ;
     owl:versionInfo "0.17.0" .
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -551,7 +551,7 @@ ledger:ReleaseEvent a rdfs:Class ;
 
 ledger:EditEvent a rdfs:Class ;
     rdfs:label "edit event" ;
-    rdfs:comment "An edit that creates no node of its own, so that every write has a who: one per write, naming the edit in ledger:editKind and its maker in ledger:committer. A claim, a release and a close or reopen are recorded by their own events instead." .
+    rdfs:comment "An edit that creates no node of its own, so that every write has a who: one per write, naming the edit in ledger:editKind, its maker in ledger:committer and, when it changed something, what it changed (ledger:editLabel, ledger:stateFrom and ledger:stateTo, ledger:editLinkType and ledger:editTarget, ledger:editField). A claim, a release and a close or reopen are recorded by their own events instead." .
 
 ledger:takeoverFrom a rdf:Property ;
     rdfs:range xsd:string ;
@@ -572,6 +572,35 @@ ledger:editKind a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "edit kind" ;
     rdfs:comment "Which edit a ledger:EditEvent records, as a literal: label, unlabel, link, unlink, defer, resume, about, unabout, edit (an item's title, body, priority, revision or about) or state (a lifecycle transition)." .
+# What an edit changed (ledger #2841): each is written by the update that makes the change, only
+# when it changes something, so a write that changed nothing has an event that names no object.
+
+ledger:stateFrom a rdf:Property ;
+    rdfs:label "state from" ;
+    rdfs:comment "On a ledger:EditEvent of kind state, the IRI of the lifecycle state the item left, as the transition's own update found it, the IRI of filed when it held none." .
+
+ledger:stateTo a rdf:Property ;
+    rdfs:label "state to" ;
+    rdfs:comment "On a ledger:EditEvent of kind state, the IRI of the lifecycle state the item moved to." .
+
+ledger:editLabel a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "edit label" ;
+    rdfs:comment "On a ledger:EditEvent of kind label or unlabel, the label added or removed." .
+
+ledger:editTarget a rdf:Property ;
+    rdfs:label "edit target" ;
+    rdfs:comment "On a ledger:EditEvent of kind link or unlink, the other item's IRI, possibly in another ledger; of kind about or unabout, each target IRI added or removed. It is history, not an edge: it says what the edit named then, and stays when the item it names is deleted." .
+
+ledger:editLinkType a rdf:Property ;
+    rdfs:label "edit link type" ;
+    rdfs:comment "On a ledger:EditEvent of kind link or unlink, the type of the link, as a link predicate (ledger:blocks, ledger:parent, ledger:related)." .
+
+ledger:editField a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "edit field" ;
+    rdfs:comment "On a ledger:EditEvent of kind edit, the name of a field the edit changed: title, body, priority, revision or about. Never its value." .
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Typed links across ledgers (ledger #2829)
 # ═══════════════════════════════════════════════════════════════════════════

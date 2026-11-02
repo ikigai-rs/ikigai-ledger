@@ -553,8 +553,16 @@ fn every_edit_that_creates_no_node_records_its_committer() {
         ["label", "unlabel", "link", "unlink", "defer", "resume", "about", "edit", "state"]
     );
     for event in &recorded {
+        // What each edit changed is `tests/edit_event_objects.rs`'s.
+        let bookkeeping: Vec<&str> = keys(event)
+            .into_iter()
+            .filter(|key| {
+                !key.starts_with("state")
+                    && !["editLabel", "editTarget", "editLinkType", "editField"].contains(key)
+            })
+            .collect();
         assert_eq!(
-            keys(event),
+            bookkeeping,
             [
                 "committedAt",
                 "committer",

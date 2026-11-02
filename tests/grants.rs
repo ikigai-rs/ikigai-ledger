@@ -257,6 +257,12 @@ fn script() -> Vec<Step> {
         ),
         step("ledger-item-closed", Verb::Exists, at("item:1:closed"), &[]),
         step(
+            "ledger-item-history",
+            Verb::Source,
+            at("item:1:history"),
+            &[],
+        ),
+        step(
             "ledger-defer",
             Verb::Sink,
             at("defer"),

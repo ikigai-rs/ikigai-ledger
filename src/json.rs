@@ -534,6 +534,61 @@ pub struct StateDocument {
     pub from: Option<String>,
 }
 
+/// `…:{ledger}:item:{id}:history` — every event on one item, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct HistoryDocument {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// The item.
+    pub item: ItemRef,
+    /// The events, oldest first.
+    pub events: Vec<HistoryEvent>,
+}
+
+/// One event in a [`HistoryDocument`].
+///
+/// Which fields it has depends on `kind`, and an edit that changed nothing, or that was written
+/// before 0.18.0, has none of its object's fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct HistoryEvent {
+    /// The event's IRI.
+    pub iri: String,
+    /// `claim`, `release`, `closed`, `reopened`, or an edit's `ledger:editKind`.
+    pub kind: String,
+    /// When it happened; `null` when its stamp cannot be read.
+    pub at: Option<String>,
+    /// The principal that made the write; `null` when its capability carried none.
+    pub committer: Option<String>,
+    /// The label a `label` or `unlabel` added or removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The IRI of the state a `state` edit left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_from: Option<String>,
+    /// The IRI of the state a `state` edit moved to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_to: Option<String>,
+    /// A `link` or `unlink`'s type: `blocks`, `parent` or `related`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_type: Option<String>,
+    /// A `link` or `unlink`'s other item, or an `about` or `unabout`'s targets: IRIs alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
+    /// The names of the fields an `edit` changed, never their values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    /// The holder a `claim` took it as, or whose claim a `release` ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    /// Why a `release` happened: `released`, `closed` or `takeover`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// `…:{ledger}:doctor` — every problem the doctor found, at once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

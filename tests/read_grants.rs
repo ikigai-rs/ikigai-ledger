@@ -122,6 +122,7 @@ fn read_script() -> Vec<(&'static str, Verb, String)> {
             at("item:1:holder:none"),
         ),
         ("ledger-item-closed", Verb::Exists, at("item:1:closed")),
+        ("ledger-item-history", Verb::Source, at("item:1:history")),
         ("ledger-doctor", Verb::Source, at("doctor")),
         (
             "ledger-ledgers",

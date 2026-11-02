@@ -56,7 +56,7 @@ fn tail(item: &str) -> String {
 }
 
 /// The short name of a link predicate: `blocks`, `parent`, `related`.
-fn short(predicate: &str) -> &'static str {
+pub(super) fn short(predicate: &str) -> &'static str {
     v::LINK_TYPES
         .iter()
         .find(|(_, iri)| *iri == predicate)
@@ -523,15 +523,23 @@ pub(super) async fn link(
         )
     };
     // The edge, the stamp and the edit event in one update: the event is what moves the
-    // subject's version, so the change and its version are one write.
+    // subject's version, so the change and its version are one write. It names the other item
+    // by its IRI, which the link itself shows this ledger's readers, and nothing else of it.
+    let edge = format!("<{node}> <{}> <{}> .", v::ext::TYPE, v::LINK_CLASS);
+    let changes = if sink { absent(&edge) } else { edge.clone() };
+    let event = edit_event_naming(
+        client,
+        &from.iri,
+        &[&from.iri],
+        edit,
+        &who,
+        now,
+        &link_objects(predicate, &target, &changes),
+    )?;
     guarded_update(
         client,
         &[&from.iri],
-        &batch(&[
-            change,
-            touch(client, &from.iri, now),
-            edit_event(client, &from.iri, edit, &who, now)?,
-        ]),
+        &batch(&[event, change, touch(client, &from.iri, now)]),
     )
     .await?;
     sync(
@@ -553,12 +561,26 @@ pub(super) async fn link(
             ))
             .await?
         {
+            // The link's event stands, so the taking back is an unlink beside it: otherwise the
+            // history says this item is linked to something it no longer is.
+            let event = edit_event_naming(
+                client,
+                &from.iri,
+                &[&from.iri],
+                "unlink",
+                &who,
+                now,
+                &link_objects(predicate, &target, &edge),
+            )?;
             client
-                .update(&format!(
-                    "DELETE {{ {} }} WHERE {{ {} }}",
-                    client.in_graph(&format!("<{node}> ?p ?o")),
-                    client.in_graph(&format!("<{node}> ?p ?o"))
-                ))
+                .update(&batch(&[
+                    event,
+                    format!(
+                        "DELETE {{ {} }} WHERE {{ {} }}",
+                        client.in_graph(&format!("<{node}> ?p ?o")),
+                        client.in_graph(&format!("<{node}> ?p ?o"))
+                    ),
+                ]))
                 .await?;
             return Err(Error::NotFound(format!(
                 "no ledger item at `{target}`: it was deleted while this link was in flight, \
