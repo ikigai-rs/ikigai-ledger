@@ -544,7 +544,13 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
                 participants: participants.clone(),
             },
         )
-        .bind(LedgerGrammar::action("next"), NextEndpoint { policies })
+        .bind(
+            LedgerGrammar::action("next"),
+            NextEndpoint {
+                policies,
+                lifecycles,
+            },
+        )
 }
 
 // ------------------------------------------------------------------------- helpers
@@ -5678,6 +5684,37 @@ impl Endpoint for PurgeEndpoint {
 #[derive(Clone)]
 struct NextEndpoint {
     policies: Arc<Policies>,
+    lifecycles: Arc<Lifecycles>,
+}
+
+/// An inline argument, or `None` when it is absent.
+///
+/// ★ A value that cannot be read is an error here, never `None`: `drain=` and `state=` narrow what
+/// a step is offered, and reading a bad one as absent would offer it the whole ledger.
+fn present_str<'a>(inv: &'a Invocation<'_>, name: &str) -> Result<Option<&'a str>> {
+    match inv.inline_str(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::MissingArgument(_)) => Ok(None),
+        Err(unreadable) => Err(unreadable),
+    }
+}
+
+/// A drain name a caller wrote, checked against the ledger's lifecycle, in the words
+/// [`flight::named_state`] uses for a state.
+fn named_drain<'a>(lifecycle: &crate::lifecycle::Lifecycle, name: &'a str) -> Result<&'a str> {
+    let drains = lifecycle.drains();
+    if drains.contains(&name) {
+        return Ok(name);
+    }
+    Err(Error::InvalidArgument {
+        name: "drain".to_string(),
+        detail: format!(
+            "`{name}` is not a drain of the lifecycle `{}` this ledger uses; one of {} (see `{}`)",
+            lifecycle.name(),
+            drains.join(", "),
+            lifecycle.iri()
+        ),
+    })
 }
 
 #[async_trait]
@@ -5702,6 +5739,14 @@ impl Endpoint for NextEndpoint {
                     self.policies.names().join(", ")
                 ),
             })?;
+        // Refused from the arguments, before anything is read.
+        let lifecycle = self.lifecycles.for_ledger(client.ledger());
+        let drain = present_str(inv, "drain")?
+            .map(|name| named_drain(lifecycle, name))
+            .transpose()?;
+        let state = present_str(inv, "state")?
+            .map(|name| flight::named_state(lifecycle, "state", name))
+            .transpose()?;
         let filter = Filter {
             status: Status::Open,
             kind: inv.inline_str("kind").ok().map(str::to_string),
@@ -5711,7 +5756,16 @@ impl Endpoint for NextEndpoint {
             ..Filter::default()
         };
         let limit = parse_limit(inv, 3)?;
-        let set = select::ready_at(&client, &filter, now).await?;
+        let mut set = select::ready_at(&client, &filter, now).await?;
+        // ★ After the ready set, like `labels=`: blocked, the cycle check and leverage have been
+        // computed over the whole ledger, so these only choose which items are being asked about.
+        // Before the horizons below, because an item this leaves out cannot change this answer.
+        if drain.is_some() || state.is_some() {
+            set = set.in_states(lifecycle, |held| {
+                drain.is_none_or(|drain| held.drain.as_deref() == Some(drain))
+                    && state.is_none_or(|state| held.name == state.name)
+            });
+        }
         // ★ A lease running out changes this answer with nothing written — an exclusion's
         // `claimed` becomes `lease-expired` — so the answer holds only until the earliest
         // running lease ends, whatever the policy says. Same trap as leverage's age points.
@@ -5811,6 +5865,32 @@ impl Endpoint for NextEndpoint {
                     ArgSpec::new("about")
                         .summary("Only candidates filed against this resource IRI.")
                         .class(v::ext::XSD_ANY_URI)
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("drain")
+                        .summary(
+                            "Only candidates whose current state drains to this step, `filed` \
+                             included when its drain matches. A drain of the ledger's lifecycle \
+                             (`urn:iki:ledger:lifecycle:{name}`), which is what a value is \
+                             judged against. Blocked items, cycles and leverage are still \
+                             computed over the whole ledger.",
+                        )
+                        .class(v::ext::XSD_STRING)
+                        .one_of(self.lifecycles.drain_names())
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("state")
+                        .summary(
+                            "Only candidates in this state, `filed` being an item that holds \
+                             none. A state of the ledger's lifecycle \
+                             (`urn:iki:ledger:lifecycle:{name}`), which is what a value is \
+                             judged against. Blocked items, cycles and leverage are still \
+                             computed over the whole ledger.",
+                        )
+                        .class(v::ext::XSD_STRING)
+                        .one_of(self.lifecycles.state_names())
                         .optional(),
                 )
                 .input(

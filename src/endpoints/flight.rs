@@ -317,7 +317,11 @@ fn cas(
 }
 
 /// A state name a caller wrote, checked against the ledger's lifecycle.
-fn named_state<'l>(lifecycle: &'l Lifecycle, arg: &str, name: &str) -> Result<&'l LifecycleState> {
+pub(super) fn named_state<'l>(
+    lifecycle: &'l Lifecycle,
+    arg: &str,
+    name: &str,
+) -> Result<&'l LifecycleState> {
     lifecycle.state(name).ok_or_else(|| Error::InvalidArgument {
         name: arg.to_string(),
         detail: format!(
