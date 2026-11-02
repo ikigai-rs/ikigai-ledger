@@ -19,7 +19,7 @@
 //!   so nothing it was given is lost and no second close is recorded.
 //! - **Evidence is history, not an edge.** A target deleted later, or while the close was in
 //!   flight, goes on being named by its IRI, as `ledger:editTarget` names one
-//!   ([`removal_selector`]).
+//!   ([`Selector`]).
 
 use super::*;
 
