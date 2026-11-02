@@ -1564,7 +1564,7 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### 0.17.0 (not yet published): typed links across ledgers (ledger #2829)
+### 0.17.0: typed links across ledgers (ledger #2829)
 
 **Typed links across ledgers (#2829).** `blocks`, `parent` and `related` may point at an item of
 another ledger, admitted by the new `urn:cap:ledger:link-in:{ledger}` on the target's ledger
@@ -1575,7 +1575,7 @@ no race leaves it stale. The target's `next` excludes an item with an open block
 `blocked_elsewhere` and `mirrored`, and the terms `Link`, `Mirror`, `linkType`, `linkTarget`,
 `mirrorOf`, `subjectOpen`, `linkPresent` and `mirrorVersion`. See "Links across ledgers" above. Redeploy `/ns/ledger` after this release: it gains the eight terms.
 
-### 0.16.0: aliases by scheme (ledger #2828)
+### 0.16.0 (published 2026-11-01): aliases by scheme (ledger #2828)
 
 An item can be named by an external id: a `(scheme, value)` alias such as `kata:<uid>` or
 `gh:<owner>/<repo>#<n>`, unique per scheme across the deployment, resolved by every item reference
