@@ -1288,7 +1288,14 @@ impl Endpoint for ItemsEndpoint {
         let mut filter = listing_filter(inv, &client).await?;
         filter.limit = parse_limit(inv, 50)?;
         filter.offset = parse_count(inv, "offset", 0)?;
-        let items = model::load_items(&client, &filter).await?;
+        let mut items = model::load_items(&client, &filter).await?;
+        // ★ A row is the item object `item:{id}` shows (ledger #2927): its links into other
+        // ledgers and the mirrors of theirs, read for the whole page in two queries. Until
+        // 0.18.0 only the item's own read added them, so a row held its local links alone. The
+        // plain line names no edges, so it costs nothing there.
+        if want != PLAIN {
+            across::decorate_all(inv, &client, &mut items).await?;
+        }
         if want == TURTLE {
             let mut graph = Graph::new();
             for item in &items {

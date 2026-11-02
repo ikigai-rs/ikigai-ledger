@@ -771,3 +771,91 @@ fn a_link_that_cannot_reach_the_mirror_is_refused_and_changes_nothing() {
     assert!(source(&kernel, &at(SUBJECT, "item:1"), &[]).contains("blocks:"));
     assert!(next(&kernel, TARGET).starts_with("nothing is ready"));
 }
+
+/// ★ The item object is the same wherever it appears (ledger #2927): a listing row carries the
+/// links into other ledgers and the mirrored edges that the item's own read shows. Until 0.18.0
+/// only `item:{id}` added them, so a row of `items` held only the links within its ledger and
+/// no `mirrored` at all. Several items on one page, so the batched read is checked per item.
+#[test]
+fn a_listing_row_carries_the_links_across_and_the_mirrors_its_item_face_shows() {
+    let kernel = kernel();
+    let (subject, target) = blocked_pair(&kernel);
+    let umbrella = file(&kernel, TARGET, "The goal");
+    let other = file(&kernel, TARGET, "See also");
+    let lone = file(&kernel, SUBJECT, "Nothing across");
+    for (kind, to) in [("parent", &umbrella), ("related", &other)] {
+        sink(
+            &kernel,
+            &at(SUBJECT, "link"),
+            &[("item", "1"), ("content", to), ("type", kind)],
+        );
+    }
+    for (ledger, item) in [
+        (SUBJECT, &subject),
+        (SUBJECT, &lone),
+        (TARGET, &target),
+        (TARGET, &umbrella),
+        (TARGET, &other),
+    ] {
+        let face: serde_json::Value =
+            serde_json::from_str(&source(&kernel, item, &[("as", "application/json")])).unwrap();
+        let listing: serde_json::Value = serde_json::from_str(&source(
+            &kernel,
+            &at(ledger, "items"),
+            &[("as", "application/json")],
+        ))
+        .unwrap();
+        let row = listing["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["iri"] == face["item"]["iri"])
+            .unwrap_or_else(|| panic!("{item} is listed: {listing}"));
+        assert_eq!(row["links"], face["item"]["links"], "links of {item}");
+        assert_eq!(
+            row["mirrored"], face["item"]["mirrored"],
+            "mirrored of {item}"
+        );
+    }
+    // And the rows say what the faces say, not merely the same nothing.
+    let listing: serde_json::Value = serde_json::from_str(&source(
+        &kernel,
+        &at(SUBJECT, "items"),
+        &[("as", "application/json")],
+    ))
+    .unwrap();
+    let row = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["iri"] == serde_json::json!(subject))
+        .unwrap();
+    let targets: Vec<&str> = row["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["target"]["iri"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        targets,
+        [target.as_str(), umbrella.as_str(), other.as_str()]
+    );
+    let listing: serde_json::Value = serde_json::from_str(&source(
+        &kernel,
+        &at(TARGET, "items"),
+        &[("as", "application/json")],
+    ))
+    .unwrap();
+    let mirrored: Vec<&serde_json::Value> = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| &row["mirrored"])
+        .filter(|m| !m.is_null())
+        .collect();
+    assert_eq!(
+        mirrored.len(),
+        2,
+        "acme#1 and acme#2 each hold one: {listing}"
+    );
+}

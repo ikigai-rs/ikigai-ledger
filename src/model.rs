@@ -1276,7 +1276,9 @@ const VALUES_BUDGET: usize = 256 * 1024;
 
 /// `iris` as the bodies of `VALUES` lists (`<a> <b> …`), in order, each under
 /// [`VALUES_BUDGET`] bytes: one query per list, and the caller joins the answers.
-fn values_lists<S: AsRef<str>>(iris: impl IntoIterator<Item = S>) -> Result<Vec<String>> {
+pub(crate) fn values_lists<S: AsRef<str>>(
+    iris: impl IntoIterator<Item = S>,
+) -> Result<Vec<String>> {
     let mut lists = Vec::new();
     let mut list = String::new();
     for iri in iris {
