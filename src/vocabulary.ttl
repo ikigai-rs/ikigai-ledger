@@ -451,6 +451,12 @@ ledger:drain a rdf:Property ;
     rdfs:label "drain" ;
     rdfs:comment "Who picks an item up from this state: present exactly when the state is not in flight. The contract's rule that nothing parks outside the flight without saying who owns it, made a required property of the vocabulary." .
 
+ledger:movesTo a rdf:Property ;
+    rdfs:domain ledger:LifecycleState ;
+    rdfs:range ledger:LifecycleState ;
+    rdfs:label "movesTo" ;
+    rdfs:comment "A state of the same lifecycle an item may go to from this one; repeatable. When a lifecycle declares any, urn:iki:ledger:{ledger}:item:{id}:state refuses a move it does not declare, and a state with none is one an item cannot leave. When it declares none, any state may move to any other. A state does not declare a move to itself: a request to stay changes nothing." .
+
 ledger:state a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range ledger:LifecycleState ;

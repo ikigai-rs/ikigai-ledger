@@ -921,6 +921,9 @@ conflict: #12 is in `queued`, not `filed`. A transition is a compare-and-set: �
   before anything is read. `from=X to=X` is answered `unchanged` without a write, because a
   no-op update still invalidates every cached read of the ledger. A refused transition writes
   nothing, not even `dcterms:modified`.
+- **A move the lifecycle does not declare is refused** (`Conflict`, naming the lifecycle and every
+  legal move from `from`), also before anything is read, when the lifecycle declares any move. See
+  "A lifecycle may declare its moves".
 - `content=` is an optional note, recorded as a comment when the item moves; `as=application/json`
   answers `{schema, ledger, item, lifecycle, state, in_flight, drain, since, outcome, from}`.
 - `close` does not touch the state, and the state does not touch `close`: they are different
@@ -962,8 +965,53 @@ another — where an ordering policy is chosen per request. A policy only orders
 lifecycle decides which values a state may hold, and two of them in one ledger would let two
 writers disagree about what is legal. `Lifecycle::parse` refuses, at boot, every shape the
 state resource relies on not having: a state whose IRI is not `{lifecycle}:{name}`, duplicate
-names or orders, a state outside the flight with no drain, a state in flight with one, and a
-lifecycle that does not declare `filed` first.
+names or orders, a state outside the flight with no drain, a state in flight with one, a
+lifecycle that does not declare `filed` first, and a `ledger:movesTo` that is not a move between
+two of its states.
+
+### A lifecycle may declare its moves
+
+Since 0.18.0 (ledger #2863) a state may list where an item can go from it, with `ledger:movesTo`,
+repeatable:
+
+```turtle
+<urn:iki:ledger:lifecycle:gated:filed> a ledger:LifecycleState ;
+    rdfs:label "filed" ; ledger:order 0 ; ledger:inFlight false ; ledger:drain "triage" ;
+    ledger:movesTo <urn:iki:ledger:lifecycle:gated:queued> .
+```
+
+When a lifecycle declares **any** move, the state resource refuses every `(from, to)` pair it does
+not declare, and the plain face of the lifecycle ends each state's line with `moves to: …`
+(`moves to: nowhere` for a state an item cannot leave):
+
+```text
+$ sink urn:iki:ledger:item:12:state from=filed to=done
+conflict: The lifecycle `gated` declares no move from `filed` to `done`, so nothing was written. From `filed` it allows moves to `queued` (see `urn:iki:ledger:lifecycle:gated`)
+```
+
+- **A `Conflict`, not an `InvalidArgument`.** Each argument is a good state of this lifecycle, and
+  it is the state machine that says no, as it does when a closed item asks to enter flight. A state
+  the lifecycle does not have is still `InvalidArgument`.
+- **Checked from the arguments alone**, before anything is read or written, so an undeclared pair
+  gets this answer about an item that does not exist as well. That one check holds for the write
+  that follows because the compare-and-set pins the item to `from`: if a racer moves the item after
+  the check, the transition is the usual `Conflict` naming where the item is now, and no undeclared
+  move happens. `tests/lifecycle_moves.rs` forces that schedule.
+- **`from=X to=X` is not a move**: it needs no declaration, and is answered `unchanged` as ever. A
+  state may not declare a move to itself.
+- **A lifecycle that declares no moves behaves as it always did**: any state may move to any other,
+  and its plain face does not change.
+- **The built-in `kata-flight` declares none.** gonk's dispatcher and workers make no state move
+  today: they claim, comment and close. What does move state is gonk's kata importer, from `filed`
+  straight to whichever of the five states a kata label names, and this crate's doctor tells people
+  to move an item out of flight from wherever it stands. A table that kept all of that legal would
+  refuse almost nothing, and a narrower one would break the importer.
+- `Lifecycle::parse` refuses, at boot and with a sentence, a move to a state the lifecycle does not
+  declare (another lifecycle's included), a move that is not an IRI, a move to the state itself, and
+  a move on anything that is not one of its states. That last one would otherwise vanish in silence,
+  and, if it were the only move, would turn enforcement off.
+- `close` and `reopen` do not move state, and an importer's history records what happened elsewhere
+  as history only, so neither is checked against the moves.
 
 ## Claims: a lease, a kind, and a takeover
 
@@ -1835,6 +1883,14 @@ imported. Anyone else is told to write the change itself. New: `ledger:eventKey`
 `json::Answer`'s `recorded` and `already_recorded`. ⚠ `history` is now a reserved ledger name, so a
 ledger already called that can no longer be addressed. See "An importer's history", with its
 measurements and the store limits it reaches.
+
+**A lifecycle's legal moves (#2863).** A `ledger:LifecycleState` may list `ledger:movesTo`. When a
+lifecycle declares any, the state Sink refuses a pair it does not declare with a `Conflict` naming
+the lifecycle and every legal move from `from`, before anything is read or written, and the plain
+lifecycle face names each state's moves. `Lifecycle::parse` refuses a move that is not between two of
+its states. A lifecycle with none behaves as it did, and built-in `kata-flight` declares none. New:
+`LifecycleState::moves_to`, `Lifecycle::declares_moves`, `Lifecycle::allows_move` and the term
+`ledger:movesTo` (redeploy `/ns/ledger`). See "A lifecycle may declare its moves".
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 

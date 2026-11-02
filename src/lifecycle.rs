@@ -22,6 +22,10 @@
 //! enforces, so the IRI a transition writes is the one this document declares. The doctor
 //! reports a state outside it (a hand edit, an import, or a ledger whose lifecycle changed).
 //!
+//! A state may also list where it may go, with `ledger:movesTo`. Once a lifecycle declares any
+//! move, the state resource refuses a `(from=, to=)` pair it does not declare; one that declares
+//! none, as [`Lifecycle::kata_flight`] does, lets any state move to any other.
+//!
 //! ```
 //! use ikigai_ledger::lifecycle::{Lifecycle, FILED};
 //! let flight = Lifecycle::kata_flight();
@@ -73,6 +77,8 @@ pub struct LifecycleState {
     pub drain: Option<String>,
     /// What the state means, in a sentence.
     pub summary: Option<String>,
+    /// The names of the states `ledger:movesTo` lets an item go to from here, in order.
+    pub moves_to: Vec<String>,
 }
 
 /// A lifecycle: its states, in order. See the module documentation.
@@ -90,14 +96,16 @@ impl Lifecycle {
     ///
     /// The document names exactly one `ledger:Lifecycle` at `urn:iki:ledger:lifecycle:{name}`
     /// and lists its states with `ledger:hasState`. Each state carries `rdfs:label` (its name),
-    /// `ledger:order`, `ledger:inFlight` and — when it is not in flight — `ledger:drain`.
+    /// `ledger:order`, `ledger:inFlight` and — when it is not in flight — `ledger:drain`, and may
+    /// list the states it can move to with `ledger:movesTo`.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] naming what is wrong, for each of the rules the state
     /// resource relies on: a state's IRI is `{lifecycle IRI}:{name}`; names and orders are
     /// unique; a state is in flight or names a drain, never both and never neither; and
-    /// [`FILED`] is declared, first, and not in flight.
+    /// [`FILED`] is declared, first, and not in flight; and a `ledger:movesTo` goes from one of
+    /// these states to another of them.
     pub fn parse(turtle: &str) -> Result<Lifecycle> {
         let bad = |detail: String| Error::InvalidArgument {
             name: "lifecycle".to_string(),
@@ -214,6 +222,7 @@ impl Lifecycle {
                 in_flight,
                 drain,
                 summary: literal(&state, v::ext::COMMENT),
+                moves_to: Vec::new(),
             });
         }
         states.sort_by(|a, b| a.order.cmp(&b.order).then(a.name.cmp(&b.name)));
@@ -237,6 +246,7 @@ impl Lifecycle {
                 )))
             }
         }
+        read_moves(&graph, &name, &mut states)?;
         Ok(Lifecycle {
             name,
             iri,
@@ -282,6 +292,17 @@ impl Lifecycle {
         self.states.iter().find(|s| s.iri == iri)
     }
 
+    /// Whether any state lists a `ledger:movesTo`. When none does, every move is legal.
+    pub fn declares_moves(&self) -> bool {
+        self.states.iter().any(|s| !s.moves_to.is_empty())
+    }
+
+    /// Whether an item may go from `from` to `to`. Staying where it is is not a move, so it is
+    /// never refused here.
+    pub fn allows_move(&self, from: &LifecycleState, to: &LifecycleState) -> bool {
+        from.name == to.name || !self.declares_moves() || from.moves_to.contains(&to.name)
+    }
+
     /// The document as a graph, for the Turtle face.
     pub fn graph(&self) -> &Graph {
         &self.graph
@@ -306,6 +327,13 @@ impl Lifecycle {
             if state.name == FILED {
                 out.push_str("  (no ledger:state)");
             }
+            if self.declares_moves() {
+                let moves = match state.moves_to.as_slice() {
+                    [] => "nowhere".to_string(),
+                    moves => moves.join(", "),
+                };
+                out.push_str(&format!("  moves to: {moves}"));
+            }
             out.push('\n');
         }
         out
@@ -319,6 +347,71 @@ impl Lifecycle {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// Put each `ledger:movesTo` in the document on the state it leaves.
+///
+/// ★ Read from the whole document rather than state by state: a move on a subject that is not a
+/// state would otherwise be dropped in silence, and if it were the only one, the lifecycle would
+/// quietly enforce no moves at all.
+fn read_moves(graph: &Graph, name: &str, states: &mut [LifecycleState]) -> Result<()> {
+    let bad = |detail: String| Error::InvalidArgument {
+        name: "lifecycle".to_string(),
+        detail,
+    };
+    let moves_to = NamedNode::new_unchecked(v::MOVES_TO);
+    let position = |iri: &str| states.iter().position(|s| s.iri == iri);
+    let mut moves: Vec<(usize, usize)> = Vec::new();
+    for triple in graph.iter().filter(|t| t.predicate == moves_to.as_ref()) {
+        let leaving = match triple.subject {
+            NamedOrBlankNodeRef::NamedNode(n) => position(n.as_str()),
+            NamedOrBlankNodeRef::BlankNode(_) => None,
+        };
+        let Some(leaving) = leaving else {
+            return Err(bad(format!(
+                "`{}` declares a ledger:movesTo and is not a state of `{name}`; list it with \
+                 ledger:hasState or remove the move",
+                match triple.subject {
+                    NamedOrBlankNodeRef::NamedNode(n) => n.as_str().to_string(),
+                    blank => blank.to_string(),
+                }
+            )));
+        };
+        let label = &states[leaving].name;
+        let oxrdf::TermRef::NamedNode(target) = triple.object else {
+            return Err(bad(format!(
+                "the state `{label}` moves to {}, which is not an IRI; a move names a state of \
+                 `{name}` by its IRI",
+                triple.object
+            )));
+        };
+        let Some(arriving) = position(target.as_str()) else {
+            return Err(bad(format!(
+                "the state `{label}` moves to `{}`, which is not a state of `{name}`; its states \
+                 are {}",
+                target.as_str(),
+                states
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        if arriving == leaving {
+            return Err(bad(format!(
+                "the state `{label}` moves to itself; a request to stay is answered `unchanged` \
+                 with no write, so it is not a move to declare"
+            )));
+        }
+        moves.push((leaving, arriving));
+    }
+    // `states` is already in order, so sorted positions read the moves in order too.
+    moves.sort_unstable();
+    for (leaving, arriving) in moves {
+        let target = states[arriving].name.clone();
+        states[leaving].moves_to.push(target);
+    }
+    Ok(())
 }
 
 /// A lifecycle or state name: the shape a ledger name has (lowercase letters, digits, `-` and
@@ -494,6 +587,29 @@ mod tests {
         );
         // A name that is not an IRI segment a caller can type.
         refused("lifecycle:tiny", "lifecycle:Tiny");
+    }
+
+    #[test]
+    fn moves_are_read_in_state_order_and_only_a_lifecycle_with_some_refuses_any() {
+        let tiny = Lifecycle::parse(MINIMAL).unwrap();
+        let (filed, doing) = (tiny.state("filed").unwrap(), tiny.state("doing").unwrap());
+        assert!(!tiny.declares_moves());
+        assert!(tiny.allows_move(doing, filed));
+
+        let gated = Lifecycle::parse(&MINIMAL.replace(
+            "ledger:inFlight true .",
+            "ledger:inFlight true . <urn:iki:ledger:lifecycle:tiny:filed> ledger:movesTo \
+             <urn:iki:ledger:lifecycle:tiny:doing> .",
+        ))
+        .unwrap();
+        let (filed, doing) = (gated.state("filed").unwrap(), gated.state("doing").unwrap());
+        assert!(gated.declares_moves());
+        assert_eq!(filed.moves_to, ["doing"]);
+        assert!(gated.allows_move(filed, doing));
+        assert!(!gated.allows_move(doing, filed));
+        assert!(gated.allows_move(doing, doing), "staying is not a move");
+
+        assert!(!Lifecycle::kata_flight().declares_moves());
     }
 
     #[test]
