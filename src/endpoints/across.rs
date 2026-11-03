@@ -214,10 +214,35 @@ pub(super) async fn decorate_all(
     client: &StoreClient<'_, '_>,
     items: &mut [Item],
 ) -> Result<()> {
+    decorate_each(inv, client, items.iter_mut().collect()).await
+}
+
+/// [`decorate_all`] over every item a `next` selection names, ranked and excluded alike, in the
+/// same two queries (ledger #2931): a `next` row is the item object its own read shows.
+pub(super) async fn decorate_selection(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    selection: &mut crate::select::Selection,
+) -> Result<()> {
+    let items = selection
+        .ranked
+        .iter_mut()
+        .map(|(_, item)| item)
+        .chain(selection.excluded.iter_mut().map(|(item, _)| item))
+        .collect();
+    decorate_each(inv, client, items).await
+}
+
+async fn decorate_each(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    mut items: Vec<&mut Item>,
+) -> Result<()> {
     if items.is_empty() {
         return Ok(());
     }
-    let iris: Vec<&str> = items.iter().map(|i| i.iri.as_str()).collect();
+    let iris: Vec<String> = items.iter().map(|i| i.iri.clone()).collect();
+    let iris: Vec<&str> = iris.iter().map(String::as_str).collect();
     let mut outbound = outbound_of(client, &iris).await?;
     let mut inbound = inbound_of(client, &iris).await?;
     for item in items.iter_mut() {

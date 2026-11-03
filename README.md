@@ -629,10 +629,10 @@ $ source urn:iki:ledger:acme:item:7                                    # under a
   mirrored and `related` is not. The target's `next` reads its own graph only and excludes an item
   with an open blocker elsewhere (`blocked_elsewhere` in JSON); a store write cuts its cache like
   any other. The target's item faces show `blocked-by:` and `child:` lines (`mirrored` in JSON, on
-  `item:{id}` and, since 0.18.0, on every `items` row),
+  `item:{id}` and, since 0.18.0, on every `items` and `next` row),
   saying "not readable under your grants" when the reader holds no read grant on the subject's
   ledger; the subject's faces show the edge among its `blocks:`, `parent:` and `related:` lines,
-  and its JSON and Turtle `items` rows carry it too (since 0.18.0).
+  and its JSON and Turtle `items` rows and its JSON `next` rows carry it too (since 0.18.0).
 - **Closing or reopening the subject writes every mirror**, so a closer needs the target's store
   grants too; without them the close is refused before anything changes, naming the grants. A
   subject that carries a `blocks` or `parent` link across is not deleted until it is unlinked. Deleting the target
@@ -2087,8 +2087,12 @@ carry an item's links into other ledgers and, in JSON, its `mirrored` edges, as 
 until 0.18.0 a row held only the links within its ledger and no `mirrored`. They are read for the
 whole page in two queries (links out, mirrors in), never one per item, with the same
 `not readable under your grants` rule. At #2922's profile (3,690 items, 447,332 triples) a JSON
-page of 50 took 0.017 s, against 0.019 s before, which is noise. ⚠ `next`'s items do not carry them
-yet. The plain face is unchanged.
+page of 50 took 0.017 s, against 0.019 s before, which is noise. The plain face is unchanged.
+
+**A `next` row is that item too (#2931).** The JSON `next` face's items, ranked and excluded alike,
+carry the same links across and `mirrored` edges, read for the whole selection in the same two
+queries; until 0.18.0 they were rendered without them, so a `next` row and its item face disagreed
+on any item with an edge across. The plain and Turtle `next` faces are unchanged.
 
 **An importer's past keeps the source's `modified` (#2928).** A comment with `created=` or a close
 with `closed-at=` from an import principal moves the item's `modified` only forward, to the later of

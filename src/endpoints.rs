@@ -5866,13 +5866,19 @@ impl Endpoint for NextEndpoint {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        let selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
+        let mut selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
         let repr = match want {
             TURTLE => Representation::new(
                 ReprType::new(TURTLE).with_param("charset", "utf-8"),
                 selection.turtle()?,
             ),
-            JSON => json_repr(json::render(&json::next(&client, &selection).await?)?),
+            JSON => {
+                // ★ A row is the item object `item:{id}` and `items` show (ledger #2931): its
+                // links into other ledgers and the mirrors of theirs, for the whole selection in
+                // two queries. Until 0.18.0 `next` rendered its items without them.
+                across::decorate_selection(inv, &client, &mut selection).await?;
+                json_repr(json::render(&json::next(&client, &selection).await?)?)
+            }
             _ => plain(selection.plain()),
         };
         // ★ Cached under the store's write threads AND until the policy's own horizon — the
