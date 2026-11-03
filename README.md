@@ -839,14 +839,18 @@ ran the same test on that release):
 The bound stays a safety net for an update that really does observe the whole graph (`CLEAR`,
 `DROP`, a pattern with no constant): the scoped door still refuses one past it.
 
-⚠ **What naming the dependents costs.** They are read first (one narrow read), then named, three of
-the store's 1,024 algebra operators each. A dependent written after that read is still caught: its
-own `onItem` edge points at the item, and every commit holds only while the item has no dependent it
-did not name. A recoverable delete then reads and commits again, as for any racing write, and so
-does a purge. Past 250 dependents, or with a dependent that is a blank node (which has no name to put
-in a pattern, and which this crate never writes), a delete and a purge fall back to the 0.17.0 form,
-which copies the whole graph and works only in a graph inside the bound. Nothing is batched: each
-removal is still one update, so it is atomic, and the ~340-event limit below did not move.
+⚠ **What listing the dependents costs.** They are read first (one narrow read), then listed in one
+`VALUES ?d { … } ?d ?p ?o` pattern, which the store's scoped door narrows to the listed subjects
+since ikigai-store 0.3.3 (ledger #2940, #2941), so any number of them copies only their quads. A
+dependent written after that read is still caught: its own `onItem` edge points at the item, and
+every commit holds only while the item has no dependent it did not list, a check counted once per
+update. A recoverable delete then reads and commits again, as for any racing write, and so does a
+purge. Only a dependent that is a blank node (which has no name to list, and which this crate never
+writes) makes a purge fall back to the 0.17.0 form, which copies the whole graph and works only in a
+graph inside the bound; a recoverable delete refuses one, as it always has. Nothing is batched: each
+removal is still one update, so it is atomic, and the ~340-event limit below did not move (a listed
+dependent costs about 70 bytes of update text where a branch cost about 150, against about 3 KB an
+event of inlined quads, so it moves by a few percent at most).
 
 ⚠ **The graveyard is touched first and the live graph last, deliberately: the live graph is
 the commit point.** Every read here looks at the live graph and none looks at the graveyard,
@@ -1553,9 +1557,10 @@ is refused with a sentence naming its bound:
 
 - **A graph past 250,000 quads deletes and purges as any other since 0.18.0** (ledger #2922): their
   updates copy the item, not the graph, and the 447,332-triple ledger above deleted and purged at the
-  default bound. Through 0.17.0 it refused every `delete` and `purge`. What remains is an item with
-  more than 250 comments and events in such a graph, which falls back to copying the whole graph and
-  is refused there (see "What a delete and a purge cost").
+  default bound. Through 0.17.0 it refused every `delete` and `purge`. Since ledger #2941 that holds
+  for an item with any number of comments and events (500 are tested); 0.18.0's first form fell
+  back to copying the whole graph past 250 and was refused there (see "What a delete and a purge
+  cost").
 - **An item with more than about 340 events cannot be deleted.** Its delete inlines its quads into
   one update, about 3 KB an event, and the store takes 1 MiB: 300 events deleted, 350 were refused.
   The item stays whole and live, and that refused delete leaves a copy in the graveyard. Comments
@@ -2086,9 +2091,12 @@ added on upgrade; built-in `kata-flight` is version `1`. New: `Lifecycle::versio
 its comments, events and links, in every pattern they send, so the store's scoped door copies the
 item and nothing else: on a 996,147-quad ledger a delete takes 0.07 s and about 1 MiB at the default
 bound, where 0.17.0 refused past 250,000 quads and, with the bound raised, took 4.0 s and 1.9 GiB.
-The removal is not batched, and each update stays atomic. An item with more than 250 dependents, or a
-blank-node one, falls back to the old form, inside the bound only. See "What a delete and a purge
-cost".
+The removal is not batched, and each update stays atomic. Since #2941 the dependents are one
+`VALUES` list, which ikigai-store 0.3.3 narrows, so an item with any number of them goes the same
+way (this release requires that store); only a blank-node dependent falls back to the old form,
+inside the bound only, for a purge. A live purge also counts its "no unlisted dependent" check once
+per update instead of once per quad: at 500 dependents that took 77 s in a debug build. See "What a
+delete and a purge cost".
 
 **A listing row is the item its own read shows (#2927).** The JSON and Turtle `items` faces now
 carry an item's links into other ledgers and, in JSON, its `mirrored` edges, as `item:{id}` does;

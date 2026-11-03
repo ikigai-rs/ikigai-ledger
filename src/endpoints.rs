@@ -2261,13 +2261,6 @@ struct Removed {
     archived: usize,
 }
 
-/// The most dependents (the comments, events and links that hang off an item by
-/// `ledger:onItem`) a [`Selector`] names one by one (ledger #2922). Each costs three of the
-/// store's 1,024 algebra operators (`MAX_ALGEBRA_NODES`) in a read and in a recoverable
-/// delete's commit, so 250 leaves room for the rest of the update. Past it the selector is
-/// [`Selector::Whole`], which costs a few operators and observes the whole graph.
-const NARROW_DEPENDENTS: usize = 250;
-
 /// Which of a ledger's two graphs an operation is about.
 #[derive(Clone, Copy)]
 enum LedgerGraph {
@@ -2307,7 +2300,7 @@ impl LedgerGraph {
 /// and then, and that stays when the item it names goes, as its IRI stays on a tombstone. Its own
 /// events' targets go with their event, by `onItem`.
 ///
-/// # ★ Why the dependents are read first and named one by one (ledger #2922)
+/// # ★ Why the dependents are read first and listed (ledger #2922, #2941)
 ///
 /// The store's narrow write door evaluates an update against a private copy of the quads it can
 /// observe, found by the constants in each triple pattern (`ikigai_store::confine`), and refuses
@@ -2321,14 +2314,18 @@ impl LedgerGraph {
 ///
 /// The dependents are what this cannot anchor without reading them first: `?s <onItem> <item> .
 /// ?s ?p ?o` has a pattern with no constant, whatever the join says. So they are read (a narrow
-/// read) and named. A dependent written after that read is still seen: its own `onItem` edge
-/// points at the item, so the item-as-object pattern matches it, and each use below says what it
-/// does about one.
+/// read) and listed, in ONE `VALUES ?d { … } ?d ?p ?o` pattern inside the graph's group, which
+/// the store narrows to the listed subjects since 0.3.3 (ledger #2940, #2941): one pattern for
+/// any number of dependents. Until then each was a `UNION` branch of its own, three of the
+/// store's 1,024 algebra operators apiece, so past 250 dependents the ledger fell back to the
+/// whole-graph form below. A dependent written after that read is still seen: its own `onItem`
+/// edge points at the item, so the item-as-object pattern matches it, and each use below says
+/// what it does about one.
 ///
-/// ⚠ [`Selector::Whole`] keeps the old form for the two cases naming cannot serve: more than
-/// [`NARROW_DEPENDENTS`] dependents, and a dependent that is a blank node, which has no name to
-/// put in a pattern (this crate writes none; one can only come from a write through the broad
-/// door). Those behave exactly as 0.17.0 did, bound included.
+/// ⚠ [`Selector::Whole`] keeps the old form for the one case a list cannot serve: a dependent
+/// that is a blank node, which has no name to put in it (this crate writes none; one can only
+/// come from a write through the broad door). That behaves exactly as 0.17.0 did, bound
+/// included.
 enum Selector {
     Narrow {
         /// The item, as a SPARQL term.
@@ -2342,7 +2339,8 @@ enum Selector {
 }
 
 impl Selector {
-    /// Read `item`'s dependents in `graph` and name them, or fall back to [`Selector::Whole`].
+    /// Read `item`'s dependents in `graph` and list them, or fall back to [`Selector::Whole`]
+    /// when one is a blank node.
     async fn read(
         client: &StoreClient<'_, '_>,
         graph: LedgerGraph,
@@ -2358,9 +2356,6 @@ impl Selector {
                 ),
             )
             .await?;
-        if rows.len() > NARROW_DEPENDENTS {
-            return Ok(Selector::Whole { item });
-        }
         let mut dependents = Vec::with_capacity(rows.len());
         for row in &rows {
             let Some(s) = row.get("s") else { continue };
@@ -2394,11 +2389,12 @@ impl Selector {
                         Self::inbound_filter("?p", "")
                     ),
                 ];
-                branches.extend(
-                    dependents
-                        .iter()
-                        .map(|d| format!("{{ {d} ?p ?o BIND({d} AS ?s) }}")),
-                );
+                if !dependents.is_empty() {
+                    branches.push(format!(
+                        "{{ VALUES ?s {{ {} }} ?s ?p ?o }}",
+                        dependents.join(" ")
+                    ));
+                }
                 branches.join(" UNION ")
             }
             Selector::Whole { item } => format!(
@@ -2435,9 +2431,14 @@ impl Selector {
                         Self::inbound_filter("?p1", &format!(", <{}>", v::ON_ITEM))
                     ),
                 ];
-                for (k, d) in dependents.iter().enumerate() {
-                    template.push_str(&format!(" {d} ?d{k}p ?d{k}o ."));
-                    branches.push(format!("{{ {d} ?d{k}p ?d{k}o }}"));
+                // ★ The template's `?d` is bound only by the `VALUES` branch, so the store
+                // narrows it to the listed dependents too (ikigai-store 0.3.3, ledger #2940).
+                if !dependents.is_empty() {
+                    template.push_str(" ?d ?dp ?do .");
+                    branches.push(format!(
+                        "{{ VALUES ?d {{ {} }} ?d ?dp ?do }}",
+                        dependents.join(" ")
+                    ));
                 }
                 let unnamed = if refuse_unnamed {
                     self.no_unnamed_dependent()
@@ -2469,10 +2470,16 @@ impl Selector {
     /// a dependent written between the read of the dependents and the read of the rows put its
     /// `onItem` edge, and only that, into the rows, so the rows check passed and the rest of it
     /// stayed live as an orphan. Found by `comment_delete_race`, 1 round in 300.
+    ///
+    /// ⚠ A sub-select counted ONCE, not a `FILTER NOT EXISTS`: a group's filter is evaluated
+    /// for every solution of the group, and a purge's removal has one per quad of the item, so
+    /// the check ran a thousand times over a list of hundreds (ledger #2941). A live purge of an
+    /// item with 500 dependents took 77 s in a debug build that way, and under 0.3 s this way.
     fn no_unnamed_dependent(&self) -> String {
         match self {
             Selector::Narrow { item, dependents } => format!(
-                "FILTER NOT EXISTS {{ ?x <{}> {item} MINUS {{ VALUES ?x {{ {} }} }} }}",
+                "{{ SELECT (COUNT(?x) AS ?unnamedDependents) WHERE {{ ?x <{}> {item} \
+                 MINUS {{ VALUES ?x {{ {} }} }} }} }} FILTER(?unnamedDependents = 0)",
                 v::ON_ITEM,
                 dependents.join(" ")
             ),
@@ -2641,7 +2648,7 @@ const DELETE_ATTEMPTS: usize = 16;
 /// stays `DELETE … WHERE`, on purpose: a purge is asked to leave nothing of the item, a
 /// hand-written blank node as an object included (which `DELETE DATA` cannot name), so a write
 /// racing a purge is destroyed with it and is not in the tombstone's count. Since ledger #2922
-/// that removal names the item's dependents one by one ([`Selector`]), so it holds only while
+/// that removal lists the item's dependents ([`Selector`]), so it holds only while
 /// the item has no dependent it did not read: a comment or event written in between makes it
 /// match nothing, and the purge reads again, as a recoverable delete does.
 ///
@@ -2652,7 +2659,9 @@ const DELETE_ATTEMPTS: usize = 16;
 /// looks up those and no others. Measured on a 996,147-quad ledger in a release build: a delete
 /// in 0.07 s and about 1 MiB, a purge in 0.08 s, at the default copy bound. Through 0.17.0 the
 /// same delete copied the whole graph, refused past 250,000 quads, and took 4.0 s and 1.9 GiB
-/// with the bound raised to let it. Past [`NARROW_DEPENDENTS`] dependents it is that again.
+/// with the bound raised to let it. Since store 0.3.3 (ledger #2941) that holds for any number
+/// of dependents; through 0.18.0's first form it fell back to the whole graph past 250. Only a
+/// blank-node dependent still does.
 ///
 /// ⚠ A purge that runs whole inside a recoverable delete's window, between its read and its
 /// archive, empties the graveyard before the archive lands (ledger #2779). The delete cannot
