@@ -562,8 +562,14 @@ pub(super) async fn link(
     let target_client = StoreClient::new(inv, there.clone());
     // The object must be a live item to link to it; an unlink only needs its IRI, because
     // removing an edge to a deleted item is a cleanup.
+    // ★ A dated link is no earlier than its target's filing (ledger #2939), read here under the
+    // caller's capability. A target this caller cannot read is no live item to it, so the link
+    // is refused before the date matters: the bound never falls back to the subject alone.
     let (target, number) = if sink {
         let to = require_item(&target_client, reference).await?;
+        if let Some(claimed) = claimed {
+            attribution::claimed_not_before_target("created", claimed, &to.iri, to.created)?;
+        }
         (to.iri, Some(to.number))
     } else {
         (item_iri(&target_client, reference, "content").await?, None)

@@ -1286,14 +1286,18 @@ Every item, comment and tombstone a write creates records who made it the way gi
   foreign actor. The last two are **claimed**. `ledger:authorSource` says which:
   `committer`, `delegate` or `import`. Anything else is refused with the reason and the remedy.
 - **Authored dates**: only an import principal may send `created` and `modified` when filing,
-  and `created` on a comment, a link or a state move (since 0.18.0, ledger #2934), as
+  and `created` on a comment, a link or a state move (since 0.18.0, ledger #2934), and on an
+  unlink, a label or unlabel, a defer or resume, an about or unabout, an item edit and a reopen
+  (since 0.18.0, ledger #2939), as
   `xsd:dateTime`s no later than the import. They go into
   `dcterms:created` and `dcterms:modified`, so ranking tie-breaks imported items as their
   source did, marked `ledger:createdSource` / `ledger:modifiedSource` `"import"` beside the
   true `ledger:committedAt`. Any other caller that sends a date is refused, and told why.
-- **Which writes move `modified`, and how** (since 0.18.0, ledger #2928, #2934): a write that
-  carries a claimed date (a comment's `created=`, a close's `closed-at=`, and the `created=` of the
-  link Sink, within a ledger or across ledgers, and of the state Sink) sets the item's `modified`
+- **Which writes move `modified`, and how** (since 0.18.0, ledger #2928, #2934, #2939): a write
+  that carries a claimed date (a comment's `created=`, a close's `closed-at=`, and the `created=` of
+  the link Sink and its Delete, within a ledger or across ledgers, of the state Sink, and of the
+  label, defer, about, item edit and reopen Sinks and the Deletes beside them) sets the item's
+  `modified`
   to the LATER of its current value and that date, marked `ledger:modifiedSource "import"` and
   recorded in `ledger:claimedModified`, so an importer that files with the source's `modified` and
   then replays the item's past leaves it at the source's value. Every other write, an importer's
@@ -1303,9 +1307,11 @@ Every item, comment and tombstone a write creates records who made it the way gi
   touches no item at all.
 - **A dated link or state move** (ledger #2934): `created=` on the link Sink or the state Sink is
   held to `closed-at=`'s rules (an `xsd:dateTime`, no later than now, no earlier than the item's
-  filing) and lands as the edit event's `dcterms:created`, marked `ledger:createdSource "import"`
-  beside the true `ledger:committedAt`; a link across ledgers carries it on its link node too, and
-  a state move on the state's entry (`since`) and on a note. The event is NOT history only: it
+  filing; for a link, since ledger #2939, no earlier than its target's filing either, read under
+  the caller's grants, which a link needs anyway to reach its target) and lands as the edit
+  event's `dcterms:created`, marked `ledger:createdSource "import"` beside the true
+  `ledger:committedAt`; a link across ledgers carries it on its link node too, and a state move on
+  the state's entry (`since`) and on a note. The event is NOT history only: it
   changed the item, so it counts toward a mirror's version, and the mirror a link across ledgers
   writes lands as an undated link's does (the mirror carries the subject's open bit, not the date).
   Its history line reads `(claimed)` and its JSON carries `committed`, without `imported`.
@@ -2103,6 +2109,19 @@ every write by anyone else, stamp the time as before. On 0.17.0 an importer that
 source's `modified` and then replayed comments and a close ended every such item at the import time,
 so `priority-recency` ranked imported open items as just updated. See "Which writes move
 `modified`" under attribution.
+
+**The rest of an importer's replay can be dated (#2939).** The label, defer, about and item-edit
+Sinks, the Deletes beside the first three, the reopen Sink and the link's Delete (an unlink) take
+`created=` from an import principal under the same rule as a link (one check,
+`attribution::resolve_claimed`): the event carries the date, marked claimed (a reopen's status
+event as a dated close's is), a note the write adds carries it too, and `modified` moves only
+forward. Anyone else sending `created=` is refused with the link's sentence; on 0.17.0 the reopen
+refused every `created=` and the others, an unlink included, ignored it, so an imported item
+labeled, deferred, edited, reopened or unlinked after filing ended at the import. A dated link is
+also no earlier than its TARGET's filing now, within a ledger and across ledgers (#2939); it was
+held to the subject's only. ⚠ The cross-ledger **mirror** stays undated on purpose: it records
+whether the subject is open and whether the edge is present at the moment it is written, for the
+target's `next`, which is not a fact the source dated.
 
 **A claimed `modified` after the filing's commit reads as claimed (#2932).** The read took a
 claimed `modified` to hold only while it was earlier than the filing's `committedAt`, so a comment
