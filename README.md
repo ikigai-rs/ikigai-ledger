@@ -2045,7 +2045,7 @@ across ledgers. It disables caching, reads as a non-root capability at the store
 five-second budget, checks the daily totals and Turtle backfill markers, and bounds each CSV
 read to two seconds. It was also run locally on affected Oxigraph 0.5.11.
 On a local debug build with 0.5.11, the original query refused at 5.143 seconds; the subquery
-answered in 407–411 ms. These are synthetic-fixture measurements, not a live-ledger benchmark.
+answered in 741–758 ms in the final compatibility run. These are synthetic-fixture measurements, not a live-ledger benchmark.
 
 ### 0.18.0: an edit event names what it changed (ledger #2841)
 
