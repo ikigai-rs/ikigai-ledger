@@ -192,7 +192,7 @@ ledger:key a rdf:Property ;
 ledger:eventKey a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "event key" ;
-    rdfs:comment "An imported event's id at its source (ledger #2843): the subject the importer's batch named it by, unique per ledger and checked in the same store update that writes the event, so a re-sent event is recorded once. The same shape as ledger:commentKey, and like it not kept on a tombstone: deleting an item takes its events, keys and all." .
+    rdfs:comment "An imported event's id at its source (ledger #2843), and the mark of a history-only event: the subject the importer's batch named it by, unique per ledger and checked in the same store update that writes the event, so a re-sent event is recorded once. The same shape as ledger:commentKey, and like it not kept on a tombstone: deleting an item takes its events, keys and all." .
 
 ledger:commentKey a rdf:Property ;
     rdfs:domain ledger:Comment ;
@@ -227,7 +227,7 @@ ledger:authorSource a rdf:Property ;
 ledger:createdSource a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "created source" ;
-    rdfs:comment "The literal import when dcterms:created on an item or a comment is an authored date an import principal claimed, not the kernel time of the write (that is ledger:committedAt). Absent when the date is the kernel's. On a claim, release, edit or status event (ledger #2843) it says more: an import principal recorded the event afterward, as history only. Such an event changed nothing on its item, carries no ledger:eventSequence, and is not counted in a mirror's ledger:mirrorVersion." .
+    rdfs:comment "The literal import when dcterms:created on an item or a comment is an authored date an import principal claimed, not the kernel time of the write (that is ledger:committedAt). Absent when the date is the kernel's. On an edit event it also marks a link or a state move an import principal dated at its source with created= (ledger #2934): that event changed its item like any other. A claim, release, edit or status event an import principal recorded afterward as history only (ledger #2843) carries it too, and is told apart by its ledger:eventKey: such an event changed nothing on its item, carries no ledger:eventSequence, and is not counted in a mirror's ledger:mirrorVersion." .
 
 ledger:modifiedSource a rdf:Property ;
     rdfs:range xsd:string ;

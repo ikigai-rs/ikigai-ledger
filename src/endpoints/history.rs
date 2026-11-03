@@ -112,7 +112,11 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
         "revision" => 3,
         _ => 4,
     });
-    let imported = node.one(v::CREATED_SOURCE).is_some();
+    // History only (ledger #2843) is an event a batch recorded, which alone carries a source
+    // id; a claimed date alone is also a link or a state move an importer dated (ledger #2934),
+    // which changed its item.
+    let imported = node.one(v::EVENT_KEY).is_some();
+    let claimed = node.one(v::CREATED_SOURCE).is_some();
     let lifecycle_version = (kind == "state" && !imported).then(|| node.one(v::LIFECYCLE_VERSION));
     json::HistoryEvent {
         iri,
@@ -122,7 +126,7 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
         imported,
         source_id: node.one(v::EVENT_KEY),
         author: node.one(v::AUTHOR),
-        committed: imported
+        committed: claimed
             .then(|| node.one(v::COMMITTED_AT))
             .flatten()
             .and_then(|when| model::millis(&when))
@@ -225,6 +229,9 @@ fn line(event: &json::HistoryEvent) -> String {
     let at = event.at.as_deref().unwrap_or("an unknown time");
     if event.imported {
         return format!("{at} (claimed)  imported {what}\n");
+    }
+    if event.committed.is_some() {
+        return format!("{at} (claimed)  {what}\n");
     }
     format!("{at}  {what}\n")
 }

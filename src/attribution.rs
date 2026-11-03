@@ -28,8 +28,9 @@
 //!
 //! # Authored dates are an importer's alone
 //!
-//! An import principal may claim an item's `created` and `modified` when filing it, and a
-//! comment's `created`, as `xsd:dateTime`s no later than the commit. They are stored in
+//! An import principal may claim an item's `created` and `modified` when filing it, and the
+//! `created` of a comment, a link or a state move (ledger #2934), as `xsd:dateTime`s no later
+//! than the commit. They are stored in
 //! `dcterms:created` and `dcterms:modified` (so ranking, which reads `modified`, tie-breaks
 //! imported items as their source did), marked `ledger:createdSource` / `ledger:modifiedSource`
 //! `"import"`, beside the true `ledger:committedAt`. Any other caller that sends a date is
@@ -198,6 +199,10 @@ pub enum Dates {
     None,
     /// `created` only (a comment).
     Created,
+    /// A write whose `created` dates the event it records (a link, a state move; ledger
+    /// #2934): [`resolve_claimed`] checks it against the item's filing, so this leaves it to
+    /// that and refuses `modified`.
+    Event,
     /// `created` and `modified` (filing an item).
     CreatedAndModified,
 }
@@ -289,6 +294,8 @@ pub async fn resolve(
     for (name, value) in date_args {
         let allowed = match dates {
             Dates::None => false,
+            Dates::Event if name == "created" => continue,
+            Dates::Event => false,
             Dates::Created => name == "created",
             Dates::CreatedAndModified => true,
         };
@@ -297,8 +304,9 @@ pub async fn resolve(
                 name: name.to_string(),
                 detail: format!(
                     "this write takes no authored `{name}`: an import principal may claim an \
-                     item's created and modified when filing it, and a comment's created. \
-                     Send it without `{name}`, and the ledger stamps the time itself"
+                     item's created and modified when filing it, and the created of a comment, \
+                     a link or a state move. Send it without `{name}`, and the ledger stamps \
+                     the time itself"
                 ),
             });
         }
@@ -371,10 +379,7 @@ pub async fn resolve(
 }
 
 /// Resolve and check `closed-at`, the source date of a close an import principal claims
-/// (ledger #2819): `None` when it was not sent. It is an `xsd:dateTime` no later than `now`
-/// and no earlier than `filed`, the item's `dcterms:created`, so a daily series never closes
-/// an item before it was filed. Anyone but an import principal is refused, with the reason
-/// and the remedy, as a claimed `created` is.
+/// (ledger #2819): `None` when it was not sent. See [`resolve_claimed`].
 pub async fn resolve_closed_at(
     inv: &Invocation<'_>,
     client: &StoreClient<'_, '_>,
@@ -382,20 +387,46 @@ pub async fn resolve_closed_at(
     filed: u64,
     now: u64,
 ) -> Result<Option<u64>> {
-    const NAME: &str = "closed-at";
-    let Ok(value) = inv.inline_str(NAME) else {
+    resolve_claimed(
+        inv,
+        client,
+        participants,
+        "closed-at",
+        "a close",
+        filed,
+        now,
+    )
+    .await
+}
+
+/// Resolve and check the date argument `name`, the source date of the change `what` records
+/// (`closed-at` on a close, ledger #2819; `created` on a link or a state move, ledger #2934):
+/// `None` when it was not sent. It is an `xsd:dateTime` no later than `now` and no earlier
+/// than `filed`, the item's `dcterms:created`, so a replay never dates a change before the
+/// item it changes. Anyone but an import principal is refused, with the reason and the
+/// remedy, as a claimed `created` is.
+pub async fn resolve_claimed(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    participants: Option<&str>,
+    name: &str,
+    what: &str,
+    filed: u64,
+    now: u64,
+) -> Result<Option<u64>> {
+    let Ok(value) = inv.inline_str(name) else {
         return Ok(None);
     };
     let Some(committer) = Attribution::committer(inv)?.committer else {
         return Err(refused_date(
-            NAME,
+            name,
             value,
             "this capability carries no principal, so nothing says it is an import principal",
         ));
     };
     if !enrolled_as_importer(client, participants, &committer).await? {
         return Err(refused_date(
-            NAME,
+            name,
             value,
             &format!(
                 "{committer} is not an import or sync principal{}",
@@ -407,7 +438,7 @@ pub async fn resolve_closed_at(
         ));
     }
     let millis = crate::model::millis(value).ok_or_else(|| Error::InvalidArgument {
-        name: NAME.to_string(),
+        name: name.to_string(),
         detail: format!(
             "`{value}` is not an xsd:dateTime; an authored date is written \
              2026-11-01T18:30:00Z, with a time and a zone"
@@ -415,9 +446,9 @@ pub async fn resolve_closed_at(
     })?;
     if millis > now {
         return Err(Error::InvalidArgument {
-            name: NAME.to_string(),
+            name: name.to_string(),
             detail: format!(
-                "`{value}` is after this write ({}); a close's source date cannot be later \
+                "`{value}` is after this write ({}); {what}'s source date cannot be later \
                  than its import",
                 sparql::iso8601(now)
             ),
@@ -425,10 +456,11 @@ pub async fn resolve_closed_at(
     }
     if millis < filed {
         return Err(Error::InvalidArgument {
-            name: NAME.to_string(),
+            name: name.to_string(),
             detail: format!(
-                "`{value}` is before the item was filed ({}); an item cannot close before it \
-                 was filed. Send the item's source dates when filing it, or a later close date",
+                "`{value}` is before the item was filed ({}); {what} cannot come before the \
+                 item it changes. Send the item's source dates when filing it, or a later \
+                 `{name}`",
                 sparql::iso8601(filed)
             ),
         });

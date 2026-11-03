@@ -251,6 +251,11 @@ async fn closed_transition_refusal(
 /// `ledger:stateFrom` (ledger #2841): a value this update found, never one read before it, so a
 /// chain of events cannot disagree with the moves that wrote it (the 0.14.x races, ledger #2764,
 /// #2766). An item in `filed` holds no state, and `from` is then its IRI.
+///
+/// `claimed` is the date an import principal gave the move at its source (ledger #2934): the
+/// state is entered then, and `modified` moves only forward to it ([`touch_dated`]), in a
+/// second operation of the same update that lands only with the move's token.
+#[allow(clippy::too_many_arguments)] // reason: one SPARQL update's inputs, each distinct
 fn cas(
     client: &StoreClient<'_, '_>,
     item: &str,
@@ -258,6 +263,7 @@ fn cas(
     to: &LifecycleState,
     token: &str,
     event: &str,
+    claimed: Option<u64>,
     now: u64,
 ) -> String {
     let mut guard = if from.name == FILED {
@@ -275,45 +281,56 @@ fn cas(
     if to.in_flight {
         guard.push_str(&format!("\n<{item}> <{}> <{}> .", v::STATUS, v::OPEN));
     }
+    // An undated move stamps `modified` here, as every write does; a dated one leaves it to the
+    // forward-only stamp after it.
+    let (stamp, was, read) = match claimed {
+        None => (
+            format!(" ; <{}> {}", v::ext::MODIFIED, datetime(now)),
+            format!(" <{item}> <{}> ?m .", v::ext::MODIFIED),
+            format!("\nOPTIONAL {{ <{item}> <{}> ?m }}", v::ext::MODIFIED),
+        ),
+        Some(_) => (String::new(), String::new(), String::new()),
+    };
     let mut insert = format!(
-        "<{item}> <{token_p}> {token} ; <{at}> {when} ; <{modified}> {when} .",
+        "<{item}> <{token_p}> {token} ; <{at}> {when}{stamp} .",
         token_p = v::STATE_TOKEN,
         token = literal(token),
         at = v::STATE_AT,
-        modified = v::ext::MODIFIED,
-        when = datetime(now),
+        when = datetime(claimed.unwrap_or(now)),
     );
     if to.name != FILED {
         insert.push_str(&format!("\n<{item}> <{}> <{}> .", v::STATE, to.iri));
     }
     insert.push_str(event);
-    format!(
+    let update = format!(
         "DELETE {{ {delete} }}\nINSERT {{ {insert} }}\nWHERE {{ {where_} }}",
         delete = client.in_graph(&format!(
-            "<{item}> <{state}> ?s . <{item}> <{token}> ?t . <{item}> <{at}> ?a . \
-             <{item}> <{modified}> ?m .",
+            "<{item}> <{state}> ?s . <{item}> <{token}> ?t . <{item}> <{at}> ?a .{was}",
             state = v::STATE,
             token = v::STATE_TOKEN,
             at = v::STATE_AT,
-            modified = v::ext::MODIFIED,
         )),
         insert = client.in_graph(&insert),
         where_ = client.in_graph(&format!(
             "<{item}> <{type_}> <{class}> .\n{guard}\n\
              OPTIONAL {{ <{item}> <{state}> ?s }}\n\
              OPTIONAL {{ <{item}> <{token}> ?t }}\n\
-             OPTIONAL {{ <{item}> <{at}> ?a }}\n\
-             OPTIONAL {{ <{item}> <{modified}> ?m }}\n\
+             OPTIONAL {{ <{item}> <{at}> ?a }}{read}\n\
              BIND(COALESCE(?s, <{filed}>) AS ?left)",
             type_ = v::ext::TYPE,
             class = v::ITEM_CLASS,
             state = v::STATE,
             token = v::STATE_TOKEN,
             at = v::STATE_AT,
-            modified = v::ext::MODIFIED,
             filed = from.iri,
         )),
-    )
+    );
+    if claimed.is_none() {
+        return update;
+    }
+    // Only when the move landed: its token is on the item.
+    let landed = format!("<{item}> <{}> {} .", v::STATE_TOKEN, literal(token));
+    batch(&[update, touch_dated(client, item, now, claimed, &landed)])
 }
 
 /// A state name a caller wrote, checked against the ledger's lifecycle.
@@ -439,10 +456,27 @@ impl Endpoint for StateEndpoint {
                     inv,
                     &client,
                     self.participants.as_deref(),
-                    Dates::None,
+                    Dates::Event,
                     now,
                 )
                 .await?;
+                // ★ An import principal may date a move at its source (ledger #2934), as it may
+                // date a comment or a close: the event and a note carry the date, and
+                // `modified` moves only forward to it. Anyone else is refused.
+                let claimed = attribution::resolve_claimed(
+                    inv,
+                    &client,
+                    self.participants.as_deref(),
+                    "created",
+                    "a state move",
+                    item.created,
+                    now,
+                )
+                .await?;
+                let who = Attribution {
+                    created: claimed,
+                    ..who
+                };
 
                 // The cheap half first: an item already somewhere else is refused without a
                 // write, because a no-op update still cuts every cached read of the ledger.
@@ -478,7 +512,9 @@ impl Endpoint for StateEndpoint {
                         literal(lifecycle.version()),
                     ));
                     client
-                        .update(&cas(&client, &item.iri, from, to, &token, &event, now))
+                        .update(&cas(
+                            &client, &item.iri, from, to, &token, &event, claimed, now,
+                        ))
                         .await?;
                     let after = read_state(&client, &item.iri).await?;
                     if after.tokens != [token.clone()] {
@@ -507,7 +543,7 @@ impl Endpoint for StateEndpoint {
                     let since = if outcome == "unchanged" {
                         before.at
                     } else {
-                        Some(now)
+                        Some(claimed.unwrap_or(now))
                     };
                     let mut doc = state_document(&client, &item, lifecycle, to, since);
                     doc.outcome = Some(outcome.to_string());
@@ -592,6 +628,14 @@ impl Endpoint for StateEndpoint {
                         ArgSpec::new("author")
                             .summary("Who wrote the note.")
                             .class(v::ext::XSD_STRING)
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("created")
+                            .summary(
+                                "When the item moved at its source, for an import principal (ledger:Importer in the host's participants graph) only: an xsd:dateTime no later than now and no earlier than the item's filing. Dates the state event, the state's entry and a note, marked createdSource import, and moves the item's modified only forward to it (ledger #2934). Anyone else sending it is refused.",
+                            )
+                            .class(v::ext::XSD_DATETIME)
                             .optional(),
                     )
                     .input(as_arg(&STATE_FACES))
