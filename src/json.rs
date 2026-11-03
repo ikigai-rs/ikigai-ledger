@@ -588,7 +588,9 @@ pub struct HistoryEvent {
     /// Who did it at the source, as the importer claims (an imported event only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
-    /// When the importer recorded it (an imported event only).
+    /// When the importer recorded it, on an event whose `at` an importer claimed: an imported
+    /// one, or a link or a state move dated at its source (ledger #2934), which is not
+    /// `imported` because it changed its item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed: Option<String>,
     /// The label a `label` or `unlabel` added or removed.

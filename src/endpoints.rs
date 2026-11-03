@@ -524,7 +524,12 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             },
         )
         .bind(LedgerGrammar::action("defer"), DeferEndpoint)
-        .bind(LedgerGrammar::action("link"), LinkEndpoint)
+        .bind(
+            LedgerGrammar::action("link"),
+            LinkEndpoint {
+                participants: participants.clone(),
+            },
+        )
         .bind(LedgerGrammar::action("label"), LabelEndpoint)
         .bind(
             LedgerGrammar::action("purge"),
@@ -4107,10 +4112,14 @@ fn release_record(
 
 /// The filter that leaves out an imported `event` (ledger #2843): history only, so it counts
 /// toward nothing a write decides. See [`import`].
+///
+/// ⚠ It reads `ledger:eventKey`, which only a history batch writes, never `ledger:createdSource`:
+/// a link or a state move an importer dates at its source (ledger #2934) carries that mark too,
+/// and it DID change its item, so it moves a mirror's version like any other link.
 fn not_imported(event: &str) -> String {
     format!(
         "FILTER NOT EXISTS {{ {event} <{}> ?imported }}",
-        v::CREATED_SOURCE
+        v::EVENT_KEY
     )
 }
 
@@ -4119,15 +4128,20 @@ fn not_imported(event: &str) -> String {
 /// and a purge own it as they own a status event, and every one is written in the update
 /// that makes the change it records, under that update's guard: a write that loses its race
 /// leaves no event.
+///
+/// An event an import principal dated at its source (a link's or a state move's `created=`,
+/// ledger #2934) carries that date as `dcterms:created`, marked `ledger:createdSource "import"`
+/// beside the true `ledger:committedAt`.
 fn event_triples(event: &str, class: &str, item: &str, who: &Attribution, now: u64) -> String {
     let mut out = format!(
         "<{event}> <{}> <{class}> ; <{}> <{item}> ; <{}> {} .",
         v::ext::TYPE,
         v::ON_ITEM,
         v::ext::CREATED,
-        datetime(now)
+        datetime(who.created_or(now))
     );
     out.push_str(&who.commit(event, now));
+    out.push_str(&who.date_sources(event));
     out
 }
 
@@ -5174,7 +5188,9 @@ fn link_objects(predicate: &str, other: &str, changes: &str) -> [EditObject; 2] 
 }
 
 #[derive(Clone)]
-struct LinkEndpoint;
+struct LinkEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for LinkEndpoint {
@@ -5195,6 +5211,22 @@ impl Endpoint for LinkEndpoint {
                     .join(", ")
             ),
         })?;
+        // ★ An import principal may date a link at its source (ledger #2934), as it may date a
+        // comment or a close; anyone else is refused, with the reason and the remedy.
+        let claimed = if inv.request.verb == Verb::Sink {
+            attribution::resolve_claimed(
+                inv,
+                &client,
+                self.participants.as_deref(),
+                "created",
+                "a link",
+                from.created,
+                now,
+            )
+            .await?
+        } else {
+            None
+        };
         // ★ An object in another ledger is a typed link across ledgers (ledger #2829): admitted
         // by `link-in` on that ledger, written as a link node here and mirrored there.
         let reference = inv.inline_str("content")?;
@@ -5203,7 +5235,7 @@ impl Endpoint for LinkEndpoint {
                 return Err(unsupported("ledger-link", inv.request.verb));
             }
             return across::link(
-                inv, &client, &from, reference, there, name, predicate, want, now,
+                inv, &client, &from, reference, there, name, predicate, want, claimed, now,
             )
             .await;
         }
@@ -5247,19 +5279,28 @@ impl Endpoint for LinkEndpoint {
         } else {
             triple.clone()
         };
+        let who = Attribution {
+            created: claimed,
+            ..Attribution::committer(inv)?
+        };
         let event = edit_event_naming(
             &client,
             &from.iri,
             ends,
             edit,
-            &Attribution::committer(inv)?,
+            &who,
             now,
             &link_objects(predicate, &to.iri, &changes),
         )?;
         guarded_update(
             &client,
             ends,
-            &batch(&[event, update, touch(&client, &from.iri, now)]),
+            // A link dated at the source moves `modified` only forward (ledger #2928, #2934).
+            &batch(&[
+                event,
+                update,
+                touch_dated(&client, &from.iri, now, claimed, ""),
+            ]),
         )
         .await?;
         if want == JSON {
@@ -5315,6 +5356,14 @@ impl Endpoint for LinkEndpoint {
                             .class(v::ext::XSD_STRING),
                     )
                     .input(type_arg())
+                    .input(
+                        ArgSpec::new("created")
+                            .summary(
+                                "When the link was made at its source, for an import principal (ledger:Importer in the host's participants graph) only: an xsd:dateTime no later than now and no earlier than the subject's filing. Dates the link's edit event (and a link across ledgers, its link node), marked createdSource import, and moves the subject's modified only forward to it (ledger #2934). Anyone else sending it is refused.",
+                            )
+                            .class(v::ext::XSD_DATETIME)
+                            .optional(),
+                    )
                     .input(as_arg(&WRITE_FACES))
                     .output(PLAIN)
                     .output(JSON),

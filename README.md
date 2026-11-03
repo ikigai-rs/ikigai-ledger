@@ -1286,17 +1286,27 @@ Every item, comment and tombstone a write creates records who made it the way gi
   foreign actor. The last two are **claimed**. `ledger:authorSource` says which:
   `committer`, `delegate` or `import`. Anything else is refused with the reason and the remedy.
 - **Authored dates**: only an import principal may send `created` and `modified` when filing,
-  and `created` on a comment, as `xsd:dateTime`s no later than the import. They go into
+  and `created` on a comment, a link or a state move (since 0.18.0, ledger #2934), as
+  `xsd:dateTime`s no later than the import. They go into
   `dcterms:created` and `dcterms:modified`, so ranking tie-breaks imported items as their
   source did, marked `ledger:createdSource` / `ledger:modifiedSource` `"import"` beside the
   true `ledger:committedAt`. Any other caller that sends a date is refused, and told why.
-- **Which writes move `modified`, and how** (since 0.18.0, ledger #2928): a write that carries a
-  claimed date (a comment's `created=`, a close's `closed-at=`) sets the item's `modified` to the
-  LATER of its current value and that date, marked `ledger:modifiedSource "import"`, so an
+- **Which writes move `modified`, and how** (since 0.18.0, ledger #2928, #2934): a write that
+  carries a claimed date (a comment's `created=`, a close's `closed-at=`, and the `created=` of the
+  link Sink, within a ledger or across ledgers, and of the state Sink) sets the item's `modified`
+  to the LATER of its current value and that date, marked `ledger:modifiedSource "import"`, so an
   importer that files with the source's `modified` and then replays the item's past leaves it at
   the source's value. Every other write, an importer's undated one included, stamps the kernel's
   time, and a `modified` at or after the commit reads as not claimed. An imported history
   (`…:history`) touches no item at all.
+- **A dated link or state move** (ledger #2934): `created=` on the link Sink or the state Sink is
+  held to `closed-at=`'s rules (an `xsd:dateTime`, no later than now, no earlier than the item's
+  filing) and lands as the edit event's `dcterms:created`, marked `ledger:createdSource "import"`
+  beside the true `ledger:committedAt`; a link across ledgers carries it on its link node too, and
+  a state move on the state's entry (`since`) and on a note. The event is NOT history only: it
+  changed the item, so it counts toward a mirror's version, and the mirror a link across ledgers
+  writes lands as an undated link's does (the mirror carries the subject's open bit, not the date).
+  Its history line reads `(claimed)` and its JSON carries `committed`, without `imported`.
 
 The host names the participants graph with `SpaceConfig::participants(graph)`. It is read
 through the store's narrow door with the caller's own capability, so a delegate or an importer
@@ -1469,7 +1479,9 @@ acme#1: 4 event(s)
   lands on the version it would have without the import. An imported status event carries no
   `eventSequence` and does not count toward the next one, so a real close keeps its number, its
   evidence goes on the real close, and `counts` never reads the imported one. A query that wants
-  only what happened in this ledger filters on `ledger:createdSource`; a query over `eventSequence`
+  only what happened in this ledger filters on `ledger:eventKey`, which only an imported event
+  carries (a link or a state move dated at its source, #2934, carries `ledger:createdSource` too,
+  and did happen here); a query over `eventSequence`
   sees real status events alone.
 - **Marked the way 0.15.0's claimed dates are**: `ledger:createdSource "import"` beside the true
   `ledger:committedAt` and the `ledger:committer` the door stamped. `ledger:author` (optional, an
@@ -2085,6 +2097,18 @@ every write by anyone else, stamp the time as before. On 0.17.0 an importer that
 source's `modified` and then replayed comments and a close ended every such item at the import time,
 so `priority-recency` ranked imported open items as just updated. See "Which writes move
 `modified`" under attribution.
+
+**An importer dates a link and a state move (#2934).** The link Sink (within a ledger and across
+ledgers) and the state Sink take `created=` from an import principal, under `closed-at=`'s date
+rules: the edit event carries the date (and a link across ledgers its link node, a state move its
+`since`), marked `ledger:createdSource "import"`, and the item's `modified` moves only forward to
+it, per #2928. Anyone else sending `created=` is refused with the reason; without it both stamp the
+time as before. Until this, a link or a move an importer replayed after filing stamped the kernel's
+time, so an item linked or moved after filing ended at the import. ⚠ An imported (history-only) event is now told apart by `ledger:eventKey`, not
+`ledger:createdSource`, since a dated link or move carries that mark and did change its item:
+the mirror version and the status sequence count it, and the history face shows its lifecycle
+version. On 0.17.0 the link Sink ignored a `created=` from anyone; it is now refused unless the
+caller is an import principal.
 
 ### 0.17.0: typed links across ledgers (ledger #2829)
 

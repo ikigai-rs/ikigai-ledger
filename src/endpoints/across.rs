@@ -506,6 +506,7 @@ pub(super) async fn link(
     name: &str,
     predicate: &str,
     want: &str,
+    claimed: Option<u64>,
     now: u64,
 ) -> Result<Representation> {
     let there = grant_for(inv, there, Need::LinkIn)?;
@@ -543,7 +544,13 @@ pub(super) async fn link(
         (item_iri(&target_client, reference, "content").await?, None)
     };
     let node = link_iri(&from.iri, predicate, &target);
-    let who = Attribution::committer(inv)?;
+    let committer = Attribution::committer(inv)?;
+    // A link an import principal dated at its source (ledger #2934): the date goes on the link
+    // node and its event, marked claimed, and moves `modified` only forward.
+    let who = Attribution {
+        created: claimed,
+        ..committer.clone()
+    };
     let (change, said, edit) = if sink {
         let mut triples = format!(
             "<{node}> <{}> <{}> ; <{}> <{}> ; <{}> <{predicate}> ; <{}> <{target}> .",
@@ -555,6 +562,14 @@ pub(super) async fn link(
             v::LINK_TARGET
         );
         triples.push_str(&who.commit(&node, now));
+        if let Some(claimed) = claimed {
+            triples.push_str(&format!(
+                "\n<{node}> <{}> {} .",
+                v::ext::CREATED,
+                datetime(claimed)
+            ));
+            triples.push_str(&who.date_sources(&node));
+        }
         (
             format!(
                 "DELETE {{ {} }} WHERE {{ {} }} ;\n{}",
@@ -593,7 +608,11 @@ pub(super) async fn link(
     guarded_update(
         client,
         &[&from.iri],
-        &batch(&[event, change, touch(client, &from.iri, now)]),
+        &batch(&[
+            event,
+            change,
+            touch_dated(client, &from.iri, now, claimed, ""),
+        ]),
     )
     .await?;
     sync(
@@ -622,7 +641,7 @@ pub(super) async fn link(
                 &from.iri,
                 &[&from.iri],
                 "unlink",
-                &who,
+                &committer,
                 now,
                 &link_objects(predicate, &target, &edge),
             )?;
