@@ -859,3 +859,72 @@ fn a_listing_row_carries_the_links_across_and_the_mirrors_its_item_face_shows() 
         "acme#1 and acme#2 each hold one: {listing}"
     );
 }
+
+/// ★ `next`'s rows are the same item object too (ledger #2931): a ranked row and an excluded
+/// row carry the links across and the mirrored edges their item faces show. Until 0.18.0 `next`
+/// rendered its items undecorated, so the two disagreed on any item with an edge across.
+#[test]
+fn a_next_row_carries_the_links_across_and_the_mirrors_its_item_face_shows() {
+    let kernel = kernel();
+    let (subject, target) = blocked_pair(&kernel);
+    let umbrella = file(&kernel, TARGET, "The goal");
+    let other = file(&kernel, TARGET, "See also");
+    for (kind, to) in [("parent", &umbrella), ("related", &other)] {
+        sink(
+            &kernel,
+            &at(SUBJECT, "link"),
+            &[("item", "1"), ("content", to), ("type", kind)],
+        );
+    }
+    let mut seen = Vec::new();
+    for ledger in [SUBJECT, TARGET] {
+        let doc: serde_json::Value = serde_json::from_str(&source(
+            &kernel,
+            &at(ledger, "next"),
+            &[("as", "application/json"), ("limit", "10")],
+        ))
+        .unwrap();
+        let rows = doc["ranking"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(doc["excluded"].as_array().unwrap())
+            .map(|row| &row["item"]);
+        for row in rows {
+            let iri = row["iri"].as_str().unwrap().to_string();
+            let face: serde_json::Value =
+                serde_json::from_str(&source(&kernel, &iri, &[("as", "application/json")]))
+                    .unwrap();
+            assert_eq!(row["links"], face["item"]["links"], "links of {iri}");
+            assert_eq!(
+                row["mirrored"], face["item"]["mirrored"],
+                "mirrored of {iri}"
+            );
+            seen.push(iri);
+        }
+    }
+    // Every item was a row, and the ones with edges across say so, not merely the same nothing.
+    for item in [&subject, &target, &umbrella, &other] {
+        assert!(seen.contains(item), "{item} is a row of next: {seen:?}");
+    }
+    let doc: serde_json::Value = serde_json::from_str(&source(
+        &kernel,
+        &at(SUBJECT, "next"),
+        &[("as", "application/json")],
+    ))
+    .unwrap();
+    assert_eq!(
+        doc["ranking"][0]["item"]["links"].as_array().unwrap().len(),
+        3,
+        "{doc}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&source(
+        &kernel,
+        &at(TARGET, "next"),
+        &[("as", "application/json")],
+    ))
+    .unwrap();
+    let excluded = &doc["excluded"][0]["item"];
+    assert_eq!(excluded["iri"], serde_json::json!(target), "{doc}");
+    assert_eq!(excluded["mirrored"][0]["type"], "blocks", "{doc}");
+}
