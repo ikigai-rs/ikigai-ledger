@@ -289,9 +289,9 @@ fn comments(kernel: &Kernel, item: &str, n: usize) {
     );
 }
 
-/// An item with 240 dependents, just under the 250 the ledger names one by one: the update that
-/// names them stays inside the store's algebra and text bounds, and a delete then a purge
-/// succeed in a graph past the copy bound.
+/// An item with 240 dependents, which through 0.18.0's first form was just under the 250 the
+/// ledger named one by one: the update that lists them stays inside the store's algebra and text
+/// bounds, and a delete then a purge succeed in a graph past the copy bound.
 #[test]
 fn an_item_with_hundreds_of_dependents_is_deleted_and_purged_past_the_bound() {
     let (kernel, target) = large_ledger(BOUND, 2_000);
@@ -312,10 +312,11 @@ fn an_item_with_hundreds_of_dependents_is_deleted_and_purged_past_the_bound() {
     assert!(!mentions(&kernel, GRAVEYARD, SECRET));
 }
 
-/// Past 250 dependents the removal falls back to the form that observes the whole graph, which
-/// works as it always did in a graph inside the bound.
+/// An item with 300 dependents in a graph inside the bound: through 0.18.0's first form this was
+/// past the 250 named one by one and fell back to the form that observes the whole graph; now it
+/// is one `VALUES` list like any other (ledger #2941), and the answers are the same.
 #[test]
-fn an_item_with_more_dependents_than_are_named_still_goes_inside_the_bound() {
+fn an_item_with_hundreds_of_dependents_goes_inside_the_bound_too() {
     let kernel = kernel_bounded(250_000);
     let target = append_iri(&kernel, "The target", &[]);
     append(&kernel, "A survivor", &[]);
@@ -332,6 +333,81 @@ fn an_item_with_more_dependents_than_are_named_still_goes_inside_the_bound() {
     let answer = delete(&kernel, "urn:iki:ledger:purge", &[("content", "4")]);
     assert!(answer.contains("destroyed, NOT recoverable"), "{answer}");
     assert!(!mentions(&kernel, LIVE, "note 299"));
+}
+
+/// ★ The reproduction (ledger #2941): an item with 500 dependents, in a graph past the copy
+/// bound, with the item's own quads well inside it. Through 0.18.0's first form the ledger named
+/// at most 250 dependents one by one and fell back past that to the form that observes the graph
+/// as a whole, so this delete was refused. Since store 0.3.3 narrows a variable an inline
+/// `VALUES` binds to IRIs, the dependents are one `VALUES ?d { … }` pattern, of any length.
+#[test]
+fn an_item_with_five_hundred_dependents_is_deleted_and_purged_past_the_bound() {
+    // 500 comments are about 2,000 quads, so the bound is set above the item and well below the
+    // graph (over 12,000 quads).
+    let (kernel, target) = large_ledger(5_000, 2_000);
+    comments(&kernel, &target, 500);
+    assert!(count(&kernel, LIVE) > 2 * 5_000);
+    let answer = try_verb(&kernel, Verb::Delete, "urn:iki:ledger:item:1", &[])
+        .unwrap_or_else(|e| panic!("delete of an item with ~515 dependents: {e}"));
+    assert!(answer.contains("deleted"), "{answer}");
+    assert!(mentions(&kernel, GRAVEYARD, "note 499"));
+    assert!(!mentions(&kernel, LIVE, "note 499"));
+    assert_eq!(edges_to(&kernel, LIVE, &target), "");
+    let answer = try_verb(
+        &kernel,
+        Verb::Delete,
+        "urn:iki:ledger:purge",
+        &[("content", "1")],
+    )
+    .unwrap_or_else(|e| panic!("purge of it: {e}"));
+    assert!(answer.contains("archived quad(s) destroyed"), "{answer}");
+    assert!(!mentions(&kernel, GRAVEYARD, "note 499"));
+    assert!(!mentions(&kernel, GRAVEYARD, SECRET));
+
+    // And a purge of a LIVE item with as many, which removes from the live graph directly.
+    let third = append_iri(&kernel, "A third target", &[]);
+    comments(&kernel, &third, 500);
+    let answer = try_verb(
+        &kernel,
+        Verb::Delete,
+        "urn:iki:ledger:purge",
+        &[("content", "3")],
+    )
+    .unwrap_or_else(|e| panic!("purge of a live item with 500 dependents: {e}"));
+    assert!(answer.contains("destroyed, NOT recoverable"), "{answer}");
+    assert!(!mentions(&kernel, LIVE, "note 499"));
+}
+
+/// A dependent that is a blank node has no name to list, so the one case the ledger still sends
+/// the form that observes the whole graph (this crate writes none; one comes only from a write
+/// through the broad door). A recoverable delete refuses it, as it always has, since archiving
+/// would mint a different node; a purge, inside the bound, takes it with its item.
+#[test]
+fn a_blank_node_dependent_goes_with_its_item_inside_the_bound() {
+    let kernel = kernel_bounded(250_000);
+    let target = append_iri(&kernel, "The target", &[]);
+    append(&kernel, "A survivor", &[]);
+    sink(
+        &kernel,
+        "urn:iki:store:graph-update",
+        &[
+            ("graph", LIVE),
+            (
+                "content",
+                &format!(
+                    "INSERT DATA {{ GRAPH <{LIVE}> {{ _:note a <{NS}Comment> ; \
+                     <{NS}onItem> <{target}> ; <{NS}body> \"an anonymous note\" . }} }}"
+                ),
+            ),
+        ],
+    );
+    let refused = try_verb(&kernel, Verb::Delete, "urn:iki:ledger:item:1", &[])
+        .expect_err("a recoverable delete cannot archive a blank node");
+    assert!(refused.to_string().contains("blank node"), "{refused}");
+    let answer = delete(&kernel, "urn:iki:ledger:purge", &[("content", "1")]);
+    assert!(answer.contains("destroyed, NOT recoverable"), "{answer}");
+    assert!(!mentions(&kernel, LIVE, "an anonymous note"));
+    assert!(source(&kernel, "urn:iki:ledger:item:2", &[]).contains("A survivor"));
 }
 
 // ---------------------------------------------------------------------------------- measure

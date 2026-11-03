@@ -50,8 +50,11 @@ ikigai-core = "0.2.0"
 # Caret alone admits 0.2.21 but does not REQUIRE it: a consumer's lock could keep an older
 # store under a fresh ledger. This crate uses no API newer than 0.2.10. Default features only:
 # the RocksDB backend is the HOST's choice, taken in the host's manifest, and nothing in this
-# library needs it. 0.3.0 carries these fixes onto core 0.2.0 (the streams release).
-ikigai-store = { version = "0.3.0", default-features = false }
+# library needs it. 0.3.0 carries these fixes onto core 0.2.0 (the streams release). 0.3.3 is
+# the floor since ledger #2941: its scoped door narrows a pattern whose subject an inline `VALUES`
+# lists (ledger #2940), which a delete and a purge now rely on to list an item's dependents in one
+# pattern. On 0.3.2 the same update observes the whole graph and is refused past the copy bound.
+ikigai-store = { version = "0.3.3", default-features = false }
 
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
@@ -109,8 +112,8 @@ ikigai-conformance = "0.11.0"
 # `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
 # costs an `oxrocksdb-sys` compile once per cache. Since store 0.2.24:
 # `tests/conformance.rs` names the inherited store doors exactly, and 0.2.24 adds `store-graph-info`
-# and `store-dump` (ledger #2111). 0.3.0 moves the store onto core 0.2.0.
-ikigai-store = { version = "0.3.0", features = ["persistent"] }
+# and `store-dump` (ledger #2111). 0.3.0 moves the store onto core 0.2.0; 0.3.3 as above.
+ikigai-store = { version = "0.3.3", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
