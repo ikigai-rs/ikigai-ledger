@@ -318,6 +318,8 @@ term! {
     CREATED_SOURCE => "createdSource";
     /// `ledger:modifiedSource` — `import` when `dcterms:modified` is a claimed date.
     MODIFIED_SOURCE => "modifiedSource";
+    /// `ledger:claimedModified` — the `dcterms:modified` an import principal last claimed.
+    CLAIMED_MODIFIED => "claimedModified";
     /// `ledger:Importer` — an import or sync principal, read from the participants graph.
     IMPORTER_CLASS => "Importer";
     /// `ledger:AliasScheme` — a registered alias scheme and its owner (ledger #2828).

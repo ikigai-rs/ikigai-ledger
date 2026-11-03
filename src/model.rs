@@ -1184,7 +1184,7 @@ async fn load(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
          ?principal ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
-         ?modifiedSource WHERE {{ {} }} \
+         ?modifiedSource ?claimedModified WHERE {{ {} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
             "{values}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -1212,7 +1212,8 @@ async fn load(
              OPTIONAL {{ ?item <{committer}> ?committer }}\n\
              OPTIONAL {{ ?item <{committed_at}> ?committedAt }}\n\
              OPTIONAL {{ ?item <{created_source}> ?createdSource }}\n\
-             OPTIONAL {{ ?item <{modified_source}> ?modifiedSource }}\n{filters}",
+             OPTIONAL {{ ?item <{modified_source}> ?modifiedSource }}\n\
+             OPTIONAL {{ ?item <{claimed_modified}> ?claimedModified }}\n{filters}",
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
             number = v::NUMBER,
@@ -1241,6 +1242,7 @@ async fn load(
             committed_at = v::COMMITTED_AT,
             created_source = v::CREATED_SOURCE,
             modified_source = v::MODIFIED_SOURCE,
+            claimed_modified = v::CLAIMED_MODIFIED,
         ))
         )
     };
@@ -1303,7 +1305,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
          ?principal ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
-         ?modifiedSource WHERE {{ {} }} \
+         ?modifiedSource ?claimedModified WHERE {{ {} }} \
          ORDER BY DESC({RECENCY})",
         client.in_graph(&format!(
             "BIND({subject} AS ?item)\n\
@@ -1332,7 +1334,8 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{committer}> ?committer }}\n\
              OPTIONAL {{ ?item <{committed_at}> ?committedAt }}\n\
              OPTIONAL {{ ?item <{created_source}> ?createdSource }}\n\
-             OPTIONAL {{ ?item <{modified_source}> ?modifiedSource }}",
+             OPTIONAL {{ ?item <{modified_source}> ?modifiedSource }}\n\
+             OPTIONAL {{ ?item <{claimed_modified}> ?claimedModified }}",
             subject = sparql::iri(iri, "item")?,
             type_ = v::ext::TYPE,
             item_class = v::ITEM_CLASS,
@@ -1362,6 +1365,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
             committed_at = v::COMMITTED_AT,
             created_source = v::CREATED_SOURCE,
             modified_source = v::MODIFIED_SOURCE,
+            claimed_modified = v::CLAIMED_MODIFIED,
         ))
     );
     let rows = client.select(&query).await?;
@@ -2104,10 +2108,21 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         committer: row.get("committer").map(|b| b.value.clone()),
         committed_at,
         created_claimed: row.contains_key("createdSource"),
-        // ★ A claimed `modified` holds only while it is earlier than the commit: any later
-        // write stamps the kernel's time, which is not (see `ledger:modifiedSource`).
+        // ★ A claimed `modified` holds while `modified` is still the date last claimed
+        // (`ledger:claimedModified`, ledger #2932): an undated write stamps the kernel's time
+        // over it, which is not claimed. Until 0.18.0 the read compared `modified` with the
+        // filing's commit instead, so a date claimed after that commit read as not claimed.
+        // An item written before 0.18.0 has no `claimedModified`, and its only claim is the
+        // filing's, earlier than its commit, so that reading stands for it.
         modified_claimed: row.contains_key("modifiedSource")
-            && matches!((modified, committed_at), (Some(m), Some(c)) if m < c),
+            && match (
+                modified,
+                row.get("claimedModified").and_then(|b| millis(&b.value)),
+            ) {
+                (Some(m), Some(claimed)) => m == claimed,
+                (Some(m), None) => committed_at.is_some_and(|c| m < c),
+                _ => false,
+            },
         // Each stands in for the other: created ≤ modified, so a missing `created` is at
         // most the `modified`, and a missing `modified` is at least the `created`. Neither
         // is invented, and with neither readable there is no true time to show.

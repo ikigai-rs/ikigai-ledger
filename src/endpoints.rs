@@ -947,43 +947,78 @@ fn touch_dated(
     claimed: Option<u64>,
     guard: &str,
 ) -> String {
-    let (stamp, source, filter) = stamp_terms(item, now, claimed);
+    let stamp = stamp_terms(item, now, claimed);
     format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
-        client.in_graph(&format!("<{item}> <{}> ?was", v::ext::MODIFIED)),
-        client.in_graph(&format!("<{item}> <{}> {stamp}{source}", v::ext::MODIFIED)),
         client.in_graph(&format!(
-            "{} {guard} OPTIONAL {{ <{item}> <{}> ?was }}{filter}",
+            "<{item}> <{}> ?was{}",
+            v::ext::MODIFIED,
+            stamp.delete
+        )),
+        client.in_graph(&format!(
+            "<{item}> <{}> {}{}",
+            v::ext::MODIFIED,
+            stamp.value,
+            stamp.insert
+        )),
+        client.in_graph(&format!(
+            "{} {guard} OPTIONAL {{ <{item}> <{}> ?was }}{}",
             live(item),
-            v::ext::MODIFIED
+            v::ext::MODIFIED,
+            stamp.filter
         ))
     )
 }
 
-/// What a write stamps as the item's `modified`: the value, the triple that marks it claimed,
-/// and the `FILTER` on `?was`, the value it replaces.
+/// What a write stamps as the item's `modified`: see [`stamp_terms`].
+struct Stamp {
+    /// The new `dcterms:modified`.
+    value: String,
+    /// What else the update removes: the date the previous claim recorded.
+    delete: String,
+    /// What else it inserts: the marks that say the date is claimed.
+    insert: String,
+    /// The bindings and the `FILTER` on `?was`, the value it replaces.
+    filter: String,
+}
+
+/// What a write stamps as the item's `modified`.
 ///
 /// ★ **A claimed date moves `modified` only FORWARD** (ledger #2928). An importer files an
 /// item with the source's `modified` and then replays its past: comments dated at the source,
 /// a close dated at the source. Until 0.18.0 each of those stamped the kernel's time, so
 /// `modified` ended at the import, and `priority-recency`, whose tie-break it is, ranked the
 /// item as just updated. Now a write that carries a claimed date sets `modified` to the later
-/// of its current value and that date, marked `ledger:modifiedSource "import"`; a past date
-/// changes nothing. A write with no claimed date stamps `now`, as every write always has, and
-/// the read already treats a `modified` at or after the commit as not claimed. An unreadable
-/// `?was` cannot be compared, and the claimed date replaces it.
-fn stamp_terms(item: &str, now: u64, claimed: Option<u64>) -> (String, String, String) {
+/// of its current value and that date, marked `ledger:modifiedSource "import"`, and records
+/// the date in `ledger:claimedModified`; a past date changes nothing. A write with no claimed
+/// date stamps `now`, as every write always has, and leaves the marks: the read takes the claim
+/// to hold only while `modified` still equals `claimedModified` (ledger #2932), so the kernel's
+/// time over it is not claimed. An unreadable `?was` cannot be compared, and the claimed date
+/// replaces it.
+fn stamp_terms(item: &str, now: u64, claimed: Option<u64>) -> Stamp {
     match claimed {
-        None => (datetime(now), String::new(), String::new()),
-        Some(claimed) => (
-            datetime(claimed),
-            format!(
-                " . <{item}> <{}> {}",
+        None => Stamp {
+            value: datetime(now),
+            delete: String::new(),
+            insert: String::new(),
+            filter: String::new(),
+        },
+        Some(claimed) => Stamp {
+            value: datetime(claimed),
+            delete: format!(" . <{item}> <{}> ?wasClaimed", v::CLAIMED_MODIFIED),
+            insert: format!(
+                " . <{item}> <{}> {} . <{item}> <{}> {}",
                 v::MODIFIED_SOURCE,
-                literal(attribution::IMPORT)
+                literal(attribution::IMPORT),
+                v::CLAIMED_MODIFIED,
+                datetime(claimed)
             ),
-            format!(" FILTER(COALESCE(?was < {}, true))", datetime(claimed)),
-        ),
+            filter: format!(
+                " OPTIONAL {{ <{item}> <{}> ?wasClaimed }} FILTER(COALESCE(?was < {}, true))",
+                v::CLAIMED_MODIFIED,
+                datetime(claimed)
+            ),
+        },
     }
 }
 
@@ -1148,16 +1183,26 @@ async fn write_keyed_comment(
     };
     // The stamp and the hand-back first: once the comment is in, the key is taken and the
     // guard is false, so a replay changes neither.
-    let (stamp, source, filter) = stamp_terms(item, now, who.created);
+    let stamp = stamp_terms(item, now, who.created);
     client
         .update(&batch(&[
             format!(
                 "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} {free} }}",
-                client.in_graph(&format!("<{item}> <{}> ?was", v::ext::MODIFIED)),
-                client.in_graph(&format!("<{item}> <{}> {stamp}{source}", v::ext::MODIFIED)),
                 client.in_graph(&format!(
-                    "OPTIONAL {{ <{item}> <{}> ?was }}{filter}",
-                    v::ext::MODIFIED
+                    "<{item}> <{}> ?was{}",
+                    v::ext::MODIFIED,
+                    stamp.delete
+                )),
+                client.in_graph(&format!(
+                    "<{item}> <{}> {}{}",
+                    v::ext::MODIFIED,
+                    stamp.value,
+                    stamp.insert
+                )),
+                client.in_graph(&format!(
+                    "OPTIONAL {{ <{item}> <{}> ?was }}{}",
+                    v::ext::MODIFIED,
+                    stamp.filter
                 )),
             ),
             handback_update(client, item, handback, &free, now),
