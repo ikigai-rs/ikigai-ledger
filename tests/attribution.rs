@@ -557,6 +557,61 @@ fn a_write_without_a_claimed_date_still_stamps_now() {
     assert_eq!(claimed, serde_json::json!([]));
 }
 
+/// ★ The reproduction (ledger #2932): a claimed date between the filing's commit and now. The
+/// importer files, then replays a comment the source dated AFTER that commit (an import that
+/// runs while the source is still being written to). `modified` moves to that date, which is
+/// right, and until 0.18.0 the item then read it as NOT claimed: the read took a claimed
+/// `modified` to hold only while it was earlier than `committedAt`. An undated write after it
+/// still ends the claim (#2928's rule).
+#[test]
+fn a_claimed_modified_after_the_filing_commit_reads_as_claimed() {
+    let kernel = kernel();
+    let importer = writer(IMPORTER);
+    file(
+        &kernel,
+        &importer,
+        &[
+            ("created", "2020-01-02T03:04:05Z"),
+            ("modified", "2020-02-03T04:05:06Z"),
+        ],
+    )
+    .unwrap();
+    let (_, json, _) = faces(&kernel);
+    let committed = json["item"]["attribution"]["committed"]
+        .as_str()
+        .expect("the filing's commit")
+        .to_string();
+    // The test clock ticks whole seconds, so half a second after the commit is after it and
+    // before the comment's own write.
+    assert!(committed.ends_with(".000Z"), "{committed}");
+    let between = committed.replace(".000Z", ".500Z");
+    comment(&kernel, &importer, &[("created", &between)]).unwrap();
+    let (plain, json, turtle) = faces(&kernel);
+    assert_eq!(json["item"]["modified"], serde_json::json!(between));
+    assert_eq!(
+        json["item"]["attribution"]["claimed_dates"],
+        serde_json::json!(["created", "modified"]),
+        "a claimed date after the filing's commit is still claimed"
+    );
+    has(&plain, &format!("  updated:  {between} (claimed)\n"));
+    has(&turtle, "ledger:modifiedSource \"import\"");
+
+    // An undated write stamps now, and the claim ends.
+    comment(&kernel, &importer, &[]).unwrap();
+    let (plain, json, turtle) = faces(&kernel);
+    assert_ne!(json["item"]["modified"], serde_json::json!(between));
+    assert_eq!(
+        json["item"]["attribution"]["claimed_dates"],
+        serde_json::json!(["created"])
+    );
+    let updated = plain
+        .lines()
+        .find(|line| line.starts_with("  updated:"))
+        .expect("an updated line");
+    lacks(updated, "(claimed)");
+    lacks(&turtle, "modifiedSource");
+}
+
 /// `next` under `priority-recency` ranks an imported set as the source did: the item updated
 /// later at the source first, however its past was replayed.
 #[test]

@@ -1294,11 +1294,13 @@ Every item, comment and tombstone a write creates records who made it the way gi
 - **Which writes move `modified`, and how** (since 0.18.0, ledger #2928, #2934): a write that
   carries a claimed date (a comment's `created=`, a close's `closed-at=`, and the `created=` of the
   link Sink, within a ledger or across ledgers, and of the state Sink) sets the item's `modified`
-  to the LATER of its current value and that date, marked `ledger:modifiedSource "import"`, so an
-  importer that files with the source's `modified` and then replays the item's past leaves it at
-  the source's value. Every other write, an importer's undated one included, stamps the kernel's
-  time, and a `modified` at or after the commit reads as not claimed. An imported history
-  (`…:history`) touches no item at all.
+  to the LATER of its current value and that date, marked `ledger:modifiedSource "import"` and
+  recorded in `ledger:claimedModified`, so an importer that files with the source's `modified` and
+  then replays the item's past leaves it at the source's value. Every other write, an importer's
+  undated one included, stamps the kernel's time, and the claim holds only while `modified` still
+  equals `ledger:claimedModified` (#2932); an item written before 0.18.0, which has none, reads its
+  `modified` as claimed while it is earlier than the commit. An imported history (`…:history`)
+  touches no item at all.
 - **A dated link or state move** (ledger #2934): `created=` on the link Sink or the state Sink is
   held to `closed-at=`'s rules (an `xsd:dateTime`, no later than now, no earlier than the item's
   filing) and lands as the edit event's `dcterms:created`, marked `ledger:createdSource "import"`
@@ -2101,6 +2103,14 @@ every write by anyone else, stamp the time as before. On 0.17.0 an importer that
 source's `modified` and then replayed comments and a close ended every such item at the import time,
 so `priority-recency` ranked imported open items as just updated. See "Which writes move
 `modified`" under attribution.
+
+**A claimed `modified` after the filing's commit reads as claimed (#2932).** The read took a
+claimed `modified` to hold only while it was earlier than the filing's `committedAt`, so a comment
+or close an importer dated between that commit and now moved `modified` to the source's date, as
+#2928 meant, and the faces then called it the kernel's. The filing and every dated write now record
+the date they claimed in `ledger:claimedModified`, and the claim holds while `modified` still equals
+it: an undated write still ends it. An item written before 0.18.0 has no `claimedModified` and is
+read as before, which is right for it, since its only claim is the filing's.
 
 **An importer dates a link and a state move (#2934).** The link Sink (within a ledger and across
 ledgers) and the state Sink take `created=` from an import principal, under `closed-at=`'s date

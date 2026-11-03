@@ -188,6 +188,15 @@ impl Attribution {
                 ));
             }
         }
+        // The date claimed for `modified`, which the claim holds only while `modified` still
+        // equals (ledger #2932).
+        if let Some(modified) = self.modified {
+            out.push_str(&format!(
+                "\n<{subject}> <{}> {} .",
+                v::CLAIMED_MODIFIED,
+                datetime(modified)
+            ));
+        }
         out
     }
 }
