@@ -485,7 +485,12 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
                 lifecycles: Arc::clone(&lifecycles),
             },
         )
-        .bind(ItemPartGrammar::part("about"), AboutEndpoint)
+        .bind(
+            ItemPartGrammar::part("about"),
+            AboutEndpoint {
+                participants: participants.clone(),
+            },
+        )
         .bind(ItemPartGrammar::part("history"), history::HistoryEndpoint)
         .bind(
             LedgerGrammar::with_id("item"),
@@ -523,14 +528,24 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
                 stamper: config.claim_kind,
             },
         )
-        .bind(LedgerGrammar::action("defer"), DeferEndpoint)
+        .bind(
+            LedgerGrammar::action("defer"),
+            DeferEndpoint {
+                participants: participants.clone(),
+            },
+        )
         .bind(
             LedgerGrammar::action("link"),
             LinkEndpoint {
                 participants: participants.clone(),
             },
         )
-        .bind(LedgerGrammar::action("label"), LabelEndpoint)
+        .bind(
+            LedgerGrammar::action("label"),
+            LabelEndpoint {
+                participants: participants.clone(),
+            },
+        )
         .bind(
             LedgerGrammar::action("purge"),
             PurgeEndpoint {
@@ -928,18 +943,11 @@ async fn still_live(client: &StoreClient<'_, '_>, item: &str) -> Result<()> {
 }
 
 /// Stamp an item as modified, as part of the same update that changed it — only while it is
-/// a live item ([`live`]), so a late write never stamps a deleted IRI.
-fn touch(client: &StoreClient<'_, '_>, item: &str, now: u64) -> String {
-    touch_when(client, item, now, "")
-}
-
-/// [`touch`], only while `guard` (a pattern over the ledger's graph) also holds.
-fn touch_when(client: &StoreClient<'_, '_>, item: &str, now: u64, guard: &str) -> String {
-    touch_dated(client, item, now, None, guard)
-}
-
-/// [`touch_when`] for a write that may carry a date an import principal claimed (a comment's
-/// `created=`, a close's `closed-at=`): see [`stamp_terms`].
+/// a live item ([`live`]), so a late write never stamps a deleted IRI, and only while `guard`
+/// (a pattern over the ledger's graph) also holds. `claimed` is a date an import principal
+/// claimed for the write (a comment's `created=`, a close's `closed-at=`, the `created=` of the
+/// other Sinks an importer replays, ledger #2939), `None` for the kernel's time: see
+/// [`stamp_terms`].
 fn touch_dated(
     client: &StoreClient<'_, '_>,
     item: &str,
@@ -1020,6 +1028,52 @@ fn stamp_terms(item: &str, now: u64, claimed: Option<u64>) -> Stamp {
             ),
         },
     }
+}
+
+/// The `created` argument of a write an import principal may date at its source (ledger
+/// #2939): `what` is the write, in the words its refusal uses.
+fn created_arg(what: &str) -> ArgSpec {
+    ArgSpec::new("created")
+        .summary(format!(
+            "When {what} was made at its source, for an import principal (ledger:Importer in \
+             the host's participants graph) only: an xsd:dateTime no later than now and no \
+             earlier than the item's filing. Dates its event, marked claimed, and moves the \
+             item's modified only forward to it (ledger #2939). Anyone else sending it is \
+             refused."
+        ))
+        .class(v::ext::XSD_DATETIME)
+        .optional()
+}
+
+/// `created=` on a write an import principal replays (ledger #2934, #2939), held by
+/// [`attribution::resolve_claimed`] to the one date rule, and the committer's attribution
+/// carrying it: the write's event is dated with it, and so is a note it writes. `None` and
+/// the plain committer when it was not sent; anyone but an import principal is refused.
+async fn importer_dated(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    participants: Option<&str>,
+    what: &str,
+    item: &Item,
+    now: u64,
+) -> Result<(Option<u64>, Attribution)> {
+    let claimed = attribution::resolve_claimed(
+        inv,
+        client,
+        participants,
+        "created",
+        what,
+        item.created,
+        now,
+    )
+    .await?;
+    Ok((
+        claimed,
+        Attribution {
+            created: claimed,
+            ..Attribution::committer(inv)?
+        },
+    ))
 }
 
 /// Append a comment — the shared path behind `urn:iki:ledger:comment` and behind the
@@ -1908,7 +1962,17 @@ impl Endpoint for ItemEndpoint {
                     }
                     return Err(Error::MissingArgument("content".to_string()));
                 }
-                updates.push(touch(&client, &item.iri, now));
+                // An edit an import principal dated at its source (ledger #2939).
+                let (claimed, who) = importer_dated(
+                    inv,
+                    &client,
+                    self.participants.as_deref(),
+                    "an edit",
+                    &item,
+                    now,
+                )
+                .await?;
+                updates.push(touch_dated(&client, &item.iri, now, claimed, ""));
                 updates.insert(
                     0,
                     edit_event_naming(
@@ -1916,7 +1980,7 @@ impl Endpoint for ItemEndpoint {
                         &item.iri,
                         &[&item.iri],
                         "edit",
-                        &Attribution::committer(inv)?,
+                        &who,
                         now,
                         &fields,
                     )?,
@@ -2038,6 +2102,7 @@ impl Endpoint for ItemEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(created_arg("an edit"))
                     .output(PLAIN),
                 CAP_WRITE,
             ))
@@ -3932,9 +3997,27 @@ impl Endpoint for ReopenEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
-        let who =
-            attribution::resolve(inv, &client, self.participants.as_deref(), Dates::None, now)
-                .await?;
+        let mut who = attribution::resolve(
+            inv,
+            &client,
+            self.participants.as_deref(),
+            Dates::Event,
+            now,
+        )
+        .await?;
+        // A reopen an import principal dated at its source (ledger #2939), as a close may be:
+        // the status event and a note carry the date, and `modified` moves only forward.
+        let claimed = attribution::resolve_claimed(
+            inv,
+            &client,
+            self.participants.as_deref(),
+            "created",
+            "a reopen",
+            item.created,
+            now,
+        )
+        .await?;
+        who.created = claimed;
         // ★ THE UPDATE DECIDES, AS IT DOES FOR CLOSE (ledger #2766, after #2764). Until
         // 0.14.1 the reopen required the item and then wrote unconditionally, so reopening an
         // open item appended an `open` status event for a close that never happened, and
@@ -3944,8 +4027,15 @@ impl Endpoint for ReopenEndpoint {
         // event IRI minted here is how this request learns whether it was that one.
         across::require_mirror_grants(inv, &client, &item).await?;
         let still_closed = format!("<{}> <{}> <{}> .", item.iri, v::STATUS, v::CLOSED);
-        let (event, event_iri) =
-            counts::status_event_when(&client, &item.iri, v::OPEN, now, &still_closed, &who, None)?;
+        let (event, event_iri) = counts::status_event_when(
+            &client,
+            &item.iri,
+            v::OPEN,
+            now,
+            &still_closed,
+            &who,
+            claimed,
+        )?;
         guarded_update(
             &client,
             &[&item.iri],
@@ -3965,7 +4055,7 @@ impl Endpoint for ReopenEndpoint {
                     &datetime(now),
                     &still_closed,
                 ),
-                touch_when(&client, &item.iri, now, &still_closed),
+                touch_dated(&client, &item.iri, now, claimed, &still_closed),
                 replace_one_when(
                     &client,
                     &item.iri,
@@ -4036,6 +4126,7 @@ impl Endpoint for ReopenEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(created_arg("a reopen"))
                     .output(PLAIN),
                 CAP_ANY,
             ))
@@ -5128,7 +5219,9 @@ impl Endpoint for ClaimEndpoint {
 // --------------------------------------------------------------------------- defer
 
 #[derive(Clone)]
-struct DeferEndpoint;
+struct DeferEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for DeferEndpoint {
@@ -5149,13 +5242,26 @@ impl Endpoint for DeferEndpoint {
             ),
             other => return Err(unsupported("ledger-defer", other)),
         };
-        let who = Attribution::committer(inv)?;
+        // A deferral or a resume an import principal dated at its source (ledger #2939).
+        let (claimed, who) = importer_dated(
+            inv,
+            &client,
+            self.participants.as_deref(),
+            if edit == "defer" {
+                "a deferral"
+            } else {
+                "a resume"
+            },
+            &item,
+            now,
+        )
+        .await?;
         guarded_update(
             &client,
             &[&item.iri],
             &batch(&[
                 update,
-                touch(&client, &item.iri, now),
+                touch_dated(&client, &item.iri, now, claimed, ""),
                 edit_event(&client, &item.iri, edit, &who, now)?,
             ]),
         )
@@ -5194,6 +5300,7 @@ impl Endpoint for DeferEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(created_arg("a deferral"))
                     .output(PLAIN),
                 CAP_WRITE,
             ))
@@ -5208,6 +5315,7 @@ impl Endpoint for DeferEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(created_arg("a resume"))
                     .output(PLAIN),
                 CAP_WRITE,
             ))
@@ -5256,22 +5364,23 @@ impl Endpoint for LinkEndpoint {
                     .join(", ")
             ),
         })?;
-        // ★ An import principal may date a link at its source (ledger #2934), as it may date a
-        // comment or a close; anyone else is refused, with the reason and the remedy.
-        let claimed = if inv.request.verb == Verb::Sink {
-            attribution::resolve_claimed(
-                inv,
-                &client,
-                self.participants.as_deref(),
-                "created",
-                "a link",
-                from.created,
-                now,
-            )
-            .await?
-        } else {
-            None
-        };
+        // ★ An import principal may date a link at its source (ledger #2934), and an unlink
+        // (ledger #2939), as it may date a comment or a close; anyone else is refused, with the
+        // reason and the remedy. Until 0.18.0 an unlink ignored a `created=` from anyone.
+        let claimed = attribution::resolve_claimed(
+            inv,
+            &client,
+            self.participants.as_deref(),
+            "created",
+            if inv.request.verb == Verb::Sink {
+                "a link"
+            } else {
+                "an unlink"
+            },
+            from.created,
+            now,
+        )
+        .await?;
         // ★ An object in another ledger is a typed link across ledgers (ledger #2829): admitted
         // by `link-in` on that ledger, written as a link node here and mirrored there.
         let reference = inv.inline_str("content")?;
@@ -5285,6 +5394,10 @@ impl Endpoint for LinkEndpoint {
             .await;
         }
         let to = require_item(&client, reference).await?;
+        // A dated link is no earlier than its target's filing either (ledger #2939).
+        if let (Some(claimed), Verb::Sink) = (claimed, inv.request.verb) {
+            attribution::claimed_not_before_target("created", claimed, &to.iri, to.created)?;
+        }
         // Refused on Sink only. A self-block can still arrive out of band, and `next` then
         // refuses naming this resource's Delete as the remedy — which must not be refused
         // for the same reason (0.2.1 refused it, so the ledger's own fix could not run).
@@ -5425,6 +5538,7 @@ impl Endpoint for LinkEndpoint {
                             .class(v::ext::XSD_STRING),
                     )
                     .input(type_arg())
+                    .input(created_arg("an unlink"))
                     .input(as_arg(&WRITE_FACES))
                     .output(PLAIN)
                     .output(JSON),
@@ -5436,7 +5550,9 @@ impl Endpoint for LinkEndpoint {
 // --------------------------------------------------------------------------- label
 
 #[derive(Clone)]
-struct LabelEndpoint;
+struct LabelEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for LabelEndpoint {
@@ -5486,19 +5602,30 @@ impl Endpoint for LabelEndpoint {
                 triple.clone()
             },
         };
-        let event = edit_event_naming(
+        // A label an import principal dated at its source (ledger #2939).
+        let (claimed, who) = importer_dated(
+            inv,
             &client,
-            &item.iri,
-            &[&item.iri],
-            edit,
-            &Attribution::committer(inv)?,
+            self.participants.as_deref(),
+            if edit == "label" {
+                "a label"
+            } else {
+                "an unlabel"
+            },
+            &item,
             now,
-            &[object],
-        )?;
+        )
+        .await?;
+        let event =
+            edit_event_naming(&client, &item.iri, &[&item.iri], edit, &who, now, &[object])?;
         guarded_update(
             &client,
             &[&item.iri],
-            &batch(&[event, update, touch(&client, &item.iri, now)]),
+            &batch(&[
+                event,
+                update,
+                touch_dated(&client, &item.iri, now, claimed, ""),
+            ]),
         )
         .await?;
         Ok(plain(format!("{said} {} {label}\n", item.short())))
@@ -5530,6 +5657,7 @@ impl Endpoint for LabelEndpoint {
                             )
                             .class(v::ext::XSD_STRING),
                     )
+                    .input(created_arg("a label"))
                     .output(PLAIN),
                 CAP_WRITE,
             ))
@@ -5543,6 +5671,7 @@ impl Endpoint for LabelEndpoint {
                             .summary("The label to remove.")
                             .class(v::ext::XSD_STRING),
                     )
+                    .input(created_arg("an unlabel"))
                     .output(PLAIN),
                 CAP_WRITE,
             ))
@@ -5567,7 +5696,9 @@ impl Endpoint for LabelEndpoint {
 /// have to be reserved first — a change to that public constant, and a ledger already called
 /// `about` would stop parsing. `item` is reserved already, so a part costs nothing.
 #[derive(Clone)]
-struct AboutEndpoint;
+struct AboutEndpoint {
+    participants: Participants,
+}
 
 #[async_trait]
 impl Endpoint for AboutEndpoint {
@@ -5606,7 +5737,21 @@ impl Endpoint for AboutEndpoint {
                 _ => format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
             });
         }
-        updates.push(touch(&client, &item.iri, now));
+        // An about an import principal dated at its source (ledger #2939).
+        let (claimed, who) = importer_dated(
+            inv,
+            &client,
+            self.participants.as_deref(),
+            if inv.request.verb == Verb::Sink {
+                "an about"
+            } else {
+                "an unabout"
+            },
+            &item,
+            now,
+        )
+        .await?;
+        updates.push(touch_dated(&client, &item.iri, now, claimed, ""));
         updates.insert(
             0,
             edit_event_naming(
@@ -5618,7 +5763,7 @@ impl Endpoint for AboutEndpoint {
                 } else {
                     "unabout"
                 },
-                &Attribution::committer(inv)?,
+                &who,
                 now,
                 &objects,
             )?,
@@ -5660,6 +5805,7 @@ impl Endpoint for AboutEndpoint {
                     .summary("Add the targets. Adding one already there is not an error.")
                     .input(flight::item_id_input())
                     .input(content("The targets to add."))
+                    .input(created_arg("an about"))
                     .output(PLAIN),
                 CAP_ANY,
             ))
@@ -5669,6 +5815,7 @@ impl Endpoint for AboutEndpoint {
                     .summary("Remove the targets. Removing one not there is not an error.")
                     .input(flight::item_id_input())
                     .input(content("The targets to remove."))
+                    .input(created_arg("an unabout"))
                     .output(PLAIN),
                 CAP_ANY,
             ))

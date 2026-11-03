@@ -208,8 +208,8 @@ pub enum Dates {
     None,
     /// `created` only (a comment).
     Created,
-    /// A write whose `created` dates the event it records (a link, a state move; ledger
-    /// #2934): [`resolve_claimed`] checks it against the item's filing, so this leaves it to
+    /// A write whose `created` dates the event it records (a link, a state move, ledger
+    /// #2934; a reopen, ledger #2939): [`resolve_claimed`] checks it against the item's filing, so this leaves it to
     /// that and refuses `modified`.
     Event,
     /// `created` and `modified` (filing an item).
@@ -314,8 +314,9 @@ pub async fn resolve(
                 detail: format!(
                     "this write takes no authored `{name}`: an import principal may claim an \
                      item's created and modified when filing it, and the created of a comment, \
-                     a link or a state move. Send it without `{name}`, and the ledger stamps \
-                     the time itself"
+                     a link or an unlink, a state move, a label, a deferral, an about, an item \
+                     edit or a reopen. Send it without `{name}`, and the ledger stamps the time \
+                     itself"
                 ),
             });
         }
@@ -409,7 +410,8 @@ pub async fn resolve_closed_at(
 }
 
 /// Resolve and check the date argument `name`, the source date of the change `what` records
-/// (`closed-at` on a close, ledger #2819; `created` on a link or a state move, ledger #2934):
+/// (`closed-at` on a close, ledger #2819; `created` on a link or a state move, ledger #2934,
+/// and on an unlink, a label, a deferral, an about, an item edit and a reopen, ledger #2939):
 /// `None` when it was not sent. It is an `xsd:dateTime` no later than `now` and no earlier
 /// than `filed`, the item's `dcterms:created`, so a replay never dates a change before the
 /// item it changes. Anyone but an import principal is refused, with the reason and the
@@ -463,18 +465,53 @@ pub async fn resolve_claimed(
             ),
         });
     }
-    if millis < filed {
+    not_before(
+        name,
+        value,
+        millis,
+        filed,
+        "the item was filed",
+        &format!(
+            "{what} cannot come before the item it changes. Send the item's source dates when \
+             filing it, or a later `{name}`"
+        ),
+    )?;
+    Ok(Some(millis))
+}
+
+/// A dated link's other end (ledger #2939): `claimed`, which [`resolve_claimed`] already held
+/// to the subject's filing, is held to `target`'s filing too, `filed`, by the same rule. Until
+/// 0.18.0 only the subject's was checked, so a link could be dated before its target existed.
+pub fn claimed_not_before_target(name: &str, claimed: u64, target: &str, filed: u64) -> Result<()> {
+    not_before(
+        name,
+        &sparql::iso8601(claimed),
+        claimed,
+        filed,
+        &format!("the link's target {target} was filed"),
+        &format!("a link cannot come before either of its ends. Send a later `{name}`"),
+    )
+}
+
+/// The floor every claimed date is held to: no earlier than `floor`, when `filed` happened.
+fn not_before(
+    name: &str,
+    value: &str,
+    millis: u64,
+    floor: u64,
+    filed: &str,
+    remedy: &str,
+) -> Result<()> {
+    if millis < floor {
         return Err(Error::InvalidArgument {
             name: name.to_string(),
             detail: format!(
-                "`{value}` is before the item was filed ({}); {what} cannot come before the \
-                 item it changes. Send the item's source dates when filing it, or a later \
-                 `{name}`",
-                sparql::iso8601(filed)
+                "`{value}` is before {filed} ({}); {remedy}",
+                sparql::iso8601(floor)
             ),
         });
     }
-    Ok(Some(millis))
+    Ok(())
 }
 
 /// The import principal writing past-dated history (ledger #2843), or a refusal that says to
