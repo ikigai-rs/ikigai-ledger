@@ -2032,6 +2032,21 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.18.1: counts joins status history once (ledger #2969)
+
+On supported older Oxigraph planners, the nested optional status-history query scanned history
+again for each item. A signed-in reader could reach the store's five-second budget on a ledger
+of about 3,000 items. Counts now projects that history in a subquery and joins it once, within
+one store read. The date sweep, close/reopen semantics, backfill markers and grants are unchanged.
+
+`tests/counts_at_scale.rs` builds a persistent 2,900-item ledger with 2,200 closes (1,781
+backfilled), comments, imported and sequenced status events, claim/state/edit history and links
+across ledgers. It disables caching, reads as a non-root capability at the store's default
+five-second budget, checks the daily totals and Turtle backfill markers, and bounds each CSV
+read to two seconds. It was also run locally on affected Oxigraph 0.5.11.
+On a local debug build with 0.5.11, the original query refused at 5.143 seconds; the subquery
+answered in 407–411 ms. These are synthetic-fixture measurements, not a live-ledger benchmark.
+
 ### 0.18.0: an edit event names what it changed (ledger #2841)
 
 **What an edit changed (#2841).** A `ledger:EditEvent` now records its object in the update that

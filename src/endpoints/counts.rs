@@ -127,13 +127,22 @@ impl Endpoint for CountsEndpoint {
             .transpose()?;
         let now = now_ms(inv)?;
         let today = now / DAY;
+        // Materialize the status-history side once before joining it to items. Without
+        // this subquery, supported Oxigraph planners repeat the nested OPTIONAL's
+        // history scan for every item (ledger #2969). Keep one store read/snapshot.
+        let history = format!(
+            "SELECT ?item ?eventTime ?eventStatus ?eventOrder ?eventSource WHERE {{ \
+             ?event <{}> <{}> ; <{}> ?item ; <{}> ?eventTime ; <{}> ?eventStatus ; <{}> ?eventOrder . \
+             OPTIONAL {{ ?event <{}> ?eventSource }} }}",
+            v::ext::TYPE, v::STATUS_EVENT_CLASS, v::ON_ITEM, v::ext::CREATED,
+            v::STATUS, v::EVENT_SEQUENCE, v::CLOSED_AT_SOURCE
+        );
         let query = format!("SELECT ?item ?filed ?status ?closed ?eventTime ?eventStatus ?eventOrder ?eventSource ?closeSource WHERE {{ {} }}",
             client.in_graph(&format!(
                 "?item <{}> <{}> . OPTIONAL {{ ?item <{}> ?filed }} OPTIONAL {{ ?item <{}> ?status }} \
                  OPTIONAL {{ ?item <{}> ?closed }} OPTIONAL {{ ?item <{}> ?closeSource }} \
-                 OPTIONAL {{ ?event <{}> <{}> ; <{}> ?item ; <{}> ?eventTime ; <{}> ?eventStatus ; <{}> ?eventOrder . OPTIONAL {{ ?event <{}> ?eventSource }} }}",
-                v::ext::TYPE, v::ITEM_CLASS, v::ext::CREATED, v::STATUS, v::CLOSED_AT, v::CLOSED_AT_SOURCE,
-                v::ext::TYPE, v::STATUS_EVENT_CLASS, v::ON_ITEM, v::ext::CREATED, v::STATUS, v::EVENT_SEQUENCE, v::CLOSED_AT_SOURCE
+                 OPTIONAL {{ {history} }}",
+                v::ext::TYPE, v::ITEM_CLASS, v::ext::CREATED, v::STATUS, v::CLOSED_AT, v::CLOSED_AT_SOURCE
             )));
         let mut items: BTreeMap<String, History> = BTreeMap::new();
         let mut approximate_through: Option<u64> = None;
