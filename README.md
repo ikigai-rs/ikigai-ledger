@@ -2032,6 +2032,13 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.19.0: core 0.3 scoped content store (ledger #2965)
+
+The public API now uses `ikigai-core` 0.3 types. Core scopes held content to its deliverer;
+principal-less holds belong to root, and unscoped content-store writes are root-only.
+Normal and test dependencies share core 0.3: store 0.4.0, vocab 0.3.0, and conformance 0.14.0.
+This crate makes no direct content-store writes.
+
 ### 0.18.1: counts joins status history once (ledger #2969)
 
 On supported older Oxigraph planners, the nested optional status-history query scanned history
