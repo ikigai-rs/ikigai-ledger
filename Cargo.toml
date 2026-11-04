@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-ledger"
-version = "0.18.1"
+version = "0.19.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -24,9 +24,9 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 # and where", states exactly which half is which.
 
 [dependencies]
-# 0.2.0 is the streams release (ledger #2261). The old 0.1.93 pin meant
-# >=0.1.93, <0.2.0 under 0.x rules and excluded that release.
-ikigai-core = "0.2.0"
+# Core 0.3.0 scopes held content to its deliverer and makes unscoped content-store
+# writes root-only (ledger #2965); all ikigai dependencies must share these core types.
+ikigai-core = "0.3.0"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's
@@ -54,7 +54,8 @@ ikigai-core = "0.2.0"
 # the floor since ledger #2941: its scoped door narrows a pattern whose subject an inline `VALUES`
 # lists (ledger #2940), which a delete and a purge now rely on to list an item's dependents in one
 # pattern. On 0.3.2 the same update observes the whole graph and is refused past the copy bound.
-ikigai-store = { version = "0.3.3", default-features = false }
+# 0.4.0 carries these fixes onto core 0.3.0 and its scoped content store (ledger #2965).
+ikigai-store = { version = "0.4.0", default-features = false }
 
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
@@ -103,20 +104,19 @@ futures = "0.3"
 # build, to show the `http-client` build really does fetch. The same oxigraph the store
 # resolves (it pins 0.5.1 as its floor); default features off so this adds no backend.
 oxigraph = { version = "0.5.1", default-features = false }
-# The module recipe as one test. 0.11.0 uses core 0.2.0 and enables DATATYPES
-# and FAILURES by default; FAILURES probes actions that declare failure classes.
-ikigai-conformance = "0.11.0"
+# The module recipe as one test. 0.14.0 shares core 0.3.0 (ledger #2965) and enables
+# DATATYPES and FAILURES by default; FAILURES probes declared failure classes.
+ikigai-conformance = "0.14.0"
 # The store this ledger is written against, with the durable backend ON — so
 # `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
 # `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
 # costs an `oxrocksdb-sys` compile once per cache. Since store 0.2.24:
 # `tests/conformance.rs` names the inherited store doors exactly, and 0.2.24 adds `store-graph-info`
-# and `store-dump` (ledger #2111). 0.3.0 moves the store onto core 0.2.0; 0.3.3 as above.
-ikigai-store = { version = "0.3.3", features = ["persistent"] }
+# and `store-dump` (ledger #2111). 0.4.0 shares core 0.3.0, with the fixes above.
+ikigai-store = { version = "0.4.0", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
-# 0.2.0 is the streams release (ledger #2261). The old 0.1 pin meant
-# >=0.1.0, <0.2.0 under 0.x rules.
-ikigai-vocab = "0.2.0"
+# 0.3.0 shares core 0.3.0 and its scoped content store (ledger #2965).
+ikigai-vocab = "0.3.0"
