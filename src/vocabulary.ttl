@@ -55,6 +55,16 @@ ledger:Item a rdfs:Class ;
     rdfs:label "Item" ;
     rdfs:comment "One unit of work in the ledger. Skolemized as urn:iki:ledger:{ledger}:item:{id}, where {ledger} names the partition the item belongs to and {id} is opaque and time-ordered; the human-facing `#12` is ledger:number, a LABEL on that IRI and never the identifier. A prov:Entity because it is a thing that exists over time and is revised, not an occurrent. ★ THE BASE CLASS OF A TYPED FAMILY: every item asserts rdf:type ledger:Item, and an item may ALSO assert a more specific class (rdfs:subClassOf ledger:Item) for its level — a decision record, a review finding, a state transition. Different levels really do have different scope, responsibility and granularity, so they are different CLASSES with their own shapes; what they share is the plumbing — one identity scheme, five verbs, one manifold, one capability model, one set of golden threads, one query surface, one selection surface. The base type is asserted on every item DELIBERATELY, so \"everything in the ledger\" is one triple pattern and needs no reasoner, and a new level is additive: a class IRI, a shape, and a `kind=` argument value. Nothing in this module enumerates the subclasses." .
 
+ledger:ReviewJob a rdfs:Class ;
+    rdfs:subClassOf ledger:Item ;
+    rdfs:label "Review job" ;
+    rdfs:comment "A request to review a range of commits, read-only and opening no pull request. revision= is the head commit; the body names the range (base..head) and the repository. Its hand-back names the findings it filed, or says there were none." .
+
+ledger:Finding a rdfs:Class ;
+    rdfs:subClassOf ledger:Item ;
+    rdfs:label "Finding" ;
+    rdfs:comment "One problem a review found. revision= is the head commit it was found at; about= names the file as urn:repo:file:{repo}/{percent-encoded repository-relative path}; the review job is its parent, by a parent link made after the append (append takes no parent argument); key= is a stable id, so a rerun of the same review finds the existing item instead of filing a duplicate. Severity is one label: severity:critical, severity:major or severity:minor. The title is the problem in one line, and the body states the problem, the fix, and the location (path and line)." .
+
 ledger:Comment a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
     rdfs:label "Comment" ;
