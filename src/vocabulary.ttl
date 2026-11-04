@@ -63,7 +63,7 @@ ledger:ReviewJob a rdfs:Class ;
 ledger:Finding a rdfs:Class ;
     rdfs:subClassOf ledger:Item ;
     rdfs:label "Finding" ;
-    rdfs:comment "One problem a review found. revision= is the head commit it was found at; about= is the repository-relative path; parent= is the review job; key= is a stable id, so a rerun of the same review finds the existing item instead of filing a duplicate. Severity is one label: severity:critical, severity:major or severity:minor. The title is the problem in one line, and the body states the problem, the fix, and the location (path and line)." .
+    rdfs:comment "One problem a review found. revision= is the head commit it was found at; about= names the file as urn:repo:file:{repo}/{percent-encoded repository-relative path}; the review job is its parent, by a parent link made after the append (append takes no parent argument); key= is a stable id, so a rerun of the same review finds the existing item instead of filing a duplicate. Severity is one label: severity:critical, severity:major or severity:minor. The title is the problem in one line, and the body states the problem, the fix, and the location (path and line)." .
 
 ledger:Comment a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
