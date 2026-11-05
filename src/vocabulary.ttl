@@ -599,6 +599,18 @@ ledger:handedBackBy a rdf:Property ;
     rdfs:label "handed back by" ;
     rdfs:comment "On a hand-back comment (comment handback=true), the holder label of the item's claim when the hand-back landed, written in the same update. The comment's ledger:committer is the principal, which two workers can share; this label tells them apart. Absent when nobody held the item." .
 
+ledger:handBack a rdf:Property ;
+    rdfs:domain ledger:Comment ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "hand-back" ;
+    rdfs:comment "True on a hand-back comment (comment handback=true), written in the same update, whether or not anybody held the item. A hand-back written before this term has none; one with a ledger:handedBackBy is a hand-back all the same." .
+
+ledger:rejects a rdf:Property ;
+    rdfs:domain ledger:Comment ;
+    rdfs:range ledger:Comment ;
+    rdfs:label "rejects" ;
+    rdfs:comment "From a comment that took its item off ledger:awaiting (comment rejects=true, or any comment from a caller holding the close grant) to each hand-back on the item that nothing had yet rejected, written in the same update as the clearing. A hand-back written with neither ledger:handBack nor ledger:handedBackBy cannot be named. A close or a reopen also clears ledger:awaiting and writes none: neither says the evidence did not hold." .
+
 ledger:editKind a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "edit kind" ;

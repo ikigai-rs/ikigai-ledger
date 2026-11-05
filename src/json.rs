@@ -168,6 +168,11 @@ pub struct Comment {
     /// 0.15.0 (ledger #2827).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<Attribution>,
+    /// The hand-backs this comment rejected, by their comment IRIs, sorted: what it took the
+    /// item off `awaiting` from, with `rejects=true` or a dispatcher's words. Missing on any
+    /// other comment. Added for ledger #3071.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejects: Vec<String>,
 }
 
 /// One item, the same object wherever it appears — `item:{id}`, each row of `items`, each
@@ -716,6 +721,7 @@ pub(crate) fn comment(comment: &model::Comment) -> Comment {
             comment.committed_at,
             &[("created", comment.created_claimed)],
         ),
+        rejects: comment.rejects.clone(),
     }
 }
 

@@ -21,7 +21,8 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   line per item, `#12  open    p1  Title  [labels]  claimed:holder`, and under it, in the
   detail, labeled lines (`iri:`, `filed:`, `updated:`, `author:`, `committer:`, `about:`,
   `blocks:`, `child:`, `blocked-by:` …), the body, and the comments, each stamped with its time and author
-  (`Comment::render`). Whether an author or a date is verified or claimed is said in words in
+  (`Comment::render`); a comment that rejected a hand-back has a `rejects:` line per hand-back
+  under its stamp, naming that comment. Whether an author or a date is verified or claimed is said in words in
   parentheses (`(verified)`, `(claimed by a delegate)`, `(claimed)`), never by a sign alone.
 - **Listings** (`items`, `ledgers`, `count`): item lines and a total (`3 item(s)`); `count`
   answers a bare number.

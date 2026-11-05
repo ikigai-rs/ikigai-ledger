@@ -1111,9 +1111,15 @@ fn is_dispatcher(inv: &Invocation<'_>, ledger: &Ledger) -> bool {
 /// The update that applies a [`Handback`] to `item`, carrying `guard` (a keyed comment's
 /// "the key is free" clause, and a hand-back's "the item is open") so it lands exactly when
 /// the comment does. Empty for [`Handback::Unchanged`].
+///
+/// ★ Clearing names what it answered (ledger #3071): `comment` rejects every hand-back on the
+/// item nothing has rejected yet, read while `awaiting` still stands, so a comment that clears
+/// nothing names nothing. Every one, not the newest: anyone may hand back on top of a worker's
+/// evidence, and a reject naming only that one would leave the worker's for a reader to take.
 fn handback_update(
     client: &StoreClient<'_, '_>,
     item: &str,
+    comment: &str,
     handback: Handback,
     guard: &str,
     now: u64,
@@ -1142,10 +1148,26 @@ fn handback_update(
                 v::iri::AWAITING_DISPATCHER
             )),
         ),
-        Handback::Clear => format!(
-            "DELETE {{ {was} }} INSERT {{ {} }} WHERE {{ {optional} {guard} }}",
-            client.in_graph(&stamp),
-        ),
+        Handback::Clear => batch(&[
+            format!(
+                "INSERT {{ {} }} WHERE {{ {} {guard} }}",
+                client.in_graph(&format!("<{comment}> <{}> ?handback", v::REJECTS)),
+                client.in_graph(&format!(
+                    "<{item}> <{awaiting}> ?awaiting . ?handback <{on}> <{item}> . \
+                     {{ ?handback <{mark}> ?mark }} UNION {{ ?handback <{by}> ?mark }} \
+                     FILTER NOT EXISTS {{ ?rejected <{rejects}> ?handback }}",
+                    awaiting = v::AWAITING,
+                    on = v::ON_ITEM,
+                    mark = v::HAND_BACK,
+                    by = v::HANDED_BACK_BY,
+                    rejects = v::REJECTS,
+                )),
+            ),
+            format!(
+                "DELETE {{ {was} }} INSERT {{ {} }} WHERE {{ {optional} {guard} }}",
+                client.in_graph(&stamp),
+            ),
+        ]),
     }
 }
 
@@ -1190,7 +1212,7 @@ async fn write_keyed_comment(
             &batch(&[
                 insert_on_live(client, &[item], &triples),
                 touch_dated(client, item, now, who.created, ""),
-                handback_update(client, item, handback, "", now),
+                handback_update(client, item, &comment, handback, "", now),
             ]),
         )
         .await?;
@@ -1222,11 +1244,13 @@ async fn write_keyed_comment(
     let free = format!("{} {open} {free}", client.in_graph(&live(item)));
     // ★ A hand-back names the holder label of the claim it finds (ledger #2819), read in the
     // update that writes it: the principal is the comment's committer, and two workers can
-    // share one, so the label is what tells them apart. Nobody holding it names nobody.
+    // share one, so the label is what tells them apart. Nobody holding it names nobody, so the
+    // mark a reject finds it by (ledger #3071) is its own triple.
     let holder = if handback == Handback::Set {
         triples.push_str(&format!(
-            "\n<{comment}> <{}> ?handedBackBy .",
-            v::HANDED_BACK_BY
+            "\n<{comment}> <{}> ?handedBackBy ; <{}> true .",
+            v::HANDED_BACK_BY,
+            v::HAND_BACK
         ));
         client.in_graph(&format!(
             "OPTIONAL {{ <{item}> <{}> ?handedBackBy }}",
@@ -1259,7 +1283,7 @@ async fn write_keyed_comment(
                     stamp.filter
                 )),
             ),
-            handback_update(client, item, handback, &free, now),
+            handback_update(client, item, &comment, handback, &free, now),
             format!(
                 "INSERT {{ {} }} WHERE {{ {free} {holder} }}",
                 client.in_graph(&triples)
@@ -1283,6 +1307,7 @@ fn written(iri: &str, item: &str, text: &str, who: &Attribution, now: u64) -> js
         committed_at: Some(now),
         created_claimed: who.created.is_some(),
         created: who.created_or(now),
+        rejects: Vec::new(),
     })
 }
 
@@ -3571,7 +3596,12 @@ impl Endpoint for CommentEndpoint {
                 "commented",
                 json::item_ref(ledger, item.number, &item.iri),
             );
-            answer.comment = Some(written(&comment, &item.iri, text.trim(), &who, now));
+            let mut said = written(&comment, &item.iri, text.trim(), &who, now);
+            // What it rejected is what the update found, so only the store can say.
+            if change == Handback::Clear && item.awaiting.is_some() {
+                said.rejects = model::load_rejects(&client, &comment).await?;
+            }
+            answer.comment = Some(said);
             answer.key = key;
             answer.handback = match change {
                 Handback::Set => Some("set".to_string()),
@@ -3679,7 +3709,9 @@ impl Endpoint for CommentEndpoint {
                                  it again. A comment from a caller holding the close grant \
                                  does this without being asked. The answer ends \
                                  ` cleared-awaiting` when it cleared one (`\"handback\": \
-                                 \"cleared\"` in JSON). Not with `handback=true`.",
+                                 \"cleared\"` in JSON), and the comment names each hand-back \
+                                 it rejected (`ledger:rejects`, `\"rejects\"` on the comment \
+                                 in JSON, a `rejects:` line in text). Not with `handback=true`.",
                             )
                             .class(v::ext::XSD_BOOLEAN)
                             .one_of(["true", "false"])
