@@ -613,6 +613,8 @@ pub struct Comment {
     pub created_claimed: bool,
     /// Milliseconds since the epoch.
     pub created: u64,
+    /// The hand-backs this comment rejected (`ledger:rejects`, ledger #3071), sorted.
+    pub rejects: Vec<String>,
 }
 
 impl Comment {
@@ -630,8 +632,14 @@ impl Comment {
             Some(c) if self.author.as_deref() != Some(c) => format!(", committed by {c}"),
             _ => String::new(),
         };
+        // At the header's indent, less than the text's, so no comment's words can pass for it.
+        let rejects: String = self
+            .rejects
+            .iter()
+            .map(|handback| format!("  rejects: {handback}\n"))
+            .collect();
         format!(
-            "  {}{} {author}{committer}\n{}\n",
+            "  {}{} {author}{committer}\n{rejects}{}\n",
             sparql::iso8601(self.created),
             claimed_date(self.created_claimed),
             self.body
@@ -670,6 +678,11 @@ impl Comment {
             v::ext::CREATED,
             typed(&sparql::iso8601(self.created), v::ext::XSD_DATETIME),
         );
+        for handback in &self.rejects {
+            if let Ok(handback) = NamedNode::new(handback) {
+                push(v::REJECTS, handback.into());
+            }
+        }
     }
 }
 
@@ -1564,7 +1577,7 @@ pub async fn find_comment_by_key(
             author = v::AUTHOR,
         ))
     );
-    Ok(client.select(&query).await?.first().and_then(|row| {
+    let found = client.select(&query).await?.first().and_then(|row| {
         Some(Comment {
             iri: row.get("c")?.value.clone(),
             on_item: row.get("item")?.value.clone(),
@@ -1575,8 +1588,48 @@ pub async fn find_comment_by_key(
             committer: row.get("committer").map(|b| b.value.clone()),
             committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
             created_claimed: row.contains_key("createdSource"),
+            rejects: Vec::new(),
         })
-    }))
+    });
+    let Some(mut found) = found else {
+        return Ok(None);
+    };
+    found.rejects = load_rejects(client, &found.iri).await?;
+    Ok(Some(found))
+}
+
+/// The hand-backs one comment rejected, sorted.
+pub(crate) async fn load_rejects(
+    client: &StoreClient<'_, '_>,
+    comment: &str,
+) -> Result<Vec<String>> {
+    let query = format!(
+        "SELECT ?handback WHERE {{ {} }} ORDER BY ?handback",
+        client.in_graph(&format!(
+            "{} <{}> ?handback",
+            sparql::iri(comment, "comment")?,
+            v::REJECTS
+        ))
+    );
+    Ok(client
+        .select(&query)
+        .await?
+        .iter()
+        .filter_map(|row| Some(row.get("handback")?.value.clone()))
+        .collect())
+}
+
+/// Add a comment read from a row to the comments before it. A comment that rejected several
+/// hand-backs has a row for each, adjacent because the query orders by the comment, and they
+/// are one comment.
+fn gather_comment(comments: &mut Vec<Comment>, comment: Comment) {
+    match comments.last_mut() {
+        Some(last) if last.iri == comment.iri => {
+            last.rejects.extend(comment.rejects);
+            last.rejects.sort();
+        }
+        _ => comments.push(comment),
+    }
 }
 
 /// The numbers of whichever of `iris` are items in this client's ledger — how a link's
@@ -1626,12 +1679,14 @@ pub async fn load_comments_for(
     let mut rows = Vec::new();
     for values in values_lists(items)? {
         let query = format!(
-            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource WHERE {{ {} }} ORDER BY ?created ?comment",
+            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects WHERE {{ {} }} ORDER BY ?created ?comment",
             client.in_graph(&format!(
                 "VALUES ?item {{ {values} }}\n\
                  ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
-                 OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}",
+                 OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
+                 OPTIONAL {{ ?comment <{rejects}> ?rejects }}",
                 provenance = comment_provenance("?comment"),
+                rejects = v::REJECTS,
                 on_item = v::ON_ITEM,
                 body = v::BODY,
                 created = v::ext::CREATED,
@@ -1652,14 +1707,17 @@ pub async fn load_comments_for(
                 committer: row.get("committer").map(|b| b.value.clone()),
                 committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
                 created_claimed: row.contains_key("createdSource"),
+                rejects: row
+                    .get("rejects")
+                    .map(|b| b.value.clone())
+                    .into_iter()
+                    .collect(),
             })
         })() else {
             continue;
         };
-        by_item
-            .entry(comment.on_item.clone())
-            .or_default()
-            .push(comment);
+        let comments = by_item.entry(comment.on_item.clone()).or_default();
+        gather_comment(comments, comment);
     }
     Ok(by_item)
 }
@@ -1832,11 +1890,13 @@ pub async fn find_tombstone(
 /// `load_comments_for` breaks the tie the same way.
 pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Comment>> {
     let query = format!(
-        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource WHERE {{ {} }} ORDER BY ?created ?comment",
+        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects WHERE {{ {} }} ORDER BY ?created ?comment",
         client.in_graph(&format!(
             "?comment <{on_item}> {subject} ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
-             OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}",
+             OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
+             OPTIONAL {{ ?comment <{rejects}> ?rejects }}",
             provenance = comment_provenance("?comment"),
+            rejects = v::REJECTS,
             on_item = v::ON_ITEM,
             subject = sparql::iri(item, "item")?,
             body = v::BODY,
@@ -1844,24 +1904,30 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
             author = v::AUTHOR,
         ))
     );
-    Ok(client
-        .select(&query)
-        .await?
-        .iter()
-        .filter_map(|row| {
-            Some(Comment {
-                iri: row.get("comment")?.value.clone(),
-                on_item: item.to_string(),
-                body: row.get("body")?.value.clone(),
-                author: row.get("author").map(|b| b.value.clone()),
-                created: millis(row.get("created")?.value.as_str())?,
-                author_source: row.get("authorSource").map(|b| b.value.clone()),
-                committer: row.get("committer").map(|b| b.value.clone()),
-                committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
-                created_claimed: row.contains_key("createdSource"),
-            })
+    let rows = client.select(&query).await?;
+    let found = rows.iter().filter_map(|row| {
+        Some(Comment {
+            iri: row.get("comment")?.value.clone(),
+            on_item: item.to_string(),
+            body: row.get("body")?.value.clone(),
+            author: row.get("author").map(|b| b.value.clone()),
+            created: millis(row.get("created")?.value.as_str())?,
+            author_source: row.get("authorSource").map(|b| b.value.clone()),
+            committer: row.get("committer").map(|b| b.value.clone()),
+            committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
+            created_claimed: row.contains_key("createdSource"),
+            rejects: row
+                .get("rejects")
+                .map(|b| b.value.clone())
+                .into_iter()
+                .collect(),
         })
-        .collect())
+    });
+    let mut comments = Vec::new();
+    for comment in found {
+        gather_comment(&mut comments, comment);
+    }
+    Ok(comments)
 }
 
 /// The OPTIONALs that read a comment's committer, its author's source and a claimed

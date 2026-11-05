@@ -123,6 +123,10 @@ term! {
     RELEASE_REASON => "releaseReason";
     /// `ledger:handedBackBy` — the holder label on a hand-back comment.
     HANDED_BACK_BY => "handedBackBy";
+    /// `ledger:handBack` — marks a comment as a hand-back (ledger #3071).
+    HAND_BACK => "handBack";
+    /// `ledger:rejects` — on a comment that answered a hand-back, the hand-back (ledger #3071).
+    REJECTS => "rejects";
     /// `ledger:editKind` — which edit an edit event records.
     EDIT_KIND => "editKind";
     /// `ledger:stateFrom` — the state a `state` edit left, as the update found it.

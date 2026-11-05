@@ -508,6 +508,17 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) cleared-awaiting
   wrote `awaiting` on the closed item. The comment and its `awaiting` carry the same condition
   in the store update, so a hand-back racing a close writes neither. An ordinary comment on a
   closed item is still written.
+- **A reject says which hand-back it rejected** (ledger #3071). A comment that clears `awaiting`
+  (`rejects=true`, or any comment from a caller holding the close grant) writes
+  `ledger:rejects` to **every** hand-back on the item nothing has rejected yet, in the update
+  that clears it, so a hand-back posted on top of a worker's cannot shield the worker's. It
+  shows as `"rejects": ["<comment iri>", …]` on that comment's JSON (missing on any other), a
+  `rejects: <comment iri>` line under its header in text, and the triple in Turtle. Who rejected
+  is that comment's own attribution: under the comment grant anyone may say `rejects=true`, so a
+  reader deciding what to trust reads it. A hand-back is found by `ledger:handBack`, written
+  with it since this change, or by `ledger:handedBackBy`, so one written earlier with a holder is
+  found too; an earlier one nobody held cannot be named, and one rejected before this change says
+  nothing until a later reject on the item names it. A close or a reopen writes no `rejects`: neither says the evidence did not hold.
 - **On every face**: `awaiting: dispatcher` in the item's text (and `awaiting-dispatcher` at the
   end of its line in a listing), `"awaiting": "dispatcher"` in JSON (`null` otherwise), the
   triple in Turtle, and `"handback": "set"` or `"cleared"` on the comment's JSON answer. The
@@ -2031,6 +2042,14 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### Unreleased: a reject names the hand-back it rejected (ledger #3071)
+
+The comment that takes an item off `awaiting` now records each hand-back it answered
+(`ledger:rejects`), and its JSON carries them as `rejects`, so a reader can skip rejected evidence
+after someone hands the item back again. Additive: a comment that rejected nothing has no such key,
+and the plain face gains a `rejects:` line only on one that did. See "Handing back" above.
+**Vocabulary.** New: `handBack`, `rejects`.
 
 ### 0.19.0: core 0.3 scoped content store (ledger #2965)
 
