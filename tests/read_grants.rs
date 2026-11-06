@@ -124,6 +124,7 @@ fn read_script() -> Vec<(&'static str, Verb, String)> {
         ("ledger-item-closed", Verb::Exists, at("item:1:closed")),
         ("ledger-item-history", Verb::Source, at("item:1:history")),
         ("ledger-doctor", Verb::Source, at("doctor")),
+        ("ledger-claim", Verb::Source, at("claim")),
         (
             "ledger-ledgers",
             Verb::Source,
@@ -158,6 +159,10 @@ fn seeded() -> ikigai_core::Kernel {
     let append = format!("urn:iki:ledger:{LEDGER}:append");
     sink(&kernel, &append, &[("content", "The first item")]);
     sink(&kernel, &append, &[("content", "The second item")]);
+    // A claim taken and released, so #1 has an epoch to check (ledger #3205).
+    let claim = format!("urn:iki:ledger:{LEDGER}:claim");
+    sink(&kernel, &claim, &[("item", "1"), ("content", "worker-1")]);
+    delete(&kernel, &claim, &[("item", "1")]);
     kernel
 }
 
@@ -189,7 +194,13 @@ fn the_read_row_alone_reads_every_read_resource() {
     let kernel = seeded();
     let caller = read_row(LEDGER);
     for (endpoint, verb, iri) in &script {
-        let answered = try_as(&kernel, &caller, *verb, iri, &[]);
+        // The epoch check is the one read that takes its item by value.
+        let args: &[(&str, &str)] = if *endpoint == "ledger-claim" {
+            &[("item", "1"), ("epoch", "1")]
+        } else {
+            &[]
+        };
+        let answered = try_as(&kernel, &caller, *verb, iri, args);
         assert!(
             answered.is_ok(),
             "{} at {iri} is refused the read row: {answered:?}",

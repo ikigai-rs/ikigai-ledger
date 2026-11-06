@@ -151,6 +151,11 @@ pub struct Item {
     /// free-text label. `None` for a claim taken without one (a host without principals, root,
     /// or a claim from before 0.8.0), which any claim-grant holder may release as before.
     pub claim_principal: Option<String>,
+    /// The fencing epoch of the item's latest claim (`ledger:claimEpoch`, ledger #3205): one
+    /// more than the one before at every grant and takeover, kept by a renewal, and never
+    /// lowered, also across a release and a close. While [`claimed_by`](Item::claimed_by) is
+    /// set it is the current claim's; `None` on an item never claimed since 0.19.0.
+    pub claim_epoch: Option<u64>,
     /// Who the item waits on after a hand-back (`ledger:awaiting`), as stored:
     /// [`AWAITING_DISPATCHER`](crate::vocabulary::iri::AWAITING_DISPATCHER) after
     /// `comment handback=true`. `next` does not offer an item that has one (ledger #1199).
@@ -403,6 +408,10 @@ impl Item {
         if let Some(purpose) = &self.purpose {
             out.push_str(&format!("  purpose:  {purpose}\n"));
         }
+        // Only while claimed, so every item without a claim renders exactly as before.
+        if let (Some(_), Some(epoch)) = (&self.claimed_by, self.claim_epoch) {
+            out.push_str(&format!("  epoch:    {epoch}\n"));
+        }
         // Each only when there is one, so every item without renders exactly as in 0.7.0.
         if let Some(principal) = &self.claim_principal {
             out.push_str(&format!("  principal: {principal}\n"));
@@ -516,6 +525,13 @@ impl Item {
             push(
                 v::LEASE_EXPIRES,
                 typed(&sparql::iso8601(expires), v::ext::XSD_DATETIME),
+            );
+        }
+        // As stored, claimed or not: the epoch outlives the claim that set it.
+        if let Some(epoch) = self.claim_epoch {
+            push(
+                v::CLAIM_EPOCH,
+                typed(&epoch.to_string(), v::ext::XSD_INTEGER),
             );
         }
         for (predicate, value) in [
@@ -1196,7 +1212,7 @@ async fn load(
         format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
-         ?principal ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
+         ?principal ?epoch ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
          ?modifiedSource ?claimedModified WHERE {{ {} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
@@ -1220,6 +1236,7 @@ async fn load(
              OPTIONAL {{ ?item <{lease}> ?lease }}\n\
              OPTIONAL {{ ?item <{expires}> ?expires }}\n\
              OPTIONAL {{ ?item <{principal}> ?principal }}\n\
+             OPTIONAL {{ ?item <{epoch}> ?epoch }}\n\
              OPTIONAL {{ ?item <{awaiting}> ?awaiting }}\n\
              OPTIONAL {{ ?item <{author_source}> ?authorSource }}\n\
              OPTIONAL {{ ?item <{committer}> ?committer }}\n\
@@ -1249,6 +1266,7 @@ async fn load(
             lease = v::LEASE,
             expires = v::LEASE_EXPIRES,
             principal = v::CLAIM_PRINCIPAL,
+            epoch = v::CLAIM_EPOCH,
             awaiting = v::AWAITING,
             author_source = v::AUTHOR_SOURCE,
             committer = v::COMMITTER,
@@ -1317,7 +1335,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
     let query = format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
-         ?principal ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
+         ?principal ?epoch ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
          ?modifiedSource ?claimedModified WHERE {{ {} }} \
          ORDER BY DESC({RECENCY})",
         client.in_graph(&format!(
@@ -1342,6 +1360,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
              OPTIONAL {{ ?item <{lease}> ?lease }}\n\
              OPTIONAL {{ ?item <{expires}> ?expires }}\n\
              OPTIONAL {{ ?item <{principal}> ?principal }}\n\
+             OPTIONAL {{ ?item <{epoch}> ?epoch }}\n\
              OPTIONAL {{ ?item <{awaiting}> ?awaiting }}\n\
              OPTIONAL {{ ?item <{author_source}> ?authorSource }}\n\
              OPTIONAL {{ ?item <{committer}> ?committer }}\n\
@@ -1372,6 +1391,7 @@ pub async fn load_item(client: &StoreClient<'_, '_>, iri: &str) -> Result<Option
             lease = v::LEASE,
             expires = v::LEASE_EXPIRES,
             principal = v::CLAIM_PRINCIPAL,
+            epoch = v::CLAIM_EPOCH,
             awaiting = v::AWAITING,
             author_source = v::AUTHOR_SOURCE,
             committer = v::COMMITTER,
@@ -2174,6 +2194,7 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
             .filter_map(|b| millis(&b.value))
             .max(),
         claim_principal: row.get("principal").map(|b| b.value.clone()),
+        claim_epoch: row.get("epoch").and_then(|b| b.value.parse().ok()),
         awaiting: row.get("awaiting").map(|b| b.value.clone()),
         author_source: row.get("authorSource").map(|b| b.value.clone()),
         committer: row.get("committer").map(|b| b.value.clone()),
@@ -2306,6 +2327,7 @@ mod tests {
             lease: None,
             lease_expires: None,
             claim_principal: None,
+            claim_epoch: None,
             awaiting: None,
             author_source: None,
             committer: None,

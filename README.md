@@ -238,6 +238,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:comment` | Sink | append a comment, optionally under your own key | `comment:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:close` | Sink | close with a reason and any evidence, releasing any claim | `close:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:reopen` | Sink | undo a close | `close:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:claim` | Source | whether a claim epoch is still current on an item | `read:{ledger}` |
 | `…:{ledger}:claim` | Sink · Delete | take it (optionally on a lease) / hand it back / take over an expired lease | `claim:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:defer` | Sink · Delete | not now / now again | `write:{ledger}` |
 | `…:{ledger}:link` | Sink · Delete | blocks / parent / related | `write:{ledger}` |
@@ -1197,12 +1198,12 @@ SPARQL update over the ledger's graph, so check with the doctor before dropping 
 
 ```text
 $ sink urn:iki:ledger:claim item=12 lease=30m <<< "kata-ship/0abc1234"
-#12 claimed by kata-ship/0abc1234 until 2026-10-09T15:30:00.000Z
+#12 claimed by kata-ship/0abc1234 at epoch 1 until 2026-10-09T15:30:00.000Z
 $ source urn:iki:ledger:next
 …
   not #12: lease expired: claimed by kata-ship/0abc1234 until 2026-10-09T15:30:00.000Z
 $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "kata-ship/9fff0000"
-#12 taken over from kata-ship/0abc1234 by kata-ship/9fff0000
+#12 taken over from kata-ship/0abc1234 by kata-ship/9fff0000 at epoch 2
 ```
 
 - **Every take is one guarded store update** (since this release; until now a claim was
@@ -1290,10 +1291,49 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
 
 ```text
 $ sink urn:iki:ledger:claim item=12 renew=true lease=30m <<< "worker-1"
-#12 renewed by worker-1 until 2026-10-09T16:00:00.000Z
+#12 renewed by worker-1 at epoch 2 until 2026-10-09T16:00:00.000Z
 $ delete urn:iki:ledger:claim item=12 from=worker-1
 #12 released
 ```
+
+### ★ A claim carries a fencing epoch, and a stale holder's writes are refused
+
+Since 0.19.0 (ledger #3205). A lane that stalls past its lease, is taken over, and then wakes
+was stopped from acting on authority it had lost only by convention (renew just before acting);
+a hand-back sent after the lease was lost landed like any other. Now:
+
+- **Every grant of a claim and every takeover sets the claim's epoch to one more than the item's
+  previous epoch** (`ledger:claimEpoch`, from 1); a renewal by the same holder keeps it. The
+  epoch is never retracted, not by a release and not by a close, so it never goes down: a claim
+  taken after a release still counts up. It is decided inside the claim's own guarded update,
+  so of concurrent takeovers exactly one lands and the item has exactly one current epoch.
+- **The claim answer and the item's faces carry it**: `… claimed by <holder> at epoch 3`, the
+  same in `renewed by` and `taken over from`; an `epoch:` line in the plain detail while the item
+  is claimed; `claim.epoch` in JSON (`null` for a claim taken before 0.19.0); and
+  `ledger:claimEpoch` in Turtle, claimed or not.
+- **Anyone who may read the ledger can ask whether an epoch is current**, without the holder:
+  `source urn:iki:ledger:claim item=12 epoch=2` answers `current`, `superseded` (naming who holds
+  the item now, and at which epoch) or `unclaimed`; `as=application/json` gives `state`,
+  `holder`, `principal`, `current` and `highest`. An epoch above any the item has granted was
+  never anyone's, and is refused (`InvalidArgument`).
+- **A holder's writes about the item take `epoch=`**: `comment` (and with it a hand-back),
+  `close`, a claim (renewal or takeover) and a release. Given and not current — the item is held
+  at another epoch, or by nobody — the write is refused as a `Conflict` naming the current holder
+  and epoch, and **nothing is written**. The check is a clause of the write's own store update,
+  so a takeover that commits between a worker's read and its write is still refused
+  (`tests/claim_epoch.rs` forces that schedule for each of the five writes). **Without `epoch=`
+  nothing changes.** A worker should send the epoch its claim answered with on every one of them.
+
+```text
+$ sink urn:iki:ledger:comment item=12 handback=true epoch=1 <<< "done, see the PR"
+Conflict: #12 is held by kata-ship/9fff0000 at epoch 2, not epoch 1: a write fenced with `epoch=` lands only while that claim is current, so nothing was written
+$ source urn:iki:ledger:claim item=12 epoch=1
+#12 epoch 1 is superseded: held by kata-ship/9fff0000 at epoch 2
+```
+
+The refusal is an `Error::Conflict` with that sentence; when no claim holds the item it says
+`#12 is not claimed (its last claim was epoch 2), so epoch 1 is not current and nothing was
+written`. It becomes a typed refusal kind once ledger #1475 lands.
 
 ### ★ The kind is the HOST's to stamp, and a direct embedder owns that
 

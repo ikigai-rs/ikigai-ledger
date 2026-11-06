@@ -167,6 +167,7 @@ pub(super) fn record(
     item: &str,
     reason: &str,
     evidence: &[Evidence],
+    guard: &str,
 ) -> String {
     let mut insert = format!("?standing <{}> <{reason}> .", v::CLOSED_REASON);
     for one in evidence {
@@ -177,7 +178,7 @@ pub(super) fn record(
         client.in_graph(&format!("?standing <{}> ?was", v::CLOSED_REASON)),
         client.in_graph(&insert),
         client.in_graph(&format!(
-            "{} <{item}> <{}> <{}> . {} OPTIONAL {{ ?standing <{}> ?was }}",
+            "{} {guard} <{item}> <{}> <{}> . {} OPTIONAL {{ ?standing <{}> ?was }}",
             live(item),
             v::STATUS,
             v::CLOSED,
