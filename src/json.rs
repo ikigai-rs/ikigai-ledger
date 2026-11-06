@@ -127,7 +127,7 @@ pub struct Claim {
     /// The claim's fencing epoch: one more than the item's previous claim's at every grant
     /// and takeover, kept by a renewal, never lowered. A holder that names it on a write
     /// (`epoch=`) is refused once the claim is no longer current. `null` for a claim taken
-    /// before 0.19.0. Added in 0.19.0 (ledger #3205).
+    /// before 0.20.0. Added in 0.20.0 (ledger #3205).
     #[serde(default)]
     pub epoch: Option<u64>,
 }
@@ -703,7 +703,7 @@ pub struct Problem {
 }
 
 /// The answer of `source urn:iki:ledger:{ledger}:claim item=… epoch=…` (ledger #3205, added in
-/// 0.19.0): whether an epoch is the current claim's on its item.
+/// 0.20.0): whether an epoch is the current claim's on its item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct EpochCheck {

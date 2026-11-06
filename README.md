@@ -1355,7 +1355,7 @@ $ delete urn:iki:ledger:claim item=12 from=worker-1
 
 ### ★ A claim carries a fencing epoch, and a stale holder's writes are refused
 
-Since 0.19.0 (ledger #3205). A lane that stalls past its lease, is taken over, and then wakes
+Since 0.20.0 (ledger #3205). A lane that stalls past its lease, is taken over, and then wakes
 was stopped from acting on authority it had lost only by convention (renew just before acting);
 a hand-back sent after the lease was lost landed like any other. Now:
 
@@ -1366,7 +1366,7 @@ a hand-back sent after the lease was lost landed like any other. Now:
   so of concurrent takeovers exactly one lands and the item has exactly one current epoch.
 - **The claim answer and the item's faces carry it**: `… claimed by <holder> at epoch 3`, the
   same in `renewed by` and `taken over from`; an `epoch:` line in the plain detail while the item
-  is claimed; `claim.epoch` in JSON (`null` for a claim taken before 0.19.0); and
+  is claimed; `claim.epoch` in JSON (`null` for a claim taken before 0.20.0); and
   `ledger:claimEpoch` in Turtle, claimed or not.
 - **Anyone who may read the ledger can ask whether an epoch is current**, without the holder:
   `source urn:iki:ledger:claim item=12 epoch=2` answers `current`, `superseded` (naming who holds
@@ -2174,7 +2174,26 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Unreleased: a reject names the hand-back it rejected (ledger #3071)
+### 0.20.0: listings across ledgers, by priority and sorted; the claim's fencing epoch
+
+A minor release: new arguments and terms, all additive, so an existing caller is unaffected.
+
+- **A listing across ledgers** (ledger #3190): `items` and `count` take `ledgers=alpha,beta`, the
+  union of the named ledgers, each read under the caller's own grants; an unreadable ledger is
+  omitted without being queried. See "A listing across ledgers" above.
+- **Filtering by priority** (ledger #3203): `priority=0,1,none` and `without_priority=…` on
+  `items` and `count`, single ledger or union, inside the shared query before paging. Values
+  other than 0 to 4 and `none` are refused instead of being ignored.
+- **Sorting** (ledger #3192): `items sort=` by `priority`, `created`, `modified`, `number` and
+  `landing`, a topological order of the `blocks` links in which a blocker comes first; a cycle
+  refuses the listing and names its items. The default stays `-modified`. See "Sorting a listing".
+- **A claim's fencing epoch** (ledger #3205): every grant and takeover raises `ledger:claimEpoch`,
+  a holder's write that names a stale `epoch=` is refused as Conflict, and `claim item=… epoch=…`
+  answers whether an epoch is current. See "A claim carries a fencing epoch" above.
+  **Vocabulary.** New: `claimEpoch`.
+- **A reject names the hand-back it rejected** (ledger #3071), below.
+
+#### A reject names the hand-back it rejected (ledger #3071)
 
 The comment that takes an item off `awaiting` now records each hand-back it answered
 (`ledger:rejects`), and its JSON carries them as `rejects`, so a reader can skip rejected evidence
