@@ -148,6 +148,12 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .binding("holder", "none"),
         )
         .fixture(Fixture::new("ledger-item-closed", Verb::Exists).binding("id", b))
+        // The claim epoch check (ledger #3205) on B, which nothing in the walk deletes.
+        .fixture(
+            Fixture::new("ledger-claim", Verb::Source)
+                .arg("item", b)
+                .arg("epoch", "1"),
+        )
         .fixture(Fixture::new("ledger-item-history", Verb::Source).binding("id", b))
         // An importer's history (ledger #2843) answers about its caller, so it is walked under
         // the principal [`PARTICIPANTS`] enrolls. Its date is after B's filing, in the seeding's

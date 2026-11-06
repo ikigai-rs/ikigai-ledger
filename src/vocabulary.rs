@@ -308,6 +308,8 @@ term! {
     LEASE_EXPIRES => "leaseExpires";
     /// `ledger:claimPrincipal` — the principal the claim was taken AS (ledger #1199).
     CLAIM_PRINCIPAL => "claimPrincipal";
+    /// `ledger:claimEpoch` — the fencing epoch of the item's latest claim (ledger #3205).
+    CLAIM_EPOCH => "claimEpoch";
     /// `ledger:awaiting` — who the item waits on after a hand-back (ledger #1199).
     AWAITING => "awaiting";
     /// `ledger:awaitingAt` — when the latest hand-back decision set or cleared awaiting.

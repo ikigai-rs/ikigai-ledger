@@ -533,6 +533,12 @@ ledger:claimPrincipal a rdf:Property ;
     rdfs:label "claimPrincipal" ;
     rdfs:comment "The principal the claim was taken AS: the one `urn:cap:principal:<iri>` the claimant's capability carried, minted by the host's door (gonk's QUIC door names each client `urn:iki:gonk:client:<fingerprint>`). Recorded beside ledger:claimedBy, which stays the holder's free-text label. ★ This, not the label, is what a release checks: a claim recorded with a principal is released only by a capability that acts as it, or by a dispatcher holding the ledger's close or write grant, so one worker cannot release another's claim by spelling its name. Absent when the claimant carried no principal (a host without them, or root), and then a holder is free text as it always was. Also on a ledger:ClaimEvent and a ledger:ReleaseEvent, for the claim each records; no domain since 0.15.0, so an event is not an inferred Item." .
 
+ledger:claimEpoch a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:integer ;
+    rdfs:label "claimEpoch" ;
+    rdfs:comment "The fencing epoch of the item's latest claim (ledger #3205). Every grant of a claim on an unclaimed item and every takeover sets it to one more than the item's previous epoch, inside the same guarded update; a renewal by the same holder keeps it. A release and a close leave it, so it never goes down, and it is the current claim's only while the item has a ledger:claimedBy. A holder's write sent with `epoch=` is refused (Conflict) once the claim is at another epoch or the item is unclaimed." .
+
 ledger:awaiting a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range rdfs:Resource ;

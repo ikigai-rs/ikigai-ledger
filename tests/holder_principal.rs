@@ -201,14 +201,15 @@ fn the_principal_is_on_every_face() {
     );
     let plain = source(&kernel, &at("item:1"), &[]);
     assert!(plain.contains(&format!("  principal: {A}\n")), "{plain}");
-    // The claim answer keeps its shape: gonk's starter parses `claimed by <holder>`.
+    // The claim answer keeps its shape: gonk's starter parses `claimed by <holder>`. The
+    // fencing epoch (ledger #3205) comes last, after everything it parsed before.
     let answer = claim(
         &kernel,
         &worker(A),
         &[("content", "worker-1"), ("renew", "true")],
     )
     .unwrap();
-    assert_eq!(answer, "acme#1 renewed by worker-1\n");
+    assert_eq!(answer, "acme#1 renewed by worker-1, epoch 1\n");
 }
 
 /// A release takes the principal with every other claim field.
