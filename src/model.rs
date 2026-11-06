@@ -1140,6 +1140,15 @@ pub async fn load_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result
     load(client, filter, Some(&page)).await
 }
 
+/// Every matching item, before a shared listing sort and its page selection.
+/// Explicit sorts need the whole set; a recency page cannot supply an older blocker.
+pub(crate) async fn load_matching_items(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+) -> Result<Vec<Item>> {
+    load(client, filter, None).await
+}
+
 /// The page length a listing uses for `filter.limit`: the limit, or 500 for `0`.
 pub fn page_limit(filter: &Filter) -> usize {
     if filter.limit == 0 {
