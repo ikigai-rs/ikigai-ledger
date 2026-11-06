@@ -1821,7 +1821,8 @@ impl Endpoint for CountEndpoint {
 }
 
 /// The filter's inputs, in the order `items` has always declared them: `status`, `kind`,
-/// `labels`, `without`, `about`, `parent` (0.12.0), `key`, `holder`, `deferred`, `text` — what
+/// `labels`, `without`, `priority`, `without_priority`, `about`, `parent` (0.12.0),
+/// `key`, `holder`, `deferred`, `text` — what
 /// [`listing_filter`] parses, declared once for `items` and `count`.
 fn filter_inputs(desc: Description) -> Description {
     desc.input(
@@ -1851,6 +1852,18 @@ fn filter_inputs(desc: Description) -> Description {
     .input(
         ArgSpec::new("without")
             .summary("Comma-separated; an item must carry NONE of them.")
+            .class(v::ext::XSD_STRING)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("priority")
+            .summary("Comma-separated 0, 1, 2, 3, 4, or none (no priority set); match ANY. Spaces are trimmed; empty or unknown values are refused. Combines with every other filter.")
+            .class(v::ext::XSD_STRING)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("without_priority")
+            .summary("Comma-separated 0, 1, 2, 3, 4, or none (no priority set); exclude ANY match. Spaces are trimmed; empty or unknown values are refused. Applies alongside priority, so exclusion wins on overlap.")
             .class(v::ext::XSD_STRING)
             .optional(),
     )
@@ -1941,6 +1954,8 @@ fn parsed_listing_filter(inv: &Invocation<'_>) -> Result<Filter> {
         kind: inv.inline_str("kind").ok().map(str::to_string),
         labels: split_labels(inv.inline_str("labels").ok()),
         without: split_labels(inv.inline_str("without").ok()),
+        priority: parse_priority_filter(inv, "priority")?,
+        without_priority: parse_priority_filter(inv, "without_priority")?,
         about: inv.inline_str("about").ok().map(str::to_string),
         key: inv
             .inline_str("key")
@@ -1987,6 +2002,29 @@ fn parse_count(inv: &Invocation<'_>, name: &str, default: usize) -> Result<usize
             detail: format!("`{text}` is not a count of items"),
         }),
     }
+}
+
+/// A priority list is strict: an empty entry is a typo, never an omitted constraint.
+fn parse_priority_filter(inv: &Invocation<'_>, name: &str) -> Result<Vec<Option<u8>>> {
+    let Some(value) = present_str(inv, name)? else {
+        return Ok(Vec::new());
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .map(|value| match value {
+            "none" => Ok(None),
+            "0" => Ok(Some(0)),
+            "1" => Ok(Some(1)),
+            "2" => Ok(Some(2)),
+            "3" => Ok(Some(3)),
+            "4" => Ok(Some(4)),
+            other => Err(Error::InvalidArgument {
+                name: name.to_string(),
+                detail: format!("`{other}` is not one of 0, 1, 2, 3, 4, none (no priority set)"),
+            }),
+        })
+        .collect()
 }
 
 fn split_labels(value: Option<&str>) -> Vec<String> {
