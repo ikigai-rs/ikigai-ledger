@@ -77,6 +77,14 @@ fn seeded() -> (Kernel, String, String, String) {
         &[("key", "urn:test:backfill")],
     );
     sink(&kernel, "urn:iki:ledger:close", &[("item", &migration)]);
+    // Last, so no fixture's dates move: a claim taken and released, so `a` has granted epoch 1 whatever order the walk fires
+    // the claim writes in: the epoch check's fixture asks about it (ledger #3205).
+    sink(
+        &kernel,
+        "urn:iki:ledger:claim",
+        &[("item", &a), ("content", "the conformance seed")],
+    );
+    delete(&kernel, "urn:iki:ledger:claim", &[("item", &a)]);
     let id = |iri: &str| {
         iri.rsplit(':')
             .next()
@@ -207,6 +215,11 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .arg("content", "the conformance walk"),
         )
         .fixture(Fixture::new("ledger-claim", Verb::Delete).arg("item", &item))
+        .fixture(
+            Fixture::new("ledger-claim", Verb::Source)
+                .arg("item", &item)
+                .arg("epoch", "1"),
+        )
         .fixture(Fixture::new("ledger-defer", Verb::Sink).arg("item", &item))
         .fixture(Fixture::new("ledger-defer", Verb::Delete).arg("item", &item))
         .fixture(

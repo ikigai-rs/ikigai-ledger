@@ -124,6 +124,12 @@ pub struct Claim {
     /// 0.8.0 (ledger #1199).
     #[serde(default)]
     pub principal: Option<String>,
+    /// The claim's fencing epoch: one more than the item's previous claim's at every grant
+    /// and takeover, kept by a renewal, never lowered. A holder that names it on a write
+    /// (`epoch=`) is refused once the claim is no longer current. `null` for a claim taken
+    /// before 0.19.0. Added in 0.19.0 (ledger #3205).
+    #[serde(default)]
+    pub epoch: Option<u64>,
 }
 
 /// One outbound edge from an item.
@@ -696,6 +702,35 @@ pub struct Problem {
     pub expires: Option<String>,
 }
 
+/// The answer of `source urn:iki:ledger:{ledger}:claim item=… epoch=…` (ledger #3205, added in
+/// 0.19.0): whether an epoch is the current claim's on its item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct EpochCheck {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// The item asked about.
+    pub item: ItemRef,
+    /// The epoch asked about.
+    pub epoch: u64,
+    /// `current` (the claim at this epoch holds the item), `superseded` (a later claim
+    /// holds it) or `unclaimed` (nobody holds it).
+    pub state: String,
+    /// Who holds the item now; `null` when nobody does.
+    #[serde(default)]
+    pub holder: Option<String>,
+    /// The principal the current claim was taken as; `null` when it carried none.
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// The current claim's epoch; `null` when nobody holds the item.
+    #[serde(default)]
+    pub current: Option<u64>,
+    /// The highest epoch the item has granted, claimed now or not.
+    pub highest: u64,
+}
+
 // ------------------------------------------------------------------ building them
 
 /// One compact line of JSON and a newline — what every document here is served as.
@@ -787,6 +822,7 @@ pub(crate) fn item(
             expires: item.lease_expires.map(sparql::iso8601),
             lease: item.lease.clone(),
             principal: item.claim_principal.clone(),
+            epoch: item.claim_epoch,
         }),
         created: sparql::iso8601(item.created),
         modified: sparql::iso8601(item.modified),

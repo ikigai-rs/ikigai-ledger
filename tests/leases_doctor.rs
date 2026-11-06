@@ -129,14 +129,15 @@ fn a_lease_records_its_expiry_from_the_kernel_clock() {
     .unwrap();
     assert_eq!(
         answer,
-        "#1 claimed by kata-ship/0abc until 2026-09-15T00:30:00.000Z\n"
+        "#1 claimed by kata-ship/0abc at epoch 1 until 2026-09-15T00:30:00.000Z\n"
     );
     let claim = &item_json(&kernel, 1)["item"]["claim"];
     assert_eq!(
         claim,
         &serde_json::json!({
             "holder": "kata-ship/0abc", "purpose": null, "kind": "machine",
-            "expires": "2026-09-15T00:30:00.000Z", "lease": "PT30M", "principal": null
+            "expires": "2026-09-15T00:30:00.000Z", "lease": "PT30M", "principal": null,
+            "epoch": 1
         })
     );
     let detail = source(&kernel, "urn:iki:ledger:item:1", &[]);
@@ -152,7 +153,7 @@ fn a_claim_without_a_lease_renders_as_it_always_did() {
     append(&kernel, "Ship it", &[]);
     assert_eq!(
         claim(&kernel, &[("item", "1"), ("content", "brian")]).unwrap(),
-        "#1 claimed by brian\n"
+        "#1 claimed by brian at epoch 1\n"
     );
     assert!(!source(&kernel, "urn:iki:ledger:item:1", &[]).contains("lease:"));
     assert_eq!(
@@ -293,7 +294,7 @@ fn an_expired_lease_is_taken_only_by_a_takeover_naming_its_holder() {
             ],
         )
         .unwrap(),
-        "#1 taken over from kata-ship/0abc by kata-ship/9fff until 2026-09-15T00:25:00.000Z\n"
+        "#1 taken over from kata-ship/0abc by kata-ship/9fff at epoch 2 until 2026-09-15T00:25:00.000Z\n"
     );
     let claim_now = &item_json(&kernel, 1)["item"]["claim"];
     assert_eq!(claim_now["holder"], "kata-ship/9fff");

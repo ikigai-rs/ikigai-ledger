@@ -44,7 +44,7 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
 - **Write answers** (`src/endpoints.rs`): one sentence each, such as
   `#1 urn:iki:ledger:default:item:…`, `commented on #1 (…)`, `linked #1 blocks #2`,
   `closed #2 (done)`, `closed #2 done (2 evidence)`, `closed #2 duplicate of #1`,
-  `#1 claimed by worker-1`, `#1: imported events recorded 3, already recorded 1; history only, so
+  `#1 claimed by worker-1 at epoch 1`, `#1 renewed by worker-1 at epoch 1 until …`, `#1: imported events recorded 3, already recorded 1; history only, so
   the item itself did not change`.
 - **The doctor and lifecycles**: the doctor's findings, each with a `remedy:` line; a
   lifecycle's states, one per line (`Lifecycle::plain` in `src/lifecycle.rs`), each saying in
@@ -53,6 +53,15 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   accepted (`` `x` is not one of open, closed, all ``, `` `9` is not 0 (highest) … 4 (lowest) ``,
   `` `triag` is not a drain of the lifecycle `kata-flight` this ledger uses; one of triage, … ``),
   `NotFound` for an unknown item, and errors that name what is missing (a store, a clock).
+  A write fenced with an `epoch=` that is not current is a `Conflict` sentence naming who holds
+  the item now and at which epoch, and saying nothing was written (`` #1 is held by worker-2 at
+  epoch 2, not epoch 1: a write fenced with `epoch=` lands only while that claim is current, so
+  nothing was written ``), or that nobody holds it (`#1 is not claimed (its last claim was epoch
+  2), so epoch 1 is not current and nothing was written`).
+- **The epoch check** (`source urn:iki:ledger:claim item=… epoch=…`): one sentence giving the
+  state in a word, `current`, `superseded` or `not current`, and who holds the item
+  (`#1 epoch 1 is superseded: held by worker-2 at epoch 2`). A claimed item's detail has an
+  `epoch:` line.
 
 Not this repository's: the titles, bodies and comments people write, which are shown as
 written; and how a host or a terminal presents any of this.
@@ -73,6 +82,10 @@ Verified by reading the source:
 
 ## How it is tested
 
+- `tests/claim_epoch.rs`: `the_check_answers_each_state` pins each sentence of the epoch check,
+  and `each_write_with_a_stale_epoch_is_refused_and_writes_nothing` and
+  `each_write_with_the_epoch_of_a_released_claim_is_refused` hold each fenced refusal to naming
+  the current holder and epoch, or that nobody holds the item.
 - `tests/faces.rs`: `the_plain_item_detail_is_unchanged`, `the_plain_listing_is_unchanged`,
   `the_plain_write_answers_are_unchanged`, `the_plain_next_is_unchanged`,
   `the_plain_count_is_the_bare_number` and `a_keyed_items_plain_detail_gains_one_line` pin the

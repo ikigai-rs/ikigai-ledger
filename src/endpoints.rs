@@ -9,7 +9,7 @@
 //! urn:iki:ledger:{ledger}:comment        Sink                append a comment
 //! urn:iki:ledger:{ledger}:close          Sink                close with a reason
 //! urn:iki:ledger:{ledger}:reopen         Sink                undo a close
-//! urn:iki:ledger:{ledger}:claim          Sink Delete         take it / hand it back
+//! urn:iki:ledger:{ledger}:claim          Source Sink Delete  is an epoch current / take it / hand it back
 //! urn:iki:ledger:{ledger}:defer          Sink Delete         not now / now again
 //! urn:iki:ledger:{ledger}:link           Sink Delete         blocks / parent / related
 //! urn:iki:ledger:{ledger}:label          Sink Delete         tag / untag
@@ -1086,7 +1086,7 @@ async fn write_comment(
     who: &Attribution,
     now: u64,
 ) -> Result<String> {
-    write_keyed_comment(client, item, text, who, now, None, Handback::Unchanged).await
+    write_keyed_comment(client, item, text, who, now, None, Handback::Unchanged, "").await
 }
 
 /// What a comment does to its item's hand-back state (`ledger:awaiting`, ledger #1199).
@@ -1180,6 +1180,10 @@ fn handback_update(
 /// across one update request, so of two writers racing with one key exactly one writes. The
 /// answer is the IRI minted here whether or not it was written; the caller reads the key
 /// back to learn which comment it names.
+///
+/// `fence` is a fenced comment's [`fence_clause`] (ledger #3205), carried by every operation
+/// with the key's and the hand-back's clauses, so a comment whose claim moved on writes nothing.
+#[allow(clippy::too_many_arguments)] // reason: one guarded write's inputs, each distinct
 async fn write_keyed_comment(
     client: &StoreClient<'_, '_>,
     item: &str,
@@ -1188,6 +1192,7 @@ async fn write_keyed_comment(
     now: u64,
     key: Option<&str>,
     handback: Handback,
+    fence: &str,
 ) -> Result<String> {
     let id = mint_id(now)?;
     let comment = client.ledger().comment(&id);
@@ -1205,7 +1210,7 @@ async fn write_keyed_comment(
     triples.push_str(&who.date_sources(&comment));
     // ★ The hand-back is in the SAME update as the comment (ledger #1199), so the evidence
     // and the state it puts the item in land together or not at all.
-    if key.is_none() && handback != Handback::Set {
+    if key.is_none() && handback != Handback::Set && fence.is_empty() {
         guarded_update(
             client,
             &[item],
@@ -1241,7 +1246,12 @@ async fn write_keyed_comment(
         None => String::new(),
     };
     // And only on a live item (ledger #764), like every write on one.
-    let free = format!("{} {open} {free}", client.in_graph(&live(item)));
+    let fence = if fence.is_empty() {
+        String::new()
+    } else {
+        client.in_graph(fence)
+    };
+    let free = format!("{} {open} {free}{fence}", client.in_graph(&live(item)));
     // ★ A hand-back names the holder label of the claim it finds (ledger #2819), read in the
     // update that writes it: the principal is the comment's committer, and two workers can
     // share one, so the label is what tells them apart. Nobody holding it names nobody, so the
@@ -3631,6 +3641,7 @@ impl Endpoint for CommentEndpoint {
             .ok()
             .map(model::parse_key)
             .transpose()?;
+        let epoch = parse_epoch(inv)?;
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let text = inv.inline_str("content")?;
@@ -3669,6 +3680,8 @@ impl Endpoint for CommentEndpoint {
                 return existing_comment(&client, want, &found, key).await;
             }
         }
+        // A fenced comment or hand-back (ledger #3205) lands only under the claim it names.
+        check_fence(&item, epoch)?;
         // ★ The dispatcher (the close grant) speaking on a handed-back item is the answer to
         // it, whatever the words: any comment of theirs clears it. A worker clears it only by
         // saying so (`rejects=true`); its ordinary comment leaves the hand-back standing.
@@ -3687,18 +3700,27 @@ impl Endpoint for CommentEndpoint {
             now,
             key.as_deref(),
             change,
+            &fence_clause(&item.iri, epoch),
         )
         .await?;
         // A hand-back the write's guard refused: the item closed between the read above and the
         // write, and neither the comment nor `awaiting` landed. A keyed one whose key a racer
         // took is answered below as that racer's comment, as any taken key is.
-        if change == Handback::Set && !comment_written(&client, &comment).await? {
+        // A fenced one the guard refused found its claim changed, and wrote nothing either.
+        if (change == Handback::Set || epoch.is_some())
+            && !comment_written(&client, &comment).await?
+        {
             let keyed = match &key {
                 Some(key) => model::find_comment_by_key(&client, key).await?,
                 None => None,
             };
             if keyed.is_none() {
                 let now = model::load_item(&client, &item.iri).await?.unwrap_or(item);
+                if let Some(epoch) = epoch {
+                    if now.open || change != Handback::Set {
+                        return Err(fence_refusal(&now, epoch));
+                    }
+                }
                 return Err(closed_refusal(
                     &now,
                     client.ledger(),
@@ -3850,6 +3872,9 @@ impl Endpoint for CommentEndpoint {
                             .default_value("false")
                             .optional(),
                     )
+                    .input(epoch_arg(
+                        "the comment, and the hand-back it carries, is written",
+                    ))
                     .input(as_arg(&WRITE_FACES))
                     .output(PLAIN)
                     .output(JSON),
@@ -3908,6 +3933,7 @@ impl Endpoint for CloseEndpoint {
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
         let want = wanted_face(inv, &WRITE_FACES)?;
+        let epoch = parse_epoch(inv)?;
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let name = inv.inline_str("reason").unwrap_or("done");
@@ -3928,6 +3954,8 @@ impl Endpoint for CloseEndpoint {
         // What closed it (ledger #2842), every value checked before anything is written.
         let evidence = evidence::resolve(inv, &client, &item).await?;
         evidence::refuse_without_a_close_event(&client, &item, &evidence).await?;
+        // A holder's fenced close (ledger #3205) closes only under the claim it names.
+        check_fence(&item, epoch)?;
         // ★ A CLOSE RELEASES THE CLAIM (ledger #1147, decided 2026-10-10). Closed work is
         // held by nobody, and a claim left on a closed item was the doctor's orphaned
         // machine claim and a holder `items holder=` went on listing. The release is in the
@@ -3944,8 +3972,14 @@ impl Endpoint for CloseEndpoint {
         // the item open, and only an update that finds a claim records it, naming the claim
         // it found. Each writes an IRI minted here, and reading those back is how this
         // request learns what it did.
+        //
+        // ★ A FENCED close (ledger #3205) carries its fence in every operation, and the claim
+        // it names is retracted LAST, `claimedBy` after every other field: each operation
+        // finds the claim the fence names until the close is otherwise complete, so the batch
+        // lands whole or not at all.
+        let fence = fence_clause(&item.iri, epoch);
         let still_open = format!(
-            "FILTER NOT EXISTS {{ <{}> <{}> <{}> }}",
+            "FILTER NOT EXISTS {{ <{}> <{}> <{}> }} {fence}",
             item.iri,
             v::STATUS,
             v::CLOSED
@@ -4006,41 +4040,58 @@ impl Endpoint for CloseEndpoint {
             } else {
                 String::new()
             },
-            release_record(&client, &item.iri, &record, &who, now),
+            release_record(&client, &item.iri, &record, &who, now, &fence),
             // And the release as an event, who held it and who released it (ledger #2819),
             // under the same condition: only an update that finds a claim records one.
-            release_event(&client, &item.iri, ReleaseReason::Closed, "", &who, now)?,
-            replace_one(&client, &item.iri, v::STATUS, &format!("<{}>", v::CLOSED)),
-            replace_one(&client, &item.iri, v::CLOSED_REASON, &format!("<{reason}>")),
+            release_event(&client, &item.iri, ReleaseReason::Closed, &fence, &who, now)?,
+            replace_one_when(
+                &client,
+                &item.iri,
+                v::STATUS,
+                &format!("<{}>", v::CLOSED),
+                &fence,
+            ),
+            replace_one_when(
+                &client,
+                &item.iri,
+                v::CLOSED_REASON,
+                &format!("<{reason}>"),
+                &fence,
+            ),
             // After the status, so it finds the close that stands: this one's event, or, when
             // the item was already closed, that close's.
-            evidence::record(&client, &item.iri, reason, &evidence),
+            evidence::record(&client, &item.iri, reason, &evidence, &fence),
             // A close dated at the source moves `modified` only forward (ledger #2928).
-            touch_dated(&client, &item.iri, now, claimed, ""),
+            touch_dated(&client, &item.iri, now, claimed, &fence),
+            // And a hand-back is answered: closed work awaits nobody (ledger #1199).
+            retract_when(&client, &item.iri, v::AWAITING, &fence),
+            replace_one_when(&client, &item.iri, v::AWAITING_AT, &datetime(now), &fence),
         ];
+        // The claim last, its holder after every other field: see the fence above.
         ops.extend(
             CLAIM_FIELDS
                 .iter()
-                .map(|field| retract(&client, &item.iri, field)),
+                .filter(|field| **field != v::CLAIMED_BY)
+                .chain([&v::CLAIMED_BY])
+                .map(|field| retract_when(&client, &item.iri, field, &fence)),
         );
-        // And a hand-back is answered: closed work awaits nobody (ledger #1199).
-        ops.push(retract(&client, &item.iri, v::AWAITING));
-        ops.push(replace_one(
-            &client,
-            &item.iri,
-            v::AWAITING_AT,
-            &datetime(now),
-        ));
         guarded_update(&client, &[&item.iri], &batch(&ops)).await?;
-        // Even when another close got there first: a write from the latest snapshot is never
-        // wrong, and it repairs a mirror an interrupted writer left behind.
-        let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
         let closed_here = client
             .ask(&format!(
                 "ASK {{ {} }}",
                 client.in_graph(&format!("<{event_iri}> <{}> ?any", v::ext::TYPE))
             ))
             .await?;
+        // A fenced close records its own close or nothing at all: none means its claim
+        // changed between the read and the write, and the fence refused every operation.
+        if let Some(epoch) = epoch {
+            if !closed_here {
+                return Err(fence_refusal_now(&client, &item, epoch).await);
+            }
+        }
+        // Even when another close got there first: a write from the latest snapshot is never
+        // wrong, and it repairs a mirror an interrupted writer left behind.
+        let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
         let released = released_by(&client, &record).await?;
         let mut note_written = None;
         if let Ok(note) = inv.inline_str("content") {
@@ -4148,6 +4199,7 @@ impl Endpoint for CloseEndpoint {
                             .list(ListSeparator::Whitespace)
                             .optional(),
                     )
+                    .input(epoch_arg("the close is written"))
                     .input(as_arg(&WRITE_FACES))
                     .output(PLAIN)
                     .output(JSON),
@@ -4392,6 +4444,7 @@ fn release_record(
     record: &str,
     who: &Attribution,
     now: u64,
+    guard: &str,
 ) -> String {
     let mut triples = format!(
         "<{record}> <{type_}> <{class}> ; <{on}> <{item}> ; <{body}> ?body ; <{created}> {when} .",
@@ -4407,7 +4460,7 @@ fn release_record(
         "INSERT {{ {} }} WHERE {{ {} }}",
         client.in_graph(&triples),
         client.in_graph(&format!(
-            "{live} <{item}> <{by}> ?holder . OPTIONAL {{ <{item}> <{principal}> ?principal }}\n\
+            "{live} {guard} <{item}> <{by}> ?holder . OPTIONAL {{ <{item}> <{principal}> ?principal }}\n\
              BIND(CONCAT({prefix}, STR(?holder), \
              COALESCE(CONCAT(\" (as \", STR(?principal), \")\"), \"\"), {suffix}) AS ?body)",
             live = live(item),
@@ -4493,7 +4546,23 @@ fn release_event(
     now: u64,
 ) -> Result<String> {
     let event = event_iri(item, "release", now)?;
-    let mut triples = event_triples(&event, v::RELEASE_EVENT_CLASS, item, who, now);
+    Ok(release_event_at(
+        client, &event, item, reason, guard, who, now,
+    ))
+}
+
+/// [`release_event`] under an IRI the caller minted, so it can ask afterwards whether the
+/// event, and with it the release, landed.
+fn release_event_at(
+    client: &StoreClient<'_, '_>,
+    event: &str,
+    item: &str,
+    reason: ReleaseReason,
+    guard: &str,
+    who: &Attribution,
+    now: u64,
+) -> String {
+    let mut triples = event_triples(event, v::RELEASE_EVENT_CLASS, item, who, now);
     // An unbound variable drops only its own triple, so a claim with no principal, kind or
     // time records the rest.
     triples.push_str(&format!(
@@ -4506,7 +4575,7 @@ fn release_event(
         kind = v::CLAIM_KIND,
         at = v::CLAIMED_AT,
     ));
-    Ok(format!(
+    format!(
         "INSERT {{ {} }} WHERE {{ {} }}",
         client.in_graph(&triples),
         client.in_graph(&format!(
@@ -4520,7 +4589,7 @@ fn release_event(
             kind = v::CLAIM_KIND,
             at = v::CLAIMED_AT,
         ))
-    ))
+    )
 }
 
 /// An edit event (ledger #2819): an edit that creates no node of its own (`kind`: `label`,
@@ -4662,6 +4731,110 @@ fn same_claimant_clause(item: &str, caller: Option<&str>) -> String {
     }
 }
 
+/// `epoch=`: the claim epoch a holder's write is fenced with (ledger #3205), or `None` when
+/// the write is not fenced and behaves as it always did.
+fn parse_epoch(inv: &Invocation<'_>) -> Result<Option<u64>> {
+    match inv.inline_str("epoch").ok().map(str::trim) {
+        None => Ok(None),
+        Some(text) => match text.parse::<u64>() {
+            Ok(epoch) if epoch > 0 => Ok(Some(epoch)),
+            _ => Err(Error::InvalidArgument {
+                name: "epoch".to_string(),
+                detail: format!(
+                    "`{text}` is not a claim epoch: a whole number from 1, as a claim's answer \
+                     and its item's faces give it"
+                ),
+            }),
+        },
+    }
+}
+
+/// The `epoch=` argument as an action declares it, on every write a holder fences.
+fn epoch_arg(what: &str) -> ArgSpec {
+    ArgSpec::new("epoch")
+        .summary(format!(
+            "The claim epoch this holder was given (the claim's answer, `epoch:` in the item's \
+             detail, `claim.epoch` in JSON). When given, {what} only while the item is claimed \
+             at exactly this epoch: otherwise refused (Conflict) naming the current holder and \
+             epoch, and nothing is written. The check is a clause of the write's own update, \
+             so a takeover that lands first is never written past. Omit it for the unfenced \
+             write (ledger #3205)."
+        ))
+        .class(v::ext::XSD_INTEGER)
+        .optional()
+}
+
+/// The clause that holds only while `item` is claimed at `epoch`, for the `WHERE` of every
+/// operation of a fenced write; empty for an unfenced one.
+///
+/// ★ It names the claim, not only the number: an epoch outlives its claim (a release keeps
+/// it), so a fenced write after a release is refused rather than landing on a free item.
+fn fence_clause(item: &str, epoch: Option<u64>) -> String {
+    match epoch {
+        None => String::new(),
+        Some(epoch) => format!(
+            "<{item}> <{}> ?fenceHolder ; <{}> {epoch} .",
+            v::CLAIMED_BY,
+            v::CLAIM_EPOCH
+        ),
+    }
+}
+
+/// Whether `epoch` is the current claim's on `item`, as read.
+fn epoch_is_current(item: &Item, epoch: u64) -> bool {
+    item.claimed_by.is_some() && item.claim_epoch == Some(epoch)
+}
+
+/// The refusal of a write fenced with an `epoch` that is not current on `item` (ledger
+/// #3205): who holds it now and at which epoch, or that nobody does.
+fn fence_refusal(item: &Item, epoch: u64) -> Error {
+    let short = item.short();
+    Error::Conflict(match (&item.claimed_by, item.claim_epoch) {
+        (Some(_), Some(current)) => format!(
+            "{short} is held by {} at epoch {current}, not epoch {epoch}: a write fenced with \
+             `epoch=` lands only while that claim is current, so nothing was written",
+            holder_display(item)
+        ),
+        (Some(_), None) => format!(
+            "{short} is held by {} under a claim taken before epochs, not epoch {epoch}: a \
+             write fenced with `epoch=` lands only while that claim is current, so nothing \
+             was written",
+            holder_display(item)
+        ),
+        (None, Some(last)) => format!(
+            "{short} is not claimed (its last claim was epoch {last}), so epoch {epoch} is not \
+             current and nothing was written"
+        ),
+        (None, None) => format!(
+            "{short} has never been claimed, so epoch {epoch} is not current and nothing was \
+             written"
+        ),
+    })
+}
+
+/// [`fence_refusal`] when `epoch` was given and is not current on `item` as read: the cheap
+/// half, so a stale holder's write is refused before anything is written. The write's own
+/// [`fence_clause`] is what holds against a racer.
+fn check_fence(item: &Item, epoch: Option<u64>) -> Result<()> {
+    match epoch {
+        Some(epoch) if !epoch_is_current(item, epoch) => Err(fence_refusal(item, epoch)),
+        _ => Ok(()),
+    }
+}
+
+/// [`fence_refusal`] as the item stands now, for a fenced write whose update found its
+/// claim gone between the read and the write.
+async fn fence_refusal_now(client: &StoreClient<'_, '_>, item: &Item, epoch: u64) -> Error {
+    match model::load_item(client, &item.iri).await {
+        Ok(Some(now)) => fence_refusal(&now, epoch),
+        Ok(None) => Error::NotFound(format!(
+            "no ledger item at `{}`: it was deleted while this write was in flight",
+            item.iri
+        )),
+        Err(e) => e,
+    }
+}
+
 /// The holder as the plain faces name it: the label, and the principal when there is one.
 fn holder_display(item: &Item) -> String {
     match (&item.claimed_by, &item.claim_principal) {
@@ -4680,11 +4853,17 @@ fn holder_display(item: &Item) -> String {
 /// already holds it) records none, which is why a first claim's event also needs the item
 /// unclaimed. Of concurrent claims of one free item only the first finds it free, so one
 /// claim event is written.
+///
+/// ★ **And the epoch with it** (ledger #3205), decided by the same update: a first claim or a
+/// takeover sets `ledger:claimEpoch` to one more than the item's previous one, and a renewal
+/// keeps it. It is never retracted, so a claim taken after a release still counts up. `fence`
+/// is a fenced claim's [`fence_clause`], carried by every operation.
 #[allow(clippy::too_many_arguments)] // reason: one SPARQL statement's inputs, each distinct
 fn claim_update(
     client: &StoreClient<'_, '_>,
     item: &str,
     guard: Guard<'_>,
+    fence: &str,
     holder: &str,
     principal: Option<&str>,
     purpose: Option<&str>,
@@ -4785,7 +4964,21 @@ fn claim_update(
     }
     // ★ Only an OPEN item (ledger #1419): the endpoint refuses a closed one before writing,
     // and this holds against a close that lands between that read and this write.
-    let open = format!("<{item}> <{}> <{}> .\n{guard}", v::STATUS, v::OPEN);
+    let open = format!("<{item}> <{}> <{}> .\n{guard}\n{fence}", v::STATUS, v::OPEN);
+    // The epoch: up by one for a first claim (the item free, `?o0`, its holder, unbound) and
+    // for a takeover; kept by a renewal, which finds this holder there. A claim taken before
+    // epochs has none to keep, and is given the first.
+    let epoch = if takeover {
+        "COALESCE(?epochWas, 0) + 1".to_string()
+    } else {
+        "IF(BOUND(?o0) && BOUND(?epochWas), ?epochWas, COALESCE(?epochWas, 0) + 1)".to_string()
+    };
+    let epoch_delete = format!("<{item}> <{}> ?epochWas .", v::CLAIM_EPOCH);
+    let epoch_insert = format!("\n<{item}> <{}> ?epoch .", v::CLAIM_EPOCH);
+    let epoch_where = format!(
+        "OPTIONAL {{ <{item}> <{}> ?epochWas }}\nBIND({epoch} AS ?epoch)",
+        v::CLAIM_EPOCH
+    );
     let mut ops = Vec::new();
     if takeover {
         ops.push(release_event(
@@ -4836,10 +5029,10 @@ fn claim_update(
     }
     ops.push(format!(
         "DELETE {{ {} }}\nINSERT {{ {} }}\nWHERE {{ {} }}",
-        client.in_graph(&delete),
-        client.in_graph(&insert),
+        client.in_graph(&format!("{delete}{epoch_delete}")),
+        client.in_graph(&format!("{insert}{epoch_insert}")),
         client.in_graph(&format!(
-            "<{item}> <{}> <{}> .\n{open}\n{optional}",
+            "<{item}> <{}> <{}> .\n{open}\n{optional}{epoch_where}",
             v::ext::TYPE,
             v::ITEM_CLASS,
         )),
@@ -4862,6 +5055,13 @@ fn parse_flag(inv: &Invocation<'_>, name: &str) -> Result<bool> {
 #[async_trait]
 impl Endpoint for ClaimEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        // The epoch check is a read (ledger #3205): anyone who may read the ledger may ask,
+        // so a dispatcher or a reviewer learns whether a holder's authority stands without
+        // the holder.
+        if inv.request.verb == Verb::Source {
+            let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
+            return epoch_check(&client, inv).await;
+        }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Claim)?);
         match inv.request.verb {
             Verb::Sink => {
@@ -4925,6 +5125,7 @@ impl Endpoint for ClaimEndpoint {
                     _ => {}
                 }
                 let purpose = inv.inline_str("purpose").ok();
+                let epoch = parse_epoch(inv)?;
                 // ★ The host's decision, never the caller's: no `kind` input is declared, and
                 // one sent anyway is not read. See `crate::claim`.
                 let kind = (self.stamper)(inv);
@@ -4942,6 +5143,8 @@ impl Endpoint for ClaimEndpoint {
                         "closed work is held by nobody",
                     ));
                 }
+                // A fenced claim (ledger #3205) names the epoch it renews or takes over.
+                check_fence(&item, epoch)?;
                 let resource = client.ledger().resource("claim");
                 let expired = item.lease_expires.is_some_and(|ends| ends <= now);
                 // ★ The claimant's principal, from the capability its door minted — never an
@@ -5064,6 +5267,7 @@ impl Endpoint for ClaimEndpoint {
                         &client,
                         &item.iri,
                         guard,
+                        &fence_clause(&item.iri, epoch),
                         &holder,
                         caller_term.as_deref(),
                         purpose,
@@ -5095,6 +5299,13 @@ impl Endpoint for ClaimEndpoint {
                         holder_display(&after)
                     )));
                 }
+                // A fenced renewal keeps its epoch, so any other epoch now is a claim that
+                // changed between the read and the write, and the update's fence refused it.
+                if let Some(epoch) = epoch {
+                    if !takeover && after.claim_epoch != Some(epoch) {
+                        return Err(fence_refusal(&after, epoch));
+                    }
+                }
                 if after.claimed_by.as_deref() != Some(holder.as_str()) {
                     if renew {
                         return Err(Error::Conflict(format!(
@@ -5112,20 +5323,26 @@ impl Endpoint for ClaimEndpoint {
                             .unwrap_or("someone who has since released it")
                     )));
                 }
+                // ★ The epoch the holder fences its writes with (ledger #3205), as the update
+                // that took the claim set it.
+                let at = after
+                    .claim_epoch
+                    .map(|epoch| format!(" at epoch {epoch}"))
+                    .unwrap_or_default();
                 let until = lease
                     .as_ref()
                     .map(|l| format!(" until {}", sparql::iso8601(now + l.millis)))
                     .unwrap_or_default();
                 Ok(plain(if takeover {
                     format!(
-                        "{} taken over from {} by {holder}{until}\n",
+                        "{} taken over from {} by {holder}{at}{until}\n",
                         item.short(),
                         previous.unwrap_or_default()
                     )
                 } else if renew {
-                    format!("{} renewed by {holder}{until}\n", item.short())
+                    format!("{} renewed by {holder}{at}{until}\n", item.short())
                 } else {
-                    format!("{} claimed by {holder}{until}\n", item.short())
+                    format!("{} claimed by {holder}{at}{until}\n", item.short())
                 }))
             }
             Verb::Delete => {
@@ -5140,6 +5357,7 @@ impl Endpoint for ClaimEndpoint {
                     }
                     other => other,
                 };
+                let epoch = parse_epoch(inv)?;
                 let now = now_ms(inv)?;
                 let item = require_item(&client, inv.inline_str("item")?).await?;
                 let resource = client.ledger().resource("claim");
@@ -5204,6 +5422,9 @@ impl Endpoint for ClaimEndpoint {
                         }
                     }
                 }
+                // A fenced release (ledger #3205) releases only the claim at that epoch.
+                check_fence(&item, epoch)?;
+                guard.push_str(&fence_clause(&item.iri, epoch));
                 // A claimant that is not the dispatcher releases only a claim that is still
                 // its own (or no principal's): the check above, as a clause of the write.
                 if !dispatcher {
@@ -5216,19 +5437,34 @@ impl Endpoint for ClaimEndpoint {
                 }
                 // The release event first, under the same guard, while the claim is there to
                 // read (ledger #2819).
+                let event = event_iri(&item.iri, "release", now)?;
                 client
                     .update(&batch(&[
-                        release_event(
+                        release_event_at(
                             &client,
+                            &event,
                             &item.iri,
                             ReleaseReason::Released,
                             &guard,
                             &Attribution::committer(inv)?,
                             now,
-                        )?,
+                        ),
                         release_update(&client, &item.iri, &guard, now),
                     ]))
                     .await?;
+                // A fenced release that found its claim gone wrote no event: the claim changed
+                // between the read and the write, and the fence refused it.
+                if let Some(epoch) = epoch {
+                    let released = client
+                        .ask(&format!(
+                            "ASK {{ {} }}",
+                            client.in_graph(&format!("<{event}> <{}> ?any", v::ext::TYPE))
+                        ))
+                        .await?;
+                    if !released {
+                        return Err(fence_refusal_now(&client, &item, epoch).await);
+                    }
+                }
                 if !guard.is_empty() {
                     let after = model::load_item(&client, &item.iri).await?.ok_or_else(|| {
                         Error::NotFound(format!("no ledger item at `{}`", item.iri))
@@ -5348,6 +5584,9 @@ impl Endpoint for ClaimEndpoint {
                             .default_value("false")
                             .optional(),
                     )
+                    .input(epoch_arg(
+                        "a renewal extends, and a takeover takes, the claim",
+                    ))
                     .output(PLAIN),
                 CAP_ANY,
             ))
@@ -5383,10 +5622,101 @@ impl Endpoint for ClaimEndpoint {
                             .class(v::ext::XSD_STRING)
                             .optional(),
                     )
+                    .input(epoch_arg("the release releases the claim"))
                     .output(PLAIN),
                 CAP_ANY,
             ))
+            .action(read_action(
+                ikigai_core::ActionSpec::new(Verb::Source)
+                    .input(ledger_arg("claim"))
+                    .summary(
+                        "Whether a claim epoch is still the current claim's on an item, for \
+                         anyone who may read the ledger, not only its holder (ledger #3205): \
+                         `current` (that claim holds the item), `superseded` (a later claim \
+                         does, named with its epoch) or `unclaimed` (nobody does). Every grant \
+                         and takeover gives a claim one more than the item's previous epoch, \
+                         a renewal keeps it, and it never goes down. An epoch above any the \
+                         item has granted is refused (InvalidArgument).",
+                    )
+                    .input(item_arg("The item to check."))
+                    .input(
+                        ArgSpec::new("epoch")
+                            .summary(
+                                "The epoch to check: a whole number from 1, as a claim's \
+                                 answer gives it.",
+                            )
+                            .class(v::ext::XSD_INTEGER),
+                    )
+                    .input(as_arg(&WRITE_FACES))
+                    .output(PLAIN)
+                    .output(JSON),
+            ))
     }
+}
+
+/// `source urn:iki:ledger:{ledger}:claim item=… epoch=…` (ledger #3205): whether `epoch` is
+/// the current claim's on the item — `current`, `superseded` by a later claim that holds it
+/// now, or `unclaimed`, nobody holding it — in one sentence, or as JSON. An epoch above any the
+/// item has granted was never anyone's, and is refused rather than answered.
+async fn epoch_check(client: &StoreClient<'_, '_>, inv: &Invocation<'_>) -> Result<Representation> {
+    let want = wanted_face(inv, &WRITE_FACES)?;
+    let epoch = parse_epoch(inv)?.ok_or_else(|| Error::InvalidArgument {
+        name: "epoch".to_string(),
+        detail: "the check needs the epoch to check: `epoch=`, a whole number from 1".to_string(),
+    })?;
+    let item = require_item(client, inv.inline_str("item")?).await?;
+    let highest = item.claim_epoch.unwrap_or(0);
+    if epoch > highest {
+        return Err(Error::InvalidArgument {
+            name: "epoch".to_string(),
+            detail: if highest == 0 {
+                format!(
+                    "`{epoch}` was never granted on {}: it has had no claim with an epoch",
+                    item.short()
+                )
+            } else {
+                format!(
+                    "`{epoch}` was never granted on {}: its highest epoch is {highest}",
+                    item.short()
+                )
+            },
+        });
+    }
+    let state = match &item.claimed_by {
+        None => "unclaimed",
+        Some(_) if item.claim_epoch == Some(epoch) => "current",
+        Some(_) => "superseded",
+    };
+    if want == JSON {
+        let ledger = client.ledger();
+        let answer = json::EpochCheck {
+            schema: json::SCHEMA,
+            ledger: ledger.name().to_string(),
+            item: json::item_ref(ledger, item.number, &item.iri),
+            epoch,
+            state: state.to_string(),
+            holder: item.claimed_by.clone(),
+            principal: item.claim_principal.clone(),
+            current: item.claimed_by.as_ref().and(item.claim_epoch),
+            highest,
+        };
+        return Ok(json_repr(json::render(&answer)?));
+    }
+    let short = item.short();
+    Ok(plain(match state {
+        "current" => format!(
+            "{short} epoch {epoch} is current: held by {}\n",
+            holder_display(&item)
+        ),
+        "superseded" => format!(
+            "{short} epoch {epoch} is superseded: held by {} at epoch {highest}\n",
+            holder_display(&item)
+        ),
+        _ => format!(
+            "{short} epoch {epoch} is not current: nobody holds {short}, and its last claim was \
+             epoch {highest}\n"
+        ),
+    }))
 }
 
 // --------------------------------------------------------------------------- defer

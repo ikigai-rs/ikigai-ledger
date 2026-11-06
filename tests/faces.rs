@@ -125,6 +125,8 @@ fn seeded() -> Kernel {
 
 // ------------------------------------------------------------------ the plain face, 0.3.0
 
+/// Unchanged but for one line since 0.19.0: a claimed item's detail names its claim's epoch
+/// (`epoch:`, ledger #3205), under its purpose.
 #[test]
 fn the_plain_item_detail_is_unchanged() {
     let kernel = seeded();
@@ -139,6 +141,7 @@ fn the_plain_item_detail_is_unchanged() {
          \x20 about:    urn:repo:file:x/src/a.rs\n\
          \x20 blocks:   urn:iki:ledger:default:item:{b}\n\
          \x20 purpose:  brief-x\n\
+         \x20 epoch:    1\n\
          \n\
          \x20 It is broken.\n\
          \x20 Badly.\n\
@@ -278,7 +281,8 @@ fn the_json_item_document_is_schema_1() {
       "kind": "machine",
       "expires": null,
       "lease": null,
-      "principal": null
+      "principal": null,
+      "epoch": 1
     },
     "created": "2026-09-15T00:00:00.000Z",
     "modified": "2026-09-15T00:00:00.000Z",
@@ -562,7 +566,8 @@ fn the_json_next_document_is_schema_1() {
           "kind": "machine",
           "expires": null,
           "lease": null,
-          "principal": null
+          "principal": null,
+          "epoch": 1
         },
         "created": "2026-09-15T00:00:00.000Z",
         "modified": "2026-09-15T00:00:00.000Z",

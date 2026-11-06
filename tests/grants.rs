@@ -257,6 +257,13 @@ fn script() -> Vec<Step> {
             at("claim"),
             &[("item", "#1"), ("content", "session-a"), ("lease", "30m")],
         ),
+        // The epoch check (ledger #3205), a read: the claim above was epoch 1.
+        step(
+            "ledger-claim",
+            Verb::Source,
+            at("claim"),
+            &[("item", "#1"), ("epoch", "1")],
+        ),
         step("ledger-claim", Verb::Delete, at("claim"), &[("item", "#1")]),
         // The flight seams (ledger #775): a state read and a real transition, and the three
         // assertions a loop checks after a step — all under the same grant list.
