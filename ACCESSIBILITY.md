@@ -28,7 +28,8 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   answers a bare number. `items ledgers=alpha,beta` combines readable selected ledgers
   into one filtered page, keeping each row's existing `alpha#12` display (`#12` for
   `default`) and the same page and total footer. Unreadable ledgers are omitted silently;
-  no names or warnings for them are emitted.
+  no names or warnings for them are emitted. `sort` orders the same rows before paging;
+  `landing` places blockers first. The row shape and footer are unchanged.
 - **`urn:iki:ledger:next`** (`Selection::plain` in `src/select.rs`): ranked item lines, each
   with its score and its reasons in words, then the policy and what was excluded and why
   (`not #1: blocked by #2`), or `nothing is ready (…)` with the reasons.
@@ -54,7 +55,10 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   `` `triag` is not a drain of the lifecycle `kata-flight` this ledger uses; one of triage, … ``),
   `` `p1` is not one of 0, 1, 2, 3, 4, none (no priority set) `` for `priority` or
   `without_priority` listing filters,
-  `NotFound` for an unknown item, and errors that name what is missing (a store, a clock).
+  an unknown or empty `sort` key names all accepted keys (`priority`, `created`, `modified`,
+  `number`, `landing`) and explains commas and descending `-` in words. A landing cycle
+  names the items in or depending on it and says to remove a blocks link or select another
+  sort. `NotFound` for an unknown item, and errors that name what is missing (a store, a clock).
   A write fenced with an `epoch=` that is not current is a `Conflict` sentence naming who holds
   the item now and at which epoch, and saying nothing was written (`` #1 is held by worker-2 at
   epoch 2, not epoch 1: a write fenced with `epoch=` lands only while that claim is current, so
@@ -150,3 +154,4 @@ technology you used, if you are comfortable sharing them. Anything security-sens
 | 2026-11-02 | `next drain=` and `next state=` (ledger #2865) add a refusal for each, one sentence that names the value, the lifecycle, every drain or state it accepts and the lifecycle's IRI. A filtered `next` reads as `next` does, with fewer items on it, and a filter that admits nothing says the existing `nothing is ready` sentence. No plain face changed: `tests/faces.rs` passes unchanged. `tests/next_state_filter.rs` pins the refusals byte for byte; no assistive technology was used. |
 | 2026-11-06 | A listing across ledgers (ledger #3190) adds `ledgers=` to `items` and `count`. Existing row shapes, page footers and single-ledger faces remain unchanged. A malformed comma-separated name is refused with the `ledgers` argument named and the ledger naming rule in words. `tests/listing_union.rs` checks the union, omitted unreadable ledgers in all three faces, shared filters, global paging, ties, and comments and link numbers from each row's graph. `tests/faces.rs` pins the existing plain and JSON output unchanged. This repository emits text and has no page, themes or browser accessibility checks; the gonk page's integration and checks in all themes belong to its follow-on. No browser, automated accessibility checker or assistive technology was used. |
 | 2026-11-06 | Priority filters (ledger #3203) add `priority` and `without_priority` to `items` and `count`, including unions. Refusals name the argument and say in words which values are accepted, including `none (no priority set)`; empty comma entries are refused by the same sentence. Existing faces are unchanged. `tests/priority_filter.rs` checks the new refusal sentences and filter/count parity; `tests/faces.rs` pins existing output. No browser, automated accessibility checker or assistive technology was used. |
+| 2026-11-06 | Listing sort (ledger #3192) adds `sort` to `items`. Rows and footers keep their shape. Unknown keys and landing cycles are refused in words with accepted keys or a remedy. `tests/listing_sort.rs` checks every key and direction, ties, paging, cycles, cross-ledger links and capability isolation; `tests/faces.rs` pins existing faces. This text-only library has no page, themes or browser accessibility checks; gonk's follow-on owns those checks in all themes. No browser, automated accessibility checker or assistive technology was used. |

@@ -1478,13 +1478,15 @@ fn ledgers_arg() -> ArgSpec {
         .summary("List the union of these comma-separated ledger names instead of the bound ledger. \
             Names follow the ledger naming rules; surrounding spaces and repeated names are ignored. \
             A ledger without both viewer read grants is silently omitted. All filters apply to \
-            each selected ledger; parent numbers are resolved within each one. Paging is over \
-            the union, most recently updated first, then descending item number, ledger name \
-            and item IRI. The singular ledger binding keeps its meaning. JSON adds ledgers \
+            each selected ledger; parent numbers are resolved within each one. The items listing \
+            pages the union in the requested sort (default -modified). The singular ledger \
+            binding keeps its meaning. JSON adds ledgers \
             with the readable selected names (including empty ledgers).")
         .class(v::ext::XSD_STRING)
         .optional()
 }
+
+mod listing_sort;
 
 // --------------------------------------------------------------------------- items
 
@@ -1501,6 +1503,7 @@ impl Endpoint for ItemsEndpoint {
         let union = inv.inline_str("ledgers").is_ok();
         let bound = Ledger::from_bindings(inv.bindings)?;
         let want = wanted_face(inv, &READ_FACES)?;
+        let sort = listing_sort::Sort::parse(inv.inline_str("sort").ok())?;
         let mut filter = parsed_listing_filter(inv)?;
         filter.limit = parse_limit(inv, 50)?;
         filter.offset = parse_count(inv, "offset", 0)?;
@@ -1517,18 +1520,35 @@ impl Endpoint for ItemsEndpoint {
                 filter.limit
             };
             local.offset = if union { 0 } else { filter.offset };
-            entries.extend(
-                model::load_items(&client, &local)
-                    .await?
-                    .into_iter()
-                    .map(|item| (index, item)),
-            );
+            let mut matching = if sort.is_default() {
+                model::load_items(&client, &local).await?
+            } else {
+                model::load_matching_items(&client, &local).await?
+            };
+            if sort.has_landing() {
+                // Cross-ledger edges are link records in the source graph, not direct
+                // blocks triples. Read only the already authorized graph; the sorter
+                // ignores targets outside the matching readable selection.
+                let subjects: Vec<&str> = matching.iter().map(|item| item.iri.as_str()).collect();
+                let mut links = across::outbound_of(&client, &subjects).await?;
+                for item in &mut matching {
+                    for (predicate, target) in links.remove(&item.iri).unwrap_or_default() {
+                        if predicate == v::BLOCKS && !item.blocks.contains(&target) {
+                            item.blocks.push(target);
+                        }
+                    }
+                    item.blocks.sort();
+                }
+            }
+            entries.extend(matching.into_iter().map(|item| (index, item)));
             if want != TURTLE {
                 total = total.saturating_add(model::count_items(&client, &local).await?);
                 broken.extend(model::defects(&client).await?);
             }
         }
-        if union {
+        if !sort.is_default() {
+            sort.apply(&mut entries, &ledgers)?;
+        } else if union {
             // Each graph contributes its first offset + limit items. No later item can
             // reach this page. Resolve ties by ledger name, then IRI, independently of
             // the order and duplication of names in the argument.
@@ -1539,6 +1559,8 @@ impl Endpoint for ItemsEndpoint {
                     .then(ledgers[*ai].name().cmp(ledgers[*bi].name()))
                     .then(a.iri.cmp(&b.iri))
             });
+        }
+        if union || !sort.is_default() {
             entries = entries
                 .into_iter()
                 .skip(filter.offset)
@@ -1695,7 +1717,7 @@ impl Endpoint for ItemsEndpoint {
                 Description::new("ledger-items")
                     .title("The ledger, filtered")
                     .summary(
-                        "Every item matching the filter, most recently updated first. The \
+                        "Every item matching the filter, ordered by sort (default -modified). The \
                          filters are evaluated in the query, which is why the ordering policy \
                          behind `urn:iki:ledger:next` can stay small.",
                     )
@@ -1703,6 +1725,19 @@ impl Endpoint for ItemsEndpoint {
                     .verb(Verb::Meta)
                     .input(ledger_arg("items"))
                     .input(ledgers_arg()),
+            )
+            .input(
+                ArgSpec::new("sort")
+                    .summary(
+                        "Comma-separated priority, created, modified, number or landing; prefix a \
+                         key with - for descending order. Default -modified. Unset priority is \
+                         always last. Landing orders the matching readable blocks graph before \
+                         paging, with priority, ledger and number ties; a cycle is refused. \
+                         Other ties use descending number, ledger and IRI.",
+                    )
+                    .class(v::ext::XSD_STRING)
+                    .default_value("-modified")
+                    .optional(),
             )
             .input(
                 ArgSpec::new("limit")
@@ -1722,10 +1757,9 @@ impl Endpoint for ItemsEndpoint {
                 ArgSpec::new("offset")
                     .summary(
                         "How many matching items to skip, in the listing's order (default \
-                         0); the next page is at `offset` plus `limit`. ⚠ The order is \
-                         most recently updated first, so an item updated between two page \
-                         reads moves to the front and is missed or repeated: when the \
-                         whole set matters, read it as one page.",
+                         0); the next page is at `offset` plus `limit`. Changes to sort keys \
+                         or blocks between page reads can move rows, so an item can be \
+                         missed or repeated: when the whole set matters, read it as one page.",
                     )
                     .class(v::ext::XSD_INTEGER)
                     .default_value("0")

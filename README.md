@@ -758,6 +758,40 @@ source urn:iki:ledger:count priority=0,1,none without_priority=1 labels=ready st
 
 The count is the listing's total for the same filters; paging does not change it.
 
+## Sorting a listing
+
+`items sort=priority,-created` orders matching items by priority, then newest creation.
+The comma-separated keys are `priority`, `created`, `modified`, `number`, and `landing`.
+A key is ascending unless prefixed with `-`. Unset priority stays last in either direction,
+as in `next`. Remaining ties use descending item number, ascending ledger name, then IRI.
+The default is still `-modified`, including its existing tie breaks. Empty entries and
+unknown keys are refused with `sort` and all five accepted keys named in words.
+
+`landing` is a topological order of the `blocks` graph among the matching readable items:
+a blocker comes before the items it blocks. Each step chooses the available item with
+highest priority (unset last), then ascending ledger name, number and IRI. `-landing`
+reverses that order. A cycle refuses the listing, names the items in or depending on the
+cycle, and says how to remove a link or choose another sort. Links to items outside the
+filtered readable selection do not participate. Include the ledgers and filters needed
+for the landing plan; no unreadable graph is queried to complete it.
+
+Sorting happens before `limit` and `offset`, across a `ledgers=` union as well as a single
+ledger. Explicit sorts other than `-modified` read the complete matching set to order it;
+they cost more than the default's bounded page query. Plain, JSON and Turtle select the
+same page; Turtle is an unordered graph, so triple serialization does not encode row order.
+`count` still counts matching items independently of ordering.
+
+A host such as gonk should preserve `sort` in its page URL and pass it unchanged to the
+shared listing under the viewer's own capability. For example:
+
+```text
+source urn:iki:ledger:items sort=landing ledgers=alpha,beta status=open limit=50 offset=0 as=application/json
+source urn:iki:ledger:alpha:items sort=priority,-created as=application/json
+```
+
+This library adds no page, column headers or new resource names. Gonk's follow-on can set
+`sort` from its column headers and run its page accessibility checks in every theme.
+
 ## A listing across ledgers
 
 `items ledgers=alpha,beta` reads the union of the named ledgers. The plural argument
@@ -778,11 +812,11 @@ repeated names count once, and an empty name is refused. Readable empty or nonex
 ledgers contribute no items. A `parent` number is resolved separately within each selected
 ledger, following the single-ledger filter's lookup and refusal rules.
 
-The order is most recently updated first, then descending item number, ascending ledger
-name and item IRI for ties. `limit` and `offset` page the combined set, and `total` counts
+The default order is most recently updated first, then descending item number, ascending
+ledger name and item IRI for ties; `sort` selects another order. `limit` and `offset` page the combined set, and `total` counts
 the whole filtered union. As with a single-ledger listing, updates between page reads can
-move rows. Each graph contributes at most its first `offset + limit` matching items before
-the combined page is selected; deep offsets cost more work. Plain rows keep their existing
+move rows. With the default order, each graph contributes at most its first `offset + limit`
+matching items before the combined page is selected; deep offsets cost more work. Plain rows keep their existing
 `alpha#12` display (`#12` for `default`), and Turtle carries the selected page's item triples.
 
 The JSON `items` and `count` documents add `ledgers`, the sorted, unique names that passed
