@@ -888,7 +888,7 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
                     "NOT EXISTS {{ ?item <{}> ?anyPriority }}",
                     v::PRIORITY
                 )),
-                Some(level @ 0..=4) => levels.push(level.to_string()),
+                Some(level @ 0..=4) => levels.push(sparql::integer(i64::from(*level))),
                 Some(level) => {
                     return Err(Error::InvalidArgument {
                         name: name.to_string(),
