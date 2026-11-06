@@ -29,6 +29,11 @@ pub struct Filter {
     pub labels: Vec<String>,
     /// Must carry NONE of these labels.
     pub without: Vec<String>,
+    /// Must match ANY of these priorities (0–4); `None` means no priority triple.
+    /// An empty list imposes no constraint.
+    pub priority: Vec<Option<u8>>,
+    /// Must match NONE of these priorities; `None` excludes items without a priority.
+    pub without_priority: Vec<Option<u8>>,
     /// Must be `ledger:about` this resource IRI.
     pub about: Option<String>,
     /// Must be a child of this item: carry `ledger:parent` to this item IRI (ledger #1454).
@@ -867,6 +872,46 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
             v::LABEL,
             literal(label)
         ));
+    }
+    for (name, priorities, exclude) in [
+        ("priority", &filter.priority, false),
+        ("without_priority", &filter.without_priority, true),
+    ] {
+        if priorities.is_empty() {
+            continue;
+        }
+        let mut alternatives = Vec::new();
+        let mut levels = Vec::new();
+        for priority in priorities {
+            match priority {
+                None => alternatives.push(format!(
+                    "NOT EXISTS {{ ?item <{}> ?anyPriority }}",
+                    v::PRIORITY
+                )),
+                Some(level @ 0..=4) => levels.push(level.to_string()),
+                Some(level) => {
+                    return Err(Error::InvalidArgument {
+                        name: name.to_string(),
+                        detail: format!(
+                            "`{level}` is not one of 0, 1, 2, 3, 4, none (no priority set)"
+                        ),
+                    });
+                }
+            }
+        }
+        if !levels.is_empty() {
+            alternatives.push(format!(
+                "EXISTS {{ ?item <{}> ?matchedPriority . FILTER(?matchedPriority IN ({})) }}",
+                v::PRIORITY,
+                levels.join(", ")
+            ));
+        }
+        let expression = alternatives.join(" || ");
+        if exclude {
+            clauses.push_str(&format!("FILTER(!({expression}))\n"));
+        } else {
+            clauses.push_str(&format!("FILTER({expression})\n"));
+        }
     }
     if let Some(about) = &filter.about {
         clauses.push_str(&format!(

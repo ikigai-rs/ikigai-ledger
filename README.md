@@ -734,6 +734,29 @@ milliseconds): `items limit=1 as=application/json` 480 ms debug / 55 ms release,
 check alone is 289 / 31 ms; `count as=application/json` 31 / 3.3 ms. Every read here is
 cacheable, so these are the cold reads a consumer pays after each write.
 
+## Filter a listing by priority
+
+`items` and `count` accept `priority=0,1,none`: a comma-separated list of priorities
+from `0` (highest) through `4` (lowest), plus `none` for items with no priority set.
+An item matches any listed value. `without_priority=2,none` excludes any matching
+item. Both arguments narrow the same selection as `labels`, `without`, `status`,
+`text`, and every other listing filter, on a single ledger or a `ledgers=` union.
+Omitting either argument adds no constraint; if both include the same value, the
+exclusion wins. Priority values are separate from labels: a label named `p1` does
+not mean priority 1.
+
+Spaces around values are trimmed, and repeated values do not change the result.
+Empty entries and unknown values are refused with the argument named and the
+sentence `` `p1` is not one of 0, 1, 2, 3, 4, none (no priority set) `` (using the
+invalid value). For example:
+
+```text
+source urn:iki:ledger:items priority=0,1,none without_priority=1 labels=ready status=open
+source urn:iki:ledger:count priority=0,1,none without_priority=1 labels=ready status=open
+```
+
+The count is the listing's total for the same filters; paging does not change it.
+
 ## A listing across ledgers
 
 `items ledgers=alpha,beta` reads the union of the named ledgers. The plural argument
