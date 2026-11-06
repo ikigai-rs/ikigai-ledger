@@ -44,7 +44,7 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
 - **Write answers** (`src/endpoints.rs`): one sentence each, such as
   `#1 urn:iki:ledger:default:item:…`, `commented on #1 (…)`, `linked #1 blocks #2`,
   `closed #2 (done)`, `closed #2 done (2 evidence)`, `closed #2 duplicate of #1`,
-  `#1 claimed by worker-1`, `#1: imported events recorded 3, already recorded 1; history only, so
+  `#1 claimed by worker-1, epoch 1`, `#1: imported events recorded 3, already recorded 1; history only, so
   the item itself did not change`.
 - **The doctor and lifecycles**: the doctor's findings, each with a `remedy:` line; a
   lifecycle's states, one per line (`Lifecycle::plain` in `src/lifecycle.rs`), each saying in
@@ -52,7 +52,15 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
 - **Refusals**: `InvalidArgument` naming the argument with a sentence that says what is
   accepted (`` `x` is not one of open, closed, all ``, `` `9` is not 0 (highest) … 4 (lowest) ``,
   `` `triag` is not a drain of the lifecycle `kata-flight` this ledger uses; one of triage, … ``),
-  `NotFound` for an unknown item, and errors that name what is missing (a store, a clock).
+  `NotFound` for an unknown item, and errors that name what is missing (a store, a clock); a
+  write sent with a stale `epoch=` is a `Conflict` sentence naming the item, its current holder
+  and epoch, the epoch sent, and that nothing was written (`#1 is held by worker-2 at epoch 2,
+  not epoch 1: the claim this write was sent under was superseded, so nothing was written`), or,
+  on an unclaimed item, `#1 is not claimed (its last claim was epoch 2), so epoch 1 is not
+  current and nothing was written`.
+- **The claim epoch check** (`source urn:iki:ledger:claim item= epoch=`): one line whose first
+  words say the answer, `current:`, `superseded:` or `no claim:`, then a sentence naming the
+  holder and the epoch.
 
 Not this repository's: the titles, bodies and comments people write, which are shown as
 written; and how a host or a terminal presents any of this.
@@ -134,3 +142,4 @@ technology you used, if you are comfortable sharing them. Anything security-sens
 | 2026-11-02 | A state event's lifecycle version (ledger #2864) adds words to a state change's history line, `lifecycle version 2` or `no lifecycle version recorded (written before 0.18.0)`, before who did it, so that line reads longer; refusals at load, one sentence each, that name the lifecycle and what to add or fix. Other history lines and the other plain faces did not change: `tests/faces.rs` passes unchanged. `tests/lifecycle_version.rs` pins the new text byte for byte; no assistive technology was used. |
 | 2026-11-02 | `next drain=` and `next state=` (ledger #2865) add a refusal for each, one sentence that names the value, the lifecycle, every drain or state it accepts and the lifecycle's IRI. A filtered `next` reads as `next` does, with fewer items on it, and a filter that admits nothing says the existing `nothing is ready` sentence. No plain face changed: `tests/faces.rs` passes unchanged. `tests/next_state_filter.rs` pins the refusals byte for byte; no assistive technology was used. |
 | 2026-11-06 | A listing across ledgers (ledger #3190) adds `ledgers=` to `items` and `count`. Existing row shapes, page footers and single-ledger faces remain unchanged. A malformed comma-separated name is refused with the `ledgers` argument named and the ledger naming rule in words. `tests/listing_union.rs` checks the union, omitted unreadable ledgers in all three faces, shared filters, global paging, ties, and comments and link numbers from each row's graph. `tests/faces.rs` pins the existing plain and JSON output unchanged. This repository emits text and has no page, themes or browser accessibility checks; the gonk page's integration and checks in all themes belong to its follow-on. No browser, automated accessibility checker or assistive technology was used. |
+| 2026-11-06 | Claim epochs (ledger #3205) end the claim answer with `, epoch N` after everything it said before, so `claimed by <holder>` still reads and parses first; add an `epoch:` detail line only while an item is claimed; add the epoch check's one-line answer, whose first words (`current:`, `superseded:`, `no claim:`) say the result; and add the stale-epoch `Conflict`, one sentence naming the item, the current holder and epoch, the epoch sent, and that nothing was written. `tests/claim_epoch.rs` pins the new text; no assistive technology was used. |

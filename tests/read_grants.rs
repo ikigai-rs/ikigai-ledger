@@ -124,6 +124,8 @@ fn read_script() -> Vec<(&'static str, Verb, String)> {
         ("ledger-item-closed", Verb::Exists, at("item:1:closed")),
         ("ledger-item-history", Verb::Source, at("item:1:history")),
         ("ledger-doctor", Verb::Source, at("doctor")),
+        // The claim epoch check (ledger #3205), a read on the claim resource.
+        ("ledger-claim", Verb::Source, at("claim")),
         (
             "ledger-ledgers",
             Verb::Source,
@@ -189,7 +191,12 @@ fn the_read_row_alone_reads_every_read_resource() {
     let kernel = seeded();
     let caller = read_row(LEDGER);
     for (endpoint, verb, iri) in &script {
-        let answered = try_as(&kernel, &caller, *verb, iri, &[]);
+        let args: &[(&str, &str)] = if *endpoint == "ledger-claim" {
+            &[("item", "1"), ("epoch", "1")]
+        } else {
+            &[]
+        };
+        let answered = try_as(&kernel, &caller, *verb, iri, args);
         assert!(
             answered.is_ok(),
             "{} at {iri} is refused the read row: {answered:?}",

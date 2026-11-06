@@ -124,6 +124,12 @@ pub struct Claim {
     /// 0.8.0 (ledger #1199).
     #[serde(default)]
     pub principal: Option<String>,
+    /// The claim's fencing epoch (ledger #3205): one more than the item's previous epoch at
+    /// every grant and takeover, kept by a renewal, never lower than an earlier claim's. A
+    /// write sent with `epoch=` is refused once this has moved on. `null` only for a claim
+    /// taken before 0.19.0 that has not been granted again since.
+    #[serde(default)]
+    pub epoch: Option<u64>,
 }
 
 /// One outbound edge from an item.
@@ -787,6 +793,7 @@ pub(crate) fn item(
             expires: item.lease_expires.map(sparql::iso8601),
             lease: item.lease.clone(),
             principal: item.claim_principal.clone(),
+            epoch: item.claim_epoch,
         }),
         created: sparql::iso8601(item.created),
         modified: sparql::iso8601(item.modified),

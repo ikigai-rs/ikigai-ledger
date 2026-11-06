@@ -1295,6 +1295,44 @@ $ delete urn:iki:ledger:claim item=12 from=worker-1
 #12 released
 ```
 
+### ★ A claim carries a fencing epoch, and a stale holder's writes are refused (ledger #3205)
+
+A lane that stalls past its lease, is taken over, and then wakes still spells its holder's
+name, so nothing in a name stops it acting on authority it lost. Every claim now carries an
+**epoch** (`ledger:claimEpoch`): each grant of a claim on an unclaimed item and each takeover
+sets it to one more than the item's previous epoch, inside the same guarded update, so of two
+racing takeovers only the winner raises it. A renewal keeps it. A release and a close leave it
+stored, so it never goes down: the next claim is higher still. The claim answer ends with it,
+and the item's faces carry it while the item is claimed (`epoch:` in the plain detail,
+`claim.epoch` in JSON, `ledger:claimEpoch` in Turtle).
+
+```text
+$ sink urn:iki:ledger:claim item=12 lease=30m <<< "worker-1"
+#12 claimed by worker-1 until 2026-10-09T16:00:00.000Z, epoch 4
+$ source urn:iki:ledger:claim item=12 epoch=4
+current: #12 is held by worker-1 at epoch 4
+```
+
+The check is a read (`source …:claim item= epoch=`) under the ledger's read grant, so a
+dispatcher can ask without being the holder. It answers one line starting `current:`,
+`superseded:` (naming the holder and epoch now) or `no claim:`.
+
+The writes a holder makes about its item (`comment`, a hand-back, `close`, a claim renewal and
+`delete …:claim`) take an optional **`epoch=`**. When given and the item's claim is no longer at
+that epoch, the write is refused as a `Conflict`, and nothing is written:
+
+```text
+$ sink urn:iki:ledger:comment item=12 handback=true epoch=4 <<< "done, please check"
+Conflict: #12 is held by worker-2 at epoch 5, not epoch 4: the claim this write was sent under was superseded, so nothing was written
+```
+
+On an unclaimed item the sentence is `#12 is not claimed (its last claim was epoch 5), so epoch 4
+is not current and nothing was written`. Without `epoch=` every write behaves as before. A
+renewal and a release also carry the epoch as a clause of their one guarded update, so a
+takeover between the check and the write still refuses them; a comment and a close check it
+just before they write. The refusal is a `Conflict`, not a dedicated kind: ledger #1475 (typed
+refusal kinds) has not landed.
+
 ### ★ The kind is the HOST's to stamp, and a direct embedder owns that
 
 `claim` declares **no `kind` argument and ignores one if it is sent**: a kind the caller could
@@ -2076,6 +2114,15 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 **A host must bind this crate's space for the resources to resolve.** It composes with
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
+
+### Unreleased: a claim carries a fencing epoch (ledger #3205)
+
+Every grant and takeover sets the claim's epoch one higher than the item's previous one; a
+renewal keeps it and it never goes down. The claim answer ends `, epoch N`, the item's faces
+carry it, `source …:claim item= epoch=` answers whether it is current, and `comment`, `close`,
+a claim renewal and a release take an optional `epoch=` that refuses a stale holder's write
+(Conflict) and writes nothing. Without `epoch=` nothing changes. See "A claim carries a fencing
+epoch" above. **Vocabulary.** New: `claimEpoch`.
 
 ### Unreleased: a reject names the hand-back it rejected (ledger #3071)
 
