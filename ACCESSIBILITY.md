@@ -10,7 +10,7 @@ and how to report a barrier. It is not a conformance claim. Adapted from the
 | Status | Evaluation in progress. No conformance claim. |
 | Owner | the maintainers of this repository |
 | Report a barrier | [a GitHub issue](https://github.com/ikigai-rs/ikigai-ledger/issues/new?labels=accessibility) with the `accessibility` label; anything security-sensitive through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-ledger/security/advisories/new) |
-| Last reviewed | 2026-10-31 |
+| Last reviewed | 2026-11-06 |
 
 ## What it emits that people read
 
@@ -25,7 +25,10 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   under its stamp, naming that comment. Whether an author or a date is verified or claimed is said in words in
   parentheses (`(verified)`, `(claimed by a delegate)`, `(claimed)`), never by a sign alone.
 - **Listings** (`items`, `ledgers`, `count`): item lines and a total (`3 item(s)`); `count`
-  answers a bare number.
+  answers a bare number. `items ledgers=alpha,beta` combines readable selected ledgers
+  into one filtered page, keeping each row's existing `alpha#12` display (`#12` for
+  `default`) and the same page and total footer. Unreadable ledgers are omitted silently;
+  no names or warnings for them are emitted.
 - **`urn:iki:ledger:next`** (`Selection::plain` in `src/select.rs`): ranked item lines, each
   with its score and its reasons in words, then the policy and what was excluded and why
   (`not #1: blocked by #2`), or `nothing is ready (…)` with the reasons.
@@ -130,3 +133,4 @@ technology you used, if you are comfortable sharing them. Anything security-sens
 | 2026-11-02 | A lifecycle's legal moves (ledger #2863) add a `Conflict` refusal that names in words the lifecycle, the pair, every legal move from `from` (or that there is none) and that nothing was written; refusals at load, one sentence each; and, only for a lifecycle that declares moves, `moves to: …` at the end of each state's line on the plain lifecycle face. A lifecycle with no moves, the built-in included, reads as it did, and the other plain faces did not change: `tests/faces.rs` passes unchanged. `tests/lifecycle_moves.rs` pins the new text byte for byte; no assistive technology was used. |
 | 2026-11-02 | A state event's lifecycle version (ledger #2864) adds words to a state change's history line, `lifecycle version 2` or `no lifecycle version recorded (written before 0.18.0)`, before who did it, so that line reads longer; refusals at load, one sentence each, that name the lifecycle and what to add or fix. Other history lines and the other plain faces did not change: `tests/faces.rs` passes unchanged. `tests/lifecycle_version.rs` pins the new text byte for byte; no assistive technology was used. |
 | 2026-11-02 | `next drain=` and `next state=` (ledger #2865) add a refusal for each, one sentence that names the value, the lifecycle, every drain or state it accepts and the lifecycle's IRI. A filtered `next` reads as `next` does, with fewer items on it, and a filter that admits nothing says the existing `nothing is ready` sentence. No plain face changed: `tests/faces.rs` passes unchanged. `tests/next_state_filter.rs` pins the refusals byte for byte; no assistive technology was used. |
+| 2026-11-06 | A listing across ledgers (ledger #3190) adds `ledgers=` to `items` and `count`. Existing row shapes, page footers and single-ledger faces remain unchanged. A malformed comma-separated name is refused with the `ledgers` argument named and the ledger naming rule in words. `tests/listing_union.rs` checks the union, omitted unreadable ledgers in all three faces, shared filters, global paging, ties, and comments and link numbers from each row's graph. `tests/faces.rs` pins the existing plain and JSON output unchanged. This repository emits text and has no page, themes or browser accessibility checks; the gonk page's integration and checks in all themes belong to its follow-on. No browser, automated accessibility checker or assistive technology was used. |

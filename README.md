@@ -734,6 +734,40 @@ milliseconds): `items limit=1 as=application/json` 480 ms debug / 55 ms release,
 check alone is 289 / 31 ms; `count as=application/json` 31 / 3.3 ms. Every read here is
 cacheable, so these are the cold reads a consumer pays after each write.
 
+## A listing across ledgers
+
+`items ledgers=alpha,beta` reads the union of the named ledgers. The plural argument
+selects the ledgers instead of the resource's bound ledger; without it, the existing
+single-ledger listing is unchanged. The singular `ledger` binding still names the resource.
+For example, a page or script can read:
+
+```text
+source urn:iki:ledger:items ledgers=alpha,beta status=open labels=ready without=blocked text=fix limit=50 offset=0 as=application/json
+source urn:iki:ledger:count ledgers=alpha,beta status=open labels=ready without=blocked text=fix as=application/json
+```
+
+Every selected ledger uses the same filters. Each read uses the viewer's own capability,
+including the store graph grant: a ledger missing either read grant is silently omitted,
+without querying it. The resource's bound ledger need not be readable when `ledgers=` is
+provided. Names follow the usual ledger naming rules; surrounding spaces are trimmed,
+repeated names count once, and an empty name is refused. Readable empty or nonexistent
+ledgers contribute no items. A `parent` number is resolved separately within each selected
+ledger, following the single-ledger filter's lookup and refusal rules.
+
+The order is most recently updated first, then descending item number, ascending ledger
+name and item IRI for ties. `limit` and `offset` page the combined set, and `total` counts
+the whole filtered union. As with a single-ledger listing, updates between page reads can
+move rows. Each graph contributes at most its first `offset + limit` matching items before
+the combined page is selected; deep offsets cost more work. Plain rows keep their existing
+`alpha#12` display (`#12` for `default`), and Turtle carries the selected page's item triples.
+
+The JSON `items` and `count` documents add `ledgers`, the sorted, unique names that passed
+both read-grant checks, including readable empty ledgers. If none pass, this is `[]` and
+the result is empty. The existing `ledger` field remains the resource's binding, and each
+item's `iri` and `display` identify its own ledger. `ledgers` is absent on a read without
+the plural argument, so existing single-ledger documents keep their shape. Comments,
+links, defects and totals are read from each row's own graph.
+
 ## Assume an editor got there first
 
 A ledger whose items can only change through its own `Sink` is not what anyone wants from

@@ -1434,6 +1434,48 @@ pub(crate) fn unsupported(id: &str, verb: Verb) -> Error {
     Error::Endpoint(format!("`{id}` does not answer {verb:?}"))
 }
 
+/// Explicit selection is a union, not a change to the singular resource binding.
+/// Check both grants before issuing any graph request; omitted ledgers reveal nothing.
+fn listing_ledgers(inv: &Invocation<'_>) -> Result<Vec<Ledger>> {
+    let Ok(names) = inv.inline_str("ledgers") else {
+        return Ok(vec![ledger_for(inv, Need::Read)?]);
+    };
+    let mut ledgers = names
+        .split(',')
+        .map(|name| {
+            Ledger::parse(name.trim()).map_err(|error| match error {
+                Error::InvalidArgument { detail, .. } => Error::InvalidArgument {
+                    name: "ledgers".to_string(),
+                    detail,
+                },
+                other => other,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ledgers.sort();
+    ledgers.dedup();
+    ledgers.retain(|ledger| {
+        inv.capability.allows(&ledger.cap_read())
+            && inv
+                .capability
+                .allows(&ikigai_store::cap_read_graph(&ledger.graph()))
+    });
+    Ok(ledgers)
+}
+
+fn ledgers_arg() -> ArgSpec {
+    ArgSpec::new("ledgers")
+        .summary("List the union of these comma-separated ledger names instead of the bound ledger. \
+            Names follow the ledger naming rules; surrounding spaces and repeated names are ignored. \
+            A ledger without both viewer read grants is silently omitted. All filters apply to \
+            each selected ledger; parent numbers are resolved within each one. Paging is over \
+            the union, most recently updated first, then descending item number, ledger name \
+            and item IRI. The singular ledger binding keeps its meaning. JSON adds ledgers \
+            with the readable selected names (including empty ledgers).")
+        .class(v::ext::XSD_STRING)
+        .optional()
+}
+
 // --------------------------------------------------------------------------- items
 
 #[derive(Clone)]
@@ -1445,18 +1487,82 @@ impl Endpoint for ItemsEndpoint {
         if inv.request.verb != Verb::Source {
             return Err(unsupported("ledger-items", inv.request.verb));
         }
-        let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
+        let ledgers = listing_ledgers(inv)?;
+        let union = inv.inline_str("ledgers").is_ok();
+        let bound = Ledger::from_bindings(inv.bindings)?;
         let want = wanted_face(inv, &READ_FACES)?;
-        let mut filter = listing_filter(inv, &client).await?;
+        let mut filter = parsed_listing_filter(inv)?;
         filter.limit = parse_limit(inv, 50)?;
         filter.offset = parse_count(inv, "offset", 0)?;
-        let mut items = model::load_items(&client, &filter).await?;
-        // ★ A row is the item object `item:{id}` shows (ledger #2927): its links into other
-        // ledgers and the mirrors of theirs, read for the whole page in two queries. Until
-        // 0.18.0 only the item's own read added them, so a row held its local links alone. The
-        // plain line names no edges, so it costs nothing there.
+        let limit = model::page_limit(&filter);
+        let mut entries = Vec::new();
+        let mut total = 0usize;
+        let mut broken = Vec::new();
+        for (index, ledger) in ledgers.iter().enumerate() {
+            let client = StoreClient::new(inv, ledger.clone());
+            let mut local = listing_filter(inv, &client).await?;
+            local.limit = if union {
+                filter.offset.saturating_add(limit)
+            } else {
+                filter.limit
+            };
+            local.offset = if union { 0 } else { filter.offset };
+            entries.extend(
+                model::load_items(&client, &local)
+                    .await?
+                    .into_iter()
+                    .map(|item| (index, item)),
+            );
+            if want != TURTLE {
+                total = total.saturating_add(model::count_items(&client, &local).await?);
+                broken.extend(model::defects(&client).await?);
+            }
+        }
+        if union {
+            // Each graph contributes its first offset + limit items. No later item can
+            // reach this page. Resolve ties by ledger name, then IRI, independently of
+            // the order and duplication of names in the argument.
+            entries.sort_by(|(ai, a), (bi, b)| {
+                b.modified
+                    .cmp(&a.modified)
+                    .then(b.number.cmp(&a.number))
+                    .then(ledgers[*ai].name().cmp(ledgers[*bi].name()))
+                    .then(a.iri.cmp(&b.iri))
+            });
+            entries = entries
+                .into_iter()
+                .skip(filter.offset)
+                .take(limit)
+                .collect();
+        }
+        let (sources, mut items): (Vec<usize>, Vec<Item>) = entries.into_iter().unzip();
+        // Decorate and render only this page, through each row's own graph client.
+        let mut rendered = Vec::new();
         if want != PLAIN {
-            across::decorate_all(inv, &client, &mut items).await?;
+            for (index, ledger) in ledgers.iter().enumerate() {
+                let client = StoreClient::new(inv, ledger.clone());
+                let positions: Vec<usize> = sources
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, source)| (*source == index).then_some(position))
+                    .collect();
+                if positions.is_empty() {
+                    continue;
+                }
+                let mut group: Vec<Item> = positions.iter().map(|p| items[*p].clone()).collect();
+                across::decorate_all(inv, &client, &mut group).await?;
+                for (position, item) in positions.iter().zip(group) {
+                    items[*position] = item;
+                }
+                if want == JSON {
+                    let rows: Vec<&Item> = positions.iter().map(|p| &items[*p]).collect();
+                    rendered.extend(
+                        positions
+                            .into_iter()
+                            .zip(json::items(&client, &rows).await?),
+                    );
+                }
+            }
         }
         if want == TURTLE {
             let mut graph = Graph::new();
@@ -1466,19 +1572,27 @@ impl Endpoint for ItemsEndpoint {
             return face(String::new(), Some(graph), want);
         }
         if want == JSON {
-            let rows: Vec<&Item> = items.iter().collect();
-            let rendered = json::items(&client, &rows).await?;
+            rendered.sort_by_key(|(position, _)| *position);
+            let rendered: Vec<json::Item> = rendered.into_iter().map(|(_, item)| item).collect();
             let doc = json::ItemsDocument {
                 schema: json::SCHEMA,
-                ledger: client.ledger().name().to_string(),
+                ledger: bound.name().to_string(),
+                ledgers: union.then(|| {
+                    ledgers
+                        .iter()
+                        .map(|ledger| ledger.name().to_string())
+                        .collect()
+                }),
                 count: rendered.len(),
-                total: Some(model::count_items(&client, &filter).await?),
+                total: Some(total),
                 offset: filter.offset,
                 items: rendered,
-                unreadable: model::defects(&client)
-                    .await?
-                    .into_iter()
-                    .map(|(iri, defects)| json::Unreadable { iri, defects })
+                unreadable: broken
+                    .iter()
+                    .map(|(iri, defects)| json::Unreadable {
+                        iri: iri.clone(),
+                        defects: defects.clone(),
+                    })
                     .collect(),
             };
             return Ok(json_face(json::render(&doc)?));
@@ -1489,8 +1603,6 @@ impl Endpoint for ItemsEndpoint {
         // times smaller than it was. The total is a COUNT query, never `items.len()`, and a
         // page smaller than the set names the argument that reaches the rest. The whole set
         // on one page keeps the old `N item(s)` line, which is grepped.
-        let total = model::count_items(&client, &filter).await?;
-        let limit = model::page_limit(&filter);
         let mut text = if total == 0 {
             "no items match\n".to_string()
         } else if items.is_empty() {
@@ -1549,10 +1661,10 @@ impl Endpoint for ItemsEndpoint {
                 ));
             }
         }
-        let broken = model::defects(&client).await?;
         if !broken.is_empty() {
+            let corpus = if union { "selected graphs" } else { "graph" };
             text.push_str(&format!(
-                "\n⚠ {} item(s) in the graph could not be read and are not listed above \
+                "\n⚠ {} item(s) in the {corpus} could not be read and are not listed above \
                  (a write that did not pass through a ledger Sink):\n",
                 broken.len()
             ));
@@ -1579,7 +1691,8 @@ impl Endpoint for ItemsEndpoint {
                     )
                     .verb(Verb::Source)
                     .verb(Verb::Meta)
-                    .input(ledger_arg("items")),
+                    .input(ledger_arg("items"))
+                    .input(ledgers_arg()),
             )
             .input(
                 ArgSpec::new("limit")
@@ -1646,14 +1759,25 @@ impl Endpoint for CountEndpoint {
         if inv.request.verb != Verb::Source {
             return Err(unsupported("ledger-count", inv.request.verb));
         }
-        let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
+        let ledgers = listing_ledgers(inv)?;
         let want = wanted_face(inv, &COUNT_FACES)?;
-        let filter = listing_filter(inv, &client).await?;
-        let total = model::count_items(&client, &filter).await?;
+        parsed_listing_filter(inv)?;
+        let mut total = 0usize;
+        for ledger in &ledgers {
+            let client = StoreClient::new(inv, ledger.clone());
+            let filter = listing_filter(inv, &client).await?;
+            total = total.saturating_add(model::count_items(&client, &filter).await?);
+        }
         if want == JSON {
             return Ok(json_face(json::render(&json::CountDocument {
                 schema: json::SCHEMA,
-                ledger: client.ledger().name().to_string(),
+                ledger: Ledger::from_bindings(inv.bindings)?.name().to_string(),
+                ledgers: inv.inline_str("ledgers").is_ok().then(|| {
+                    ledgers
+                        .iter()
+                        .map(|ledger| ledger.name().to_string())
+                        .collect()
+                }),
                 total,
             })?));
         }
@@ -1672,11 +1796,12 @@ impl Endpoint for CountEndpoint {
                     .summary(
                         "How many items the filter admits: `items`' total for the same \
                          arguments, without the page and without the corpus check, so it \
-                         costs one COUNT query. The plain face is the bare number.",
+                         costs one COUNT query per readable selected ledger. The plain face is the bare number.",
                     )
                     .verb(Verb::Source)
                     .verb(Verb::Meta)
-                    .input(ledger_arg("count")),
+                    .input(ledger_arg("count"))
+                    .input(ledgers_arg()),
             )
             .input(as_arg(&COUNT_FACES))
             .output(PLAIN)
@@ -1783,8 +1908,15 @@ async fn listing_filter(inv: &Invocation<'_>, client: &StoreClient<'_, '_>) -> R
         None | Some("") => None,
         Some(reference) => Some(item_iri(client, reference, "parent").await?),
     };
+    let mut filter = parsed_listing_filter(inv)?;
+    filter.parent = parent;
+    Ok(filter)
+}
+
+/// Validate filters even when no selected ledger is readable, without querying it.
+fn parsed_listing_filter(inv: &Invocation<'_>) -> Result<Filter> {
     Ok(Filter {
-        parent,
+        parent: None,
         status: match inv.inline_str("status").unwrap_or("open") {
             "closed" => Status::Closed,
             "all" => Status::All,

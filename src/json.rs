@@ -344,8 +344,12 @@ pub struct Unreadable {
 pub struct ItemsDocument {
     /// [`SCHEMA`].
     pub schema: u32,
-    /// The ledger's name.
+    /// The resource's bound ledger name, even when `ledgers=` selects a union.
     pub ledger: String,
+    /// Readable selected names when `ledgers=` requests a union, sorted and unique.
+    /// Absent for a single-ledger read; `ledger` remains the resource's binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledgers: Option<Vec<String>>,
     /// How many items are in `items` — the PAGE, after `offset` and `limit`. Not the total.
     pub count: usize,
     /// How many items the filter admits, whatever the page — a COUNT, so `count < total`
@@ -376,8 +380,12 @@ pub struct ItemsDocument {
 pub struct CountDocument {
     /// [`SCHEMA`].
     pub schema: u32,
-    /// The ledger's name.
+    /// The resource's bound ledger name, even when `ledgers=` selects a union.
     pub ledger: String,
+    /// Readable selected names when `ledgers=` requests a union, sorted and unique.
+    /// Absent for a single-ledger read; `ledger` remains the resource's binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledgers: Option<Vec<String>>,
     /// How many items the filter admits.
     pub total: usize,
 }

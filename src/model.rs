@@ -1132,7 +1132,7 @@ async fn page_iris(
 ) -> Result<Vec<String>> {
     let query = format!(
         "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {} }} \
-         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) LIMIT {limit} OFFSET {offset}",
+         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET {offset}",
         client.in_graph(&format!(
             "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
              OPTIONAL {{ ?item <{modified}> ?modified }}\n{filters}",
@@ -2071,8 +2071,13 @@ fn items_from_rows(rows: &[Row]) -> Vec<Item> {
         .iter()
         .filter_map(|iri| item_from_rows(&groups[iri]))
         .collect();
-    // Stable, so equal keys keep the store's order.
-    items.sort_by(|a, b| b.modified.cmp(&a.modified).then(b.number.cmp(&a.number)));
+    // Match the page query, including an IRI tie-break for duplicate numbers.
+    items.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then(b.number.cmp(&a.number))
+            .then(a.iri.cmp(&b.iri))
+    });
     items
 }
 
