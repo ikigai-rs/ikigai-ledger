@@ -116,7 +116,9 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
     // id; a claimed date alone is also a link or a state move an importer dated (ledger #2934),
     // which changed its item.
     let imported = node.one(v::EVENT_KEY).is_some();
-    let claimed = node.one(v::CREATED_SOURCE).is_some();
+    // All event kinds follow the same date rule; status events mark their source date
+    // with closedAtSource, while other events use createdSource.
+    let claimed = node.one(v::CREATED_SOURCE).is_some() || node.one(v::CLOSED_AT_SOURCE).is_some();
     let lifecycle_version = (kind == "state" && !imported).then(|| node.one(v::LIFECYCLE_VERSION));
     json::HistoryEvent {
         iri,

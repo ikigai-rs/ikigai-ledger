@@ -611,3 +611,68 @@ fn a_dated_unlink_across_ledgers_lands_on_its_event() {
     // The target is no longer blocked.
     has(&source(&kernel, &at(LEDGER, "next"), &[]), "The target");
 }
+
+/// Status events use closedAtSource for both closes and reopens. Both history faces
+/// must distinguish their source date from the time the importer committed the write.
+fn status_history_marks_claimed_dates(reopened: bool) {
+    let kernel = kernel();
+    file(&kernel, LEDGER, "Dated status history");
+    try_as(
+        &kernel,
+        &writer(IMPORTER),
+        Verb::Sink,
+        &at(LEDGER, "close"),
+        &[("item", "1"), ("closed-at", EARLIER)],
+    )
+    .unwrap();
+    let (kind, date) = if reopened {
+        reopen().send(&kernel, IMPORTER, "1", Some(LATER)).unwrap();
+        ("reopened", "2020-03-01T00:00:00.000Z")
+    } else {
+        ("closed", "2020-01-15T00:00:00.000Z")
+    };
+    let history = source(&kernel, &at(LEDGER, "item:1:history"), &[]);
+    has(&history, &format!("{date} (claimed)  {kind}"));
+    let event = events(&kernel, "1", kind).pop().expect("a status event");
+    assert_eq!(event["at"], date);
+    assert!(
+        event["committed"]
+            .as_str()
+            .is_some_and(|at| at.starts_with("2026-")),
+        "the importer commit time must be shown: {event}"
+    );
+    assert!(
+        event.get("imported").is_none(),
+        "this write changed the item"
+    );
+
+    // An importer making the same writes without source dates still stamps now.
+    file(&kernel, LEDGER, "Undated status history");
+    try_as(
+        &kernel,
+        &writer(IMPORTER),
+        Verb::Sink,
+        &at(LEDGER, "close"),
+        &[("item", "2")],
+    )
+    .unwrap();
+    if reopened {
+        reopen().send(&kernel, IMPORTER, "2", None).unwrap();
+    }
+    let event = events(&kernel, "2", kind)
+        .pop()
+        .expect("an undated status event");
+    assert_eq!(event["committed"], serde_json::Value::Null);
+    let history = source(&kernel, &at(LEDGER, "item:2:history"), &[]);
+    assert!(!history.contains("(claimed)"), "{history}");
+}
+
+#[test]
+fn a_dated_close_history_marks_its_claimed_date() {
+    status_history_marks_claimed_dates(false);
+}
+
+#[test]
+fn a_dated_reopen_history_marks_its_claimed_date() {
+    status_history_marks_claimed_dates(true);
+}

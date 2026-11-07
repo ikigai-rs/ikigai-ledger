@@ -536,7 +536,7 @@ fn an_importer_sends_closed_at_and_evidence_together() {
     let plain = source(&kernel, "urn:iki:ledger:item:1:history", &[]);
     assert!(
         plain.contains(&format!(
-            "2026-01-05T10:00:00.000Z  closed done, evidence {COMMIT}"
+            "2026-01-05T10:00:00.000Z (claimed)  closed done, evidence {COMMIT}"
         )),
         "{plain}"
     );
