@@ -4060,13 +4060,6 @@ impl Endpoint for CloseEndpoint {
         // it names is retracted LAST, `claimedBy` after every other field: each operation
         // finds the claim the fence names until the close is otherwise complete, so the batch
         // lands whole or not at all.
-        let fence = fence_clause(&item.iri, epoch);
-        let still_open = format!(
-            "FILTER NOT EXISTS {{ <{}> <{}> <{}> }} {fence}",
-            item.iri,
-            v::STATUS,
-            v::CLOSED
-        );
         let who =
             attribution::resolve(inv, &client, self.participants.as_deref(), Dates::None, now)
                 .await?;
@@ -4080,91 +4073,119 @@ impl Endpoint for CloseEndpoint {
             now,
         )
         .await?;
-        let (event, event_iri) = counts::status_event_when(
-            &client,
-            &item.iri,
-            v::CLOSED,
-            now,
-            &still_open,
-            &who,
-            claimed,
-        )?;
-        let record = client.ledger().comment(&mint_id(now)?);
-        let mut ops = vec![
-            // Editing the verdict of an already closed item must not move its close time.
-            event,
-            replace_one_when(
-                &client,
-                &item.iri,
-                v::CLOSED_AT,
-                &datetime(claimed.unwrap_or(now)),
-                &still_open,
-            ),
-            format!(
-                "DELETE {{ {} }} WHERE {{ {} }}",
-                client.in_graph(&format!("<{}> <{}> ?was", item.iri, v::CLOSED_AT_SOURCE)),
-                client.in_graph(&format!(
-                    "<{}> <{}> ?was . {still_open}",
-                    item.iri,
-                    v::CLOSED_AT_SOURCE
-                ))
-            ),
-            if claimed.is_some() {
-                format!(
-                    "INSERT {{ {} }} WHERE {{ {} }}",
-                    client.in_graph(&format!(
-                        "<{}> <{}> {} .",
-                        item.iri,
-                        v::CLOSED_AT_SOURCE,
-                        literal(attribution::IMPORT)
-                    )),
-                    client.in_graph(&format!("{} {still_open}", live(&item.iri)))
-                )
-            } else {
-                String::new()
-            },
-            release_record(&client, &item.iri, &record, &who, now, &fence),
-            // And the release as an event, who held it and who released it (ledger #2819),
-            // under the same condition: only an update that finds a claim records one.
-            release_event(&client, &item.iri, ReleaseReason::Closed, &fence, &who, now)?,
-            replace_one_when(
-                &client,
-                &item.iri,
+        // ★ AND THE ITEM'S STATUS EVENTS ARE LISTED (ledger #3256): read first and named in
+        // every pattern on them, so the store's scoped copy is this item's events and not the
+        // ledger's ([`counts::StatusEvents`]). Every operation holds only while that list is
+        // whole; a status event written since the read refuses the batch whole, and the close
+        // is made again from a fresh read.
+        let mut records = Vec::new();
+        let mut attempt = 0;
+        let closed_here = loop {
+            attempt += 1;
+            let mut events = counts::StatusEvents::read(&client, &item.iri).await?;
+            let event_iri = events.mint(now)?;
+            let fence = format!("{} {}", fence_clause(&item.iri, epoch), events.unchanged());
+            let still_open = format!(
+                "FILTER NOT EXISTS {{ <{}> <{}> <{}> }} {fence}",
+                item.iri,
                 v::STATUS,
-                &format!("<{}>", v::CLOSED),
-                &fence,
-            ),
-            replace_one_when(
+                v::CLOSED
+            );
+            let event = counts::status_event_when(
                 &client,
                 &item.iri,
-                v::CLOSED_REASON,
-                &format!("<{reason}>"),
-                &fence,
-            ),
-            // After the status, so it finds the close that stands: this one's event, or, when
-            // the item was already closed, that close's.
-            evidence::record(&client, &item.iri, reason, &evidence, &fence),
-            // A close dated at the source moves `modified` only forward (ledger #2928).
-            touch_dated(&client, &item.iri, now, claimed, &fence),
-            // And a hand-back is answered: closed work awaits nobody (ledger #1199).
-            retract_when(&client, &item.iri, v::AWAITING, &fence),
-            replace_one_when(&client, &item.iri, v::AWAITING_AT, &datetime(now), &fence),
-        ];
-        // The claim last, its holder after every other field: see the fence above.
-        ops.extend(
-            CLAIM_FIELDS
-                .iter()
-                .filter(|field| **field != v::CLAIMED_BY)
-                .chain([&v::CLAIMED_BY])
-                .map(|field| retract_when(&client, &item.iri, field, &fence)),
-        );
-        guarded_update(&client, &[&item.iri], &batch(&ops)).await?;
-        let closed_here = client
-            .ask(&format!(
-                "ASK {{ {} }}",
-                client.in_graph(&format!("<{event_iri}> <{}> ?any", v::ext::TYPE))
-            ))
-            .await?;
+                &event_iri,
+                &events,
+                v::CLOSED,
+                now,
+                &still_open,
+                &who,
+                claimed,
+            );
+            let record = client.ledger().comment(&mint_id(now)?);
+            let mut ops = vec![
+                // Editing the verdict of an already closed item must not move its close time.
+                event,
+                replace_one_when(
+                    &client,
+                    &item.iri,
+                    v::CLOSED_AT,
+                    &datetime(claimed.unwrap_or(now)),
+                    &still_open,
+                ),
+                format!(
+                    "DELETE {{ {} }} WHERE {{ {} }}",
+                    client.in_graph(&format!("<{}> <{}> ?was", item.iri, v::CLOSED_AT_SOURCE)),
+                    client.in_graph(&format!(
+                        "<{}> <{}> ?was . {still_open}",
+                        item.iri,
+                        v::CLOSED_AT_SOURCE
+                    ))
+                ),
+                if claimed.is_some() {
+                    format!(
+                        "INSERT {{ {} }} WHERE {{ {} }}",
+                        client.in_graph(&format!(
+                            "<{}> <{}> {} .",
+                            item.iri,
+                            v::CLOSED_AT_SOURCE,
+                            literal(attribution::IMPORT)
+                        )),
+                        client.in_graph(&format!("{} {still_open}", live(&item.iri)))
+                    )
+                } else {
+                    String::new()
+                },
+                release_record(&client, &item.iri, &record, &who, now, &fence),
+                // And the release as an event, who held it and who released it (ledger #2819),
+                // under the same condition: only an update that finds a claim records one.
+                release_event(&client, &item.iri, ReleaseReason::Closed, &fence, &who, now)?,
+                replace_one_when(
+                    &client,
+                    &item.iri,
+                    v::STATUS,
+                    &format!("<{}>", v::CLOSED),
+                    &fence,
+                ),
+                replace_one_when(
+                    &client,
+                    &item.iri,
+                    v::CLOSED_REASON,
+                    &format!("<{reason}>"),
+                    &fence,
+                ),
+                // After the status, so it finds the close that stands: this one's event, or, when
+                // the item was already closed, that close's.
+                evidence::record(&client, &item.iri, &events, reason, &evidence, &fence),
+                // A close dated at the source moves `modified` only forward (ledger #2928).
+                touch_dated(&client, &item.iri, now, claimed, &fence),
+                // And a hand-back is answered: closed work awaits nobody (ledger #1199).
+                retract_when(&client, &item.iri, v::AWAITING, &fence),
+                replace_one_when(&client, &item.iri, v::AWAITING_AT, &datetime(now), &fence),
+            ];
+            // The claim last, its holder after every other field: see the fence above.
+            ops.extend(
+                CLAIM_FIELDS
+                    .iter()
+                    .filter(|field| **field != v::CLAIMED_BY)
+                    .chain([&v::CLAIMED_BY])
+                    .map(|field| retract_when(&client, &item.iri, field, &fence)),
+            );
+            guarded_update(&client, &[&item.iri], &batch(&ops)).await?;
+            let here = client
+                .ask(&format!(
+                    "ASK {{ {} }}",
+                    client.in_graph(&format!("<{event_iri}> <{}> ?any", v::ext::TYPE))
+                ))
+                .await?;
+            records.push(record);
+            if here || !events.changed(&client).await? {
+                break here;
+            }
+            if attempt == STATUS_ATTEMPTS {
+                return Err(status_kept_changing(&item, "close"));
+            }
+        };
         // A fenced close records its own close or nothing at all: none means its claim
         // changed between the read and the write, and the fence refused every operation.
         if let Some(epoch) = epoch {
@@ -4175,7 +4196,12 @@ impl Endpoint for CloseEndpoint {
         // Even when another close got there first: a write from the latest snapshot is never
         // wrong, and it repairs a mirror an interrupted writer left behind.
         let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
-        let released = released_by(&client, &record).await?;
+        let mut released = None;
+        for record in &records {
+            if released.is_none() {
+                released = released_by(&client, record).await?;
+            }
+        }
         let mut note_written = None;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
@@ -4334,53 +4360,82 @@ impl Endpoint for ReopenEndpoint {
         // under the store's write lock exactly one update finds it closed. Reading back the
         // event IRI minted here is how this request learns whether it was that one.
         across::require_mirror_grants(inv, &client, &item).await?;
-        let still_closed = format!("<{}> <{}> <{}> .", item.iri, v::STATUS, v::CLOSED);
-        let (event, event_iri) = counts::status_event_when(
-            &client,
-            &item.iri,
-            v::OPEN,
-            now,
-            &still_closed,
-            &who,
-            claimed,
-        )?;
-        guarded_update(
-            &client,
-            &[&item.iri],
-            &batch(&[
-                counts::preserve_close(&client, &item.iri, now)?,
-                event,
-                retract_when(&client, &item.iri, v::CLOSED_REASON, &still_closed),
-                retract_when(&client, &item.iri, v::CLOSED_AT, &still_closed),
-                retract_when(&client, &item.iri, v::CLOSED_AT_SOURCE, &still_closed),
-                // A reopened item starts from "not awaiting": whatever hand-back preceded
-                // the close was answered by it (ledger #1199).
-                retract_when(&client, &item.iri, v::AWAITING, &still_closed),
-                replace_one_when(
-                    &client,
-                    &item.iri,
-                    v::AWAITING_AT,
-                    &datetime(now),
-                    &still_closed,
-                ),
-                touch_dated(&client, &item.iri, now, claimed, &still_closed),
-                replace_one_when(
-                    &client,
-                    &item.iri,
-                    v::STATUS,
-                    &format!("<{}>", v::OPEN),
-                    &still_closed,
-                ),
-            ]),
-        )
-        .await?;
-        let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
-        let reopened_here = client
-            .ask(&format!(
-                "ASK {{ {} }}",
-                client.in_graph(&format!("<{event_iri}> <{}> ?any", v::ext::TYPE))
-            ))
+        // ★ Its status events are listed, and the batch made again when one lands since the
+        // read, as for close (ledger #3256, [`counts::StatusEvents`]).
+        let mut attempt = 0;
+        let reopened_here = loop {
+            attempt += 1;
+            let mut events = counts::StatusEvents::read(&client, &item.iri).await?;
+            let preserved = events.mint(now)?;
+            let event_iri = events.mint(now)?;
+            let still_closed = format!(
+                "<{}> <{}> <{}> . {}",
+                item.iri,
+                v::STATUS,
+                v::CLOSED,
+                events.unchanged()
+            );
+            let event = counts::status_event_when(
+                &client,
+                &item.iri,
+                &event_iri,
+                &events,
+                v::OPEN,
+                now,
+                &still_closed,
+                &who,
+                claimed,
+            );
+            guarded_update(
+                &client,
+                &[&item.iri],
+                &batch(&[
+                    counts::preserve_close(
+                        &client,
+                        &item.iri,
+                        &preserved,
+                        &events,
+                        &events.unchanged(),
+                    ),
+                    event,
+                    retract_when(&client, &item.iri, v::CLOSED_REASON, &still_closed),
+                    retract_when(&client, &item.iri, v::CLOSED_AT, &still_closed),
+                    retract_when(&client, &item.iri, v::CLOSED_AT_SOURCE, &still_closed),
+                    // A reopened item starts from "not awaiting": whatever hand-back preceded
+                    // the close was answered by it (ledger #1199).
+                    retract_when(&client, &item.iri, v::AWAITING, &still_closed),
+                    replace_one_when(
+                        &client,
+                        &item.iri,
+                        v::AWAITING_AT,
+                        &datetime(now),
+                        &still_closed,
+                    ),
+                    touch_dated(&client, &item.iri, now, claimed, &still_closed),
+                    replace_one_when(
+                        &client,
+                        &item.iri,
+                        v::STATUS,
+                        &format!("<{}>", v::OPEN),
+                        &still_closed,
+                    ),
+                ]),
+            )
             .await?;
+            let here = client
+                .ask(&format!(
+                    "ASK {{ {} }}",
+                    client.in_graph(&format!("<{event_iri}> <{}> ?any", v::ext::TYPE))
+                ))
+                .await?;
+            if here || !events.changed(&client).await? {
+                break here;
+            }
+            if attempt == STATUS_ATTEMPTS {
+                return Err(status_kept_changing(&item, "reopen"));
+            }
+        };
+        let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
         let mut noted = false;
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
@@ -4861,6 +4916,21 @@ fn fence_clause(item: &str, epoch: Option<u64>) -> String {
             v::CLAIM_EPOCH
         ),
     }
+}
+
+/// How many times a close or a reopen is made when a status event of its item lands between
+/// its read of them and its write (ledger #3256, [`counts::StatusEvents`]). Each such event is
+/// another close or reopen of the same item, so this many in a row is a fight, not a race.
+const STATUS_ATTEMPTS: usize = 8;
+
+/// The refusal of a close or reopen whose item's status changed under it every time it read.
+fn status_kept_changing(item: &Item, what: &str) -> Error {
+    Error::Conflict(format!(
+        "the status of {} changed {STATUS_ATTEMPTS} times while this {what} was being \
+         written, so the {what} may not have been recorded. Read the item to see its status \
+         now, and {what} it again if that is still wanted",
+        item.short()
+    ))
 }
 
 /// Whether `epoch` is the current claim's on `item`, as read.
