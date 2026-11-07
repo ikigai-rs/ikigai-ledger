@@ -627,8 +627,10 @@ fn a_delete_takes_the_events_with_the_item() {
 /// event to the item, and until 0.15.0 a delete's commit guard listed the quads it read one
 /// `VALUES` row per line, which the store refused past about twenty extra triples as too
 /// ambiguous to scan (`MAX_SCAN_BRANCHES`), whatever the item carried. Literals here hold
-/// what that scan reads specially: `#`, `<`, quotes, parentheses and newlines. They are in
-/// the comments only: since ledger #2634 a label holds only `A-Z a-z 0-9 . _ : -`.
+/// what that scan reads specially: `#`, `<`, quotes, parentheses and newlines. Since ledger
+/// #2634 a label added holds only `A-Z a-z 0-9 . _ : -`, but a legacy one may hold anything
+/// and removing it records it on an unlabel event, so each round also writes such a label
+/// straight into the store and removes it through the endpoint.
 #[test]
 fn an_item_with_hundreds_of_quads_still_deletes() {
     let kernel = kernel();
@@ -640,6 +642,32 @@ fn an_item_with_hundreds_of_quads_still_deletes() {
             Verb::Sink,
             &at("label"),
             &[("item", "1"), ("content", &format!("l{n}.x:y-z_"))],
+        )
+        .unwrap();
+        let legacy = format!("l{n}#'<x>");
+        let item = rows(
+            &kernel,
+            &format!("SELECT ?i WHERE {{ GRAPH <{LIVE}> {{ ?i <{NS}number> 1 }} }}"),
+        )[0]["i"]
+            .clone();
+        sink(
+            &kernel,
+            "urn:iki:store:graph-update",
+            &[
+                ("graph", LIVE),
+                (
+                    "content",
+                    &format!(
+                        "INSERT DATA {{ GRAPH <{LIVE}> {{ <{item}> <{NS}label> \"{legacy}\" }} }}"
+                    ),
+                ),
+            ],
+        );
+        try_verb(
+            &kernel,
+            Verb::Delete,
+            &at("label"),
+            &[("item", "1"), ("content", &legacy)],
         )
         .unwrap();
         try_verb(
