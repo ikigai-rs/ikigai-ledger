@@ -138,13 +138,13 @@ fn a_label_names_the_label() {
     sink(
         &kernel,
         &at("label"),
-        &[("item", "1"), ("content", "needs#triage")],
+        &[("item", "1"), ("content", "needs:triage")],
     );
     assert_eq!(
         last(&kernel, 1),
         Recorded {
             kind: "label".to_string(),
-            object: object(&[("editLabel", &["needs#triage"])]),
+            object: object(&[("editLabel", &["needs:triage"])]),
         }
     );
 }
@@ -408,7 +408,7 @@ fn deleting_the_other_item_keeps_the_history_that_names_it() {
 #[test]
 fn deleting_the_item_takes_its_events_and_their_objects() {
     let kernel = kernel();
-    sink(&kernel, &at("label"), &[("item", "1"), ("content", "a#b")]);
+    sink(&kernel, &at("label"), &[("item", "1"), ("content", "a:b")]);
     sink(
         &kernel,
         &at("item:1:state"),

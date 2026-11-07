@@ -627,7 +627,8 @@ fn a_delete_takes_the_events_with_the_item() {
 /// event to the item, and until 0.15.0 a delete's commit guard listed the quads it read one
 /// `VALUES` row per line, which the store refused past about twenty extra triples as too
 /// ambiguous to scan (`MAX_SCAN_BRANCHES`), whatever the item carried. Literals here hold
-/// what that scan reads specially: `#`, `<`, quotes, parentheses and newlines.
+/// what that scan reads specially: `#`, `<`, quotes, parentheses and newlines. They are in
+/// the comments only: since ledger #2634 a label holds only `A-Z a-z 0-9 . _ : -`.
 #[test]
 fn an_item_with_hundreds_of_quads_still_deletes() {
     let kernel = kernel();
@@ -638,7 +639,7 @@ fn an_item_with_hundreds_of_quads_still_deletes() {
             &kernel,
             Verb::Sink,
             &at("label"),
-            &[("item", "1"), ("content", &format!("l{n}#'<x>"))],
+            &[("item", "1"), ("content", &format!("l{n}.x:y-z_"))],
         )
         .unwrap();
         try_verb(
