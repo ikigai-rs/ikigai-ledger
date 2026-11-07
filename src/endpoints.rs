@@ -3272,6 +3272,14 @@ impl Endpoint for AppendEndpoint {
             .map(model::parse_key)
             .transpose()?;
         let raised = inv.inline_str("raised").ok().map(parse_date).transpose()?;
+        // ⚠ The label grammar, as the label endpoint holds it (ledger #2634): `labels=` splits
+        // only on commas, so `labels="a b"` stored ONE label with a space, and that was where
+        // every out-of-grammar label in the live ledger came from. One bad label refuses the
+        // whole append, before anything is written.
+        let labels = split_labels(inv.inline_str("labels").ok());
+        for label in &labels {
+            check_label("labels", label)?;
+        }
         let now = now_ms(inv)?;
         let (title, body) = split_content(inv.inline_str("content")?)?;
         // ★ Who is writing is checked before anything is written (ledger #2827): a refused
@@ -3349,8 +3357,8 @@ impl Endpoint for AppendEndpoint {
                 ikigai_store::sparql::typed_literal(raised, v::ext::XSD_DATE, "raised")?
             ));
         }
-        for label in split_labels(inv.inline_str("labels").ok()) {
-            triples.push_str(&format!("\n<{iri}> <{}> {} .", v::LABEL, literal(&label)));
+        for label in &labels {
+            triples.push_str(&format!("\n<{iri}> <{}> {} .", v::LABEL, literal(label)));
         }
         for target in inv.inline_str("about").unwrap_or("").split_whitespace() {
             triples.push_str(&format!(
@@ -3502,7 +3510,10 @@ impl Endpoint for AppendEndpoint {
                 )
                 .input(
                     ArgSpec::new("labels")
-                        .summary("Comma-separated tags.")
+                        .summary(
+                            "Comma-separated tags, each only A-Z a-z 0-9 and `.` `_` `:` `-`: \
+                             no spaces.",
+                        )
                         .class(v::ext::XSD_STRING)
                         .optional(),
                 )
@@ -6154,6 +6165,14 @@ impl Endpoint for LabelEndpoint {
                 ),
             });
         }
+        // ⚠ Only the label grammar, `[A-Za-z0-9._:-]+`, the one gonk's dispatcher checks
+        // (ledger #2634). A label with a space was stored whole, printed like several, and
+        // broke every command built from the labels. Refused rather than split: this endpoint
+        // takes one label, and splitting would add labels the caller did not name. Removing
+        // one is still allowed, as with the comma above.
+        if inv.request.verb == Verb::Sink {
+            check_label("content", label)?;
+        }
         let triple = format!("<{}> <{}> {} .", item.iri, v::LABEL, literal(label));
         let (update, said, edit) = match inv.request.verb {
             Verb::Sink => (
@@ -6227,8 +6246,9 @@ impl Endpoint for LabelEndpoint {
                     .input(
                         ArgSpec::new("content")
                             .summary(
-                                "The label — where a pipe's value lands. No commas: the \
-                                 `labels`/`without` filters split on them.",
+                                "The label — where a pipe's value lands. Only A-Z a-z 0-9 \
+                                 and `.` `_` `:` `-`: no spaces, and no commas, which the \
+                                 `labels`/`without` filters split on.",
                             )
                             .class(v::ext::XSD_STRING),
                     )
@@ -6250,6 +6270,41 @@ impl Endpoint for LabelEndpoint {
                     .output(PLAIN),
                 CAP_WRITE,
             ))
+    }
+}
+
+/// Refuse a label being WRITTEN outside the label grammar, `[A-Za-z0-9._:-]+`, naming the
+/// first bad character (ledger #2634). Every place that adds a label calls this: the label
+/// endpoint and `append labels=`. Removing one does not, so a legacy label can be taken off.
+fn check_label(argument: &str, label: &str) -> Result<()> {
+    match label.chars().find(|c| !is_label_char(*c)) {
+        None => Ok(()),
+        Some(bad) => Err(Error::InvalidArgument {
+            name: argument.to_string(),
+            detail: format!(
+                "`{label}` contains {}, and a label may hold only the letters A-Z a-z \
+                 0-9 and `.` `_` `:` `-`. Add each word as its own label",
+                describe_char(bad)
+            ),
+        }),
+    }
+}
+
+/// A character of the label grammar, `[A-Za-z0-9._:-]` (ledger #2634).
+fn is_label_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-')
+}
+
+/// A character named in words, so a refusal reads the same aloud and a space is not invisible.
+fn describe_char(c: char) -> String {
+    match c {
+        ' ' => "a space".to_string(),
+        '\t' => "a tab".to_string(),
+        '\n' | '\r' => "a line break".to_string(),
+        c if c.is_whitespace() || c.is_control() => {
+            format!("the character U+{:04X}", u32::from(c))
+        }
+        c => format!("`{c}`"),
     }
 }
 

@@ -138,13 +138,13 @@ fn a_label_names_the_label() {
     sink(
         &kernel,
         &at("label"),
-        &[("item", "1"), ("content", "needs#triage")],
+        &[("item", "1"), ("content", "needs:triage")],
     );
     assert_eq!(
         last(&kernel, 1),
         Recorded {
             kind: "label".to_string(),
-            object: object(&[("editLabel", &["needs#triage"])]),
+            object: object(&[("editLabel", &["needs:triage"])]),
         }
     );
 }
@@ -166,6 +166,59 @@ fn an_unlabel_names_the_label() {
             kind: "unlabel".to_string(),
             object: object(&[("editLabel", &["bug"])]),
         }
+    );
+}
+
+/// A legacy label, one written before ledger #2634 or out of band, holds characters the label
+/// grammar refuses today, and removing it records them: Delete takes any label, so the
+/// unlabel event carries the value as it was. Here it holds what needs escaping in a SPARQL
+/// literal and what a commit guard's scan reads specially: `#`, `'`, `<`, quotes, a
+/// backslash, a space and a newline. The event's label must round-trip exactly.
+#[test]
+fn removing_a_legacy_label_records_it_escaped() {
+    let kernel = kernel();
+    let legacy = "needs#triage 'q' <x> \"r\" \\ end\nline";
+    let iri = item_iri(&kernel, 1);
+    insert_label(&kernel, &iri, legacy);
+    try_verb(
+        &kernel,
+        Verb::Delete,
+        &at("label"),
+        &[("item", "1"), ("content", legacy)],
+    )
+    .unwrap();
+    assert_eq!(
+        last(&kernel, 1),
+        Recorded {
+            kind: "unlabel".to_string(),
+            object: object(&[("editLabel", &[legacy])]),
+        }
+    );
+    let left = rows(
+        &kernel,
+        &format!("SELECT ?l WHERE {{ GRAPH <{LIVE}> {{ <{iri}> <{NS}label> ?l }} }}"),
+    );
+    assert!(left.is_empty(), "the label went: {left:?}");
+}
+
+/// A label written straight into the store, as a legacy one was, escaped for SPARQL.
+fn insert_label(kernel: &Kernel, iri: &str, label: &str) {
+    let escaped = label
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    sink(
+        kernel,
+        "urn:iki:store:graph-update",
+        &[
+            ("graph", LIVE),
+            (
+                "content",
+                &format!(
+                    "INSERT DATA {{ GRAPH <{LIVE}> {{ <{iri}> <{NS}label> \"{escaped}\" }} }}"
+                ),
+            ),
+        ],
     );
 }
 
@@ -408,7 +461,17 @@ fn deleting_the_other_item_keeps_the_history_that_names_it() {
 #[test]
 fn deleting_the_item_takes_its_events_and_their_objects() {
     let kernel = kernel();
-    sink(&kernel, &at("label"), &[("item", "1"), ("content", "a#b")]);
+    sink(&kernel, &at("label"), &[("item", "1"), ("content", "a:b")]);
+    // And an unlabel event whose label needs escaping: a legacy one, removed (ledger #2634).
+    let legacy = "a#b 'c' <d>";
+    insert_label(&kernel, &item_iri(&kernel, 1), legacy);
+    try_verb(
+        &kernel,
+        Verb::Delete,
+        &at("label"),
+        &[("item", "1"), ("content", legacy)],
+    )
+    .unwrap();
     sink(
         &kernel,
         &at("item:1:state"),

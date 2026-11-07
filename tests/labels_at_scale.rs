@@ -150,13 +150,26 @@ fn every_label_is_required_and_a_repeat_counts_once() {
 }
 
 /// A label that needs escaping is still a label, inside the list as it was as a pattern.
+/// Since ledger #2634 no label can be ADDED with these characters, but a legacy one may still
+/// carry them, and a filter may still name them, so they are written straight into the store.
 #[test]
 fn a_hostile_label_in_the_list_is_a_literal() {
     let kernel = kernel();
-    append(
+    let iri = append_iri(&kernel, "Hostile", &[]);
+    sink(
         &kernel,
-        "Hostile",
-        &[("labels", "a\"b,c\\d,e } FILTER(false) {")],
+        "urn:iki:store:graph-update",
+        &[
+            ("graph", "urn:iki:ledger:graph:default"),
+            (
+                "content",
+                &format!(
+                    "INSERT DATA {{ GRAPH <urn:iki:ledger:graph:default> {{ <{iri}> \
+                     <https://ikigai-rs.dev/ns/ledger#label> \"a\\\"b\", \"c\\\\d\", \
+                     \"e }} FILTER(false) {{\" }} }}"
+                ),
+            ),
+        ],
     );
     append(&kernel, "Plain", &[("labels", "a")]);
     let doc = json(
