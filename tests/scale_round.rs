@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ikigai_core::{CacheBound, CachePolicy, EntryFacts, Fallback, Kernel, Lru, Space};
+use ikigai_core::{CacheBound, CachePolicy, EntryFacts, Fallback, Kernel, Lru, Space, Verb};
 use ikigai_ledger::vocabulary as v;
 use ikigai_store::DurableStore;
 use serde_json::Value;
@@ -537,6 +537,29 @@ fn defect_queries() -> [String; 2] {
     ]
 }
 
+/// A lower bound on the quads a close's update copies through the store's scoped door: the
+/// quads its patterns with a variable subject match, whatever the item. `evidence::record`
+/// and `evidence::standing` find the standing close by `?standing a StatusEvent ; status
+/// closed ; eventSequence ?n`, and `counts::status_event_when` counts `?past a StatusEvent`,
+/// so every status event, and every closed item's `status`, is copied on every close. The
+/// store refuses an update whose copy passes `MAX_SCOPED_COPY_QUADS` (250,000).
+fn close_footprint(kernel: &Kernel) -> usize {
+    number(
+        kernel,
+        &format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ SELECT DISTINCT ?s ?p ?o WHERE {{ GRAPH <{GRAPH}> {{ \
+             {{ ?s <{ty}> <{event}> BIND(<{ty}> AS ?p) BIND(<{event}> AS ?o) }} UNION \
+             {{ ?s <{status}> <{closed}> BIND(<{status}> AS ?p) BIND(<{closed}> AS ?o) }} UNION \
+             {{ ?s <{sequence}> ?o BIND(<{sequence}> AS ?p) }} }} }} }}",
+            ty = v::ext::TYPE,
+            event = v::STATUS_EVENT_CLASS,
+            status = v::STATUS,
+            closed = v::CLOSED,
+            sequence = v::EVENT_SEQUENCE,
+        ),
+    )
+}
+
 // ------------------------------------------------------------------- timing
 
 fn time(read: &mut impl FnMut()) -> Duration {
@@ -711,16 +734,31 @@ fn scale_round() {
             .filter(|n| !closed(n - ITEMS * (scale - 1)))
             .take(runs)
             .map(|n| n.to_string());
+        // ⚠ A close can be REFUSED, not only slow: see `close_footprint`.
+        let mut refusal = None;
         let (_, close_time) = first_and_median(runs, || {
             let n = targets.next().expect("an open item");
-            sink(
+            if let Err(e) = try_verb(
                 &kernel,
+                Verb::Sink,
                 "urn:iki:ledger:close",
                 &[("item", &format!("#{n}")), ("reason", "done")],
-            );
+            ) {
+                refusal.get_or_insert(e.to_string());
+            }
         });
         println!("{:<24} {:>9} {}", "append", "", secs(append_time));
         println!("{:<24} {:>9} {}", "close", "", secs(close_time));
+        println!(
+            "close copies at least {} quads (the store refuses past 250,000)",
+            close_footprint(&kernel)
+        );
+        if let Some(refusal) = refusal {
+            println!(
+                "close REFUSED: {}",
+                refusal.chars().take(240).collect::<String>()
+            );
+        }
         drop(kernel);
         let _ = std::fs::remove_dir_all(&dir);
     }
