@@ -1,6 +1,6 @@
 //! **A claim carries a fencing epoch, and a stale holder's writes are refused** (ledger #3205).
 //!
-//! Until 0.19.0 a claim recorded only its holder and its expiry. A worker that stalled past
+//! Until 0.20.0 a claim recorded only its holder and its expiry. A worker that stalled past
 //! its lease, was taken over, and then woke could still comment, hand back, close, renew or
 //! release on the authority it had lost: only a convention (renew just before acting) stood in
 //! the way, and a hand-back sent after the lease was lost landed like any other.

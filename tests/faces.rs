@@ -125,7 +125,7 @@ fn seeded() -> Kernel {
 
 // ------------------------------------------------------------------ the plain face, 0.3.0
 
-/// Unchanged but for one line since 0.19.0: a claimed item's detail names its claim's epoch
+/// Unchanged but for one line since 0.20.0: a claimed item's detail names its claim's epoch
 /// (`epoch:`, ledger #3205), under its purpose.
 #[test]
 fn the_plain_item_detail_is_unchanged() {

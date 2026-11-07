@@ -159,7 +159,7 @@ pub struct Item {
     /// The fencing epoch of the item's latest claim (`ledger:claimEpoch`, ledger #3205): one
     /// more than the one before at every grant and takeover, kept by a renewal, and never
     /// lowered, also across a release and a close. While [`claimed_by`](Item::claimed_by) is
-    /// set it is the current claim's; `None` on an item never claimed since 0.19.0.
+    /// set it is the current claim's; `None` on an item never claimed since 0.20.0.
     pub claim_epoch: Option<u64>,
     /// Who the item waits on after a hand-back (`ledger:awaiting`), as stored:
     /// [`AWAITING_DISPATCHER`](crate::vocabulary::iri::AWAITING_DISPATCHER) after
