@@ -6154,6 +6154,23 @@ impl Endpoint for LabelEndpoint {
                 ),
             });
         }
+        // ⚠ Only the label grammar, `[A-Za-z0-9._:-]+`, the one gonk's dispatcher checks
+        // (ledger #2634). A label with a space was stored whole, printed like several, and
+        // broke every command built from the labels. Refused rather than split: this endpoint
+        // takes one label, and splitting would add labels the caller did not name. Removing
+        // one is still allowed, as with the comma above.
+        if inv.request.verb == Verb::Sink {
+            if let Some(bad) = label.chars().find(|c| !is_label_char(*c)) {
+                return Err(Error::InvalidArgument {
+                    name: "content".to_string(),
+                    detail: format!(
+                        "`{label}` contains {}, and a label may hold only the letters A-Z a-z \
+                         0-9 and `.` `_` `:` `-`. Add each word as its own label",
+                        describe_char(bad)
+                    ),
+                });
+            }
+        }
         let triple = format!("<{}> <{}> {} .", item.iri, v::LABEL, literal(label));
         let (update, said, edit) = match inv.request.verb {
             Verb::Sink => (
@@ -6227,8 +6244,9 @@ impl Endpoint for LabelEndpoint {
                     .input(
                         ArgSpec::new("content")
                             .summary(
-                                "The label — where a pipe's value lands. No commas: the \
-                                 `labels`/`without` filters split on them.",
+                                "The label — where a pipe's value lands. Only A-Z a-z 0-9 \
+                                 and `.` `_` `:` `-`: no spaces, and no commas, which the \
+                                 `labels`/`without` filters split on.",
                             )
                             .class(v::ext::XSD_STRING),
                     )
@@ -6250,6 +6268,24 @@ impl Endpoint for LabelEndpoint {
                     .output(PLAIN),
                 CAP_WRITE,
             ))
+    }
+}
+
+/// A character of the label grammar, `[A-Za-z0-9._:-]` (ledger #2634).
+fn is_label_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-')
+}
+
+/// A character named in words, so a refusal reads the same aloud and a space is not invisible.
+fn describe_char(c: char) -> String {
+    match c {
+        ' ' => "a space".to_string(),
+        '\t' => "a tab".to_string(),
+        '\n' | '\r' => "a line break".to_string(),
+        c if c.is_whitespace() || c.is_control() => {
+            format!("the character U+{:04X}", u32::from(c))
+        }
+        c => format!("`{c}`"),
     }
 }
 

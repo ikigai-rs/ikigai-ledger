@@ -432,3 +432,59 @@ fn an_extreme_hand_written_priority_does_not_panic_next() {
         "next policy=leverage over a hand-written priority: {answered:?}"
     );
 }
+
+/// A label outside the label grammar (`[A-Za-z0-9._:-]+`, the one gonk's dispatcher checks)
+/// is refused where it would be added, naming the character, and nothing is stored (ledger
+/// #2634). On 0.20.0 `label content=repo:x worker:y p2` was stored as ONE label that the text
+/// face printed like three, and every command built from the labels broke on the spaces.
+#[test]
+fn a_label_with_whitespace_is_refused_naming_the_character() {
+    let kernel = kernel();
+    let iri = append_iri(&kernel, "Tagged", &[]);
+    for (label, named) in [
+        ("repo:ikigai-linkeddata worker:lawnboy p2", "a space"),
+        ("repo:x\tp2", "a tab"),
+        ("area/core", "`/`"),
+    ] {
+        let refused = try_verb(
+            &kernel,
+            Verb::Sink,
+            "urn:iki:ledger:label",
+            &[("item", "#1"), ("content", label)],
+        );
+        match refused {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "content");
+                assert!(detail.contains(named), "{label:?}: {detail}");
+                assert!(detail.contains("A-Z a-z 0-9"), "{label:?}: {detail}");
+            }
+            other => panic!("{label:?} was not refused: {other:?}"),
+        }
+    }
+    let shown = source(&kernel, "urn:iki:ledger:item:1", &[]);
+    assert!(
+        !shown.contains("lawnboy") && !shown.contains("area/core"),
+        "{shown}"
+    );
+    // A label in the grammar is still added, and an old bad one can still be removed.
+    sink(
+        &kernel,
+        "urn:iki:ledger:label",
+        &[("item", "#1"), ("content", "repo:ikigai-linkeddata")],
+    );
+    hand_edit(
+        &kernel,
+        &format!(
+            "INSERT DATA {{ GRAPH <{LIVE}> {{ <{iri}> \
+             <https://ikigai-rs.dev/ns/ledger#label> \"worker:a p2\" }} }}"
+        ),
+    );
+    delete(
+        &kernel,
+        "urn:iki:ledger:label",
+        &[("item", "#1"), ("content", "worker:a p2")],
+    );
+    let shown = source(&kernel, "urn:iki:ledger:item:1", &[]);
+    assert!(shown.contains("repo:ikigai-linkeddata"), "{shown}");
+    assert!(!shown.contains("worker:a p2"), "{shown}");
+}
