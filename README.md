@@ -914,6 +914,28 @@ graph beside the tombstone instead, an orphan that no later purge could reach. A
 still removes by selector — it is asked to leave nothing of the item — so a write racing a
 purge goes with it, except a new comment or event, which makes the purge read again (below).
 
+### What a close and a reopen cost: the item, not the ledger's closed history
+
+A close finds the close that stands (its item's latest status event, when that is a close), and
+a close and a reopen number their status event by counting the item's earlier ones. Through
+0.20.0 those patterns were `?past a ledger:StatusEvent` and `?standing ledger:status
+ledger:closed`, whose only constants are a predicate and a class, so the store's scoped door
+copied every status event of the ledger and the status of every closed item into each close and
+reopen, at least four quads per closed item: 0.096 s at 1,132 open and 2,500 closed items, 1.18 s
+at ten times that, and refused past the 250,000-quad bound at about 62,500 closed items (ledger
+#3256, measured in PR 97 by `tests/scale_round.rs`). `backfill-closed-at content=all` copied every
+`closedAt` the same way.
+
+Now the item's status events are read first and listed in a `VALUES` beside each pattern on
+them, as a delete lists its dependents (below), so a close and a reopen copy the item's own
+events. Every operation of the write holds only while the item still has as many dependents under
+`{item}:status:` as were read, those the write mints aside, a check anchored on the item. A status
+event written between the read and the write (another close or reopen of the same item) refuses
+the write whole, and it is made again from a fresh read, up to eight times; past that it is
+refused as `Conflict`, naming the item. `tests/close_at_scale.rs` runs close, reopen and backfill
+in a ledger past a lowered bound, and `tests/close_race.rs` forces a reopen and a close into that
+gap.
+
 ### What a delete and a purge cost: the item, not the ledger
 
 Since 0.18.0 (ledger #2922) every read and update a delete or a purge sends names the item, or one
