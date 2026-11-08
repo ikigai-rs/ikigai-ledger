@@ -548,3 +548,89 @@ fn a_close_landing_inside_a_reopen_leaves_one_order() {
     assert_eq!(history(kernel, &item), ["closed", "open"]);
     assert!(closed_at(kernel, &item).is_empty(), "the reopen removed it");
 }
+
+/// Each status event of `item` that counts toward its sequence: `sequence status`, in order.
+fn sequenced(kernel: &Kernel, item: &str) -> Vec<String> {
+    values(
+        kernel,
+        &format!(
+            "SELECT ?v WHERE {{ GRAPH <{LIVE}> {{ ?e a <{NS}StatusEvent> ; \
+             <{NS}onItem> <{item}> ; <{NS}status> ?s ; <{NS}eventSequence> ?n }} \
+             BIND(CONCAT(STR(?n), \" \", STRAFTER(STR(?s), \"#\")) AS ?v) }} ORDER BY ?n"
+        ),
+    )
+}
+
+/// ★ A reopen landing between a close's read of the item's status events and its update
+/// (ledger #3256). The close lists the events it read, so the reopen's is not on its list: the
+/// close's update finds one more status event than it read and writes nothing, and the close is
+/// made again from a fresh read. Without that guard the close counted the events it had read
+/// and repeated the reopen's sequence, and its evidence missed the close that stands.
+#[test]
+fn a_reopen_landing_inside_a_close_of_a_closed_item_numbers_each_event_once() {
+    let (cell, schedule) = scheduled();
+    let kernel = cell.get().unwrap();
+    let item = append_iri(kernel, "probe", &[]);
+    sink(kernel, "urn:iki:ledger:close", &[("item", "#1")]);
+    *schedule.armed.lock().unwrap() = Some(request(
+        Verb::Sink,
+        "urn:iki:ledger:reopen",
+        &[("item", "#1")],
+    ));
+    assert_eq!(
+        sink(
+            kernel,
+            "urn:iki:ledger:close",
+            &[
+                ("item", "#1"),
+                ("reason", "wontfix"),
+                ("evidence", "urn:test:proof:late")
+            ],
+        ),
+        "closed #1 wontfix (1 evidence)\n"
+    );
+    assert!(
+        schedule.armed.lock().unwrap().is_none(),
+        "the reopen never ran"
+    );
+    assert_eq!(sequenced(kernel, &item), ["1 closed", "2 open", "3 closed"]);
+    assert_eq!(
+        values(
+            kernel,
+            &format!(
+                "SELECT ?v WHERE {{ GRAPH <{LIVE}> {{ ?e <{NS}onItem> <{item}> ; \
+                 <{NS}eventSequence> 3 ; <{NS}evidence> ?v }} }}"
+            ),
+        ),
+        ["urn:test:proof:late"],
+        "the evidence is on the close that stands"
+    );
+}
+
+/// And a close landing between a reopen's read and its update: the reopen is made again, and
+/// numbers its event after the close's.
+#[test]
+fn a_close_landing_inside_a_reopen_of_a_reopened_item_numbers_each_event_once() {
+    let (cell, schedule) = scheduled();
+    let kernel = cell.get().unwrap();
+    let item = append_iri(kernel, "probe", &[]);
+    sink(kernel, "urn:iki:ledger:close", &[("item", "#1")]);
+    sink(kernel, "urn:iki:ledger:reopen", &[("item", "#1")]);
+    *schedule.armed.lock().unwrap() = Some(request(
+        Verb::Sink,
+        "urn:iki:ledger:close",
+        &[("item", "#1")],
+    ));
+    assert_eq!(
+        sink(kernel, "urn:iki:ledger:reopen", &[("item", "#1")]),
+        "reopened #1\n"
+    );
+    assert!(
+        schedule.armed.lock().unwrap().is_none(),
+        "the close never ran"
+    );
+    assert_eq!(
+        sequenced(kernel, &item),
+        ["1 closed", "2 open", "3 closed", "4 open"]
+    );
+}

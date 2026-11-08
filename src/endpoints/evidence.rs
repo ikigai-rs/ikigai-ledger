@@ -112,12 +112,20 @@ async fn require_target(client: &StoreClient<'_, '_>, reference: &str) -> Result
 /// The pattern binding `?standing`, the close `item` stands on: its latest status event, when
 /// that is a close. Status events are numbered by `ledger:eventSequence`, because their dates
 /// can be an importer's.
-fn standing(item: &str) -> String {
+///
+/// ★ In a write, `events` lists the item's status events beside each pattern on them (ledger
+/// #3256): unlisted, `?standing <status> <closed>` copied every closed item's status into the
+/// store's scoped update, and `?later <eventSequence> ?m` every status event's sequence. A read
+/// copies nothing, and passes `None`.
+fn standing(item: &str, events: Option<&counts::StatusEvents>) -> String {
+    let listed = |var: &str| events.map(|events| events.values(var)).unwrap_or_default();
     format!(
-        "?standing <{type_}> <{class}> ; <{on}> <{item}> ; <{status}> <{closed}> ; \
-         <{sequence}> ?n . \
-         FILTER NOT EXISTS {{ ?later <{type_}> <{class}> ; <{on}> <{item}> ; \
+        "{standing_values} ?standing <{type_}> <{class}> ; <{on}> <{item}> ; \
+         <{status}> <{closed}> ; <{sequence}> ?n . \
+         FILTER NOT EXISTS {{ {later_values} ?later <{type_}> <{class}> ; <{on}> <{item}> ; \
          <{sequence}> ?m . FILTER(?m > ?n) }}",
+        standing_values = listed("?standing"),
+        later_values = listed("?later"),
         type_ = v::ext::TYPE,
         class = v::STATUS_EVENT_CLASS,
         on = v::ON_ITEM,
@@ -142,7 +150,7 @@ pub(super) async fn refuse_without_a_close_event(
     let found = client
         .ask(&format!(
             "ASK {{ {} }}",
-            client.in_graph(&standing(&item.iri))
+            client.in_graph(&standing(&item.iri, None))
         ))
         .await?;
     if found {
@@ -161,10 +169,12 @@ pub(super) async fn refuse_without_a_close_event(
 
 /// The operation that puts `reason` and `evidence` on the close that stands. It must run after
 /// the operations that write the close, so a first close finds the event it just wrote, and it
-/// replaces the event's reason because a verdict edit changes that close's verdict.
+/// replaces the event's reason because a verdict edit changes that close's verdict. `events`
+/// must list the event the close mints.
 pub(super) fn record(
     client: &StoreClient<'_, '_>,
     item: &str,
+    events: &counts::StatusEvents,
     reason: &str,
     evidence: &[Evidence],
     guard: &str,
@@ -178,11 +188,13 @@ pub(super) fn record(
         client.in_graph(&format!("?standing <{}> ?was", v::CLOSED_REASON)),
         client.in_graph(&insert),
         client.in_graph(&format!(
-            "{} {guard} <{item}> <{}> <{}> . {} OPTIONAL {{ ?standing <{}> ?was }}",
+            "{} {guard} <{item}> <{}> <{}> . {} OPTIONAL {{ {} ?standing <{}> ?was }}",
             live(item),
             v::STATUS,
             v::CLOSED,
-            standing(item),
+            standing(item, Some(events)),
+            // An `OPTIONAL` is narrowed only by a list inside it.
+            events.values("?standing"),
             v::CLOSED_REASON,
         ))
     )

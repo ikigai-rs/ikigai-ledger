@@ -7,24 +7,196 @@ const DAY: u64 = 86_400_000;
 const CSV: &str = "text/csv";
 const FACES: [&str; 2] = [CSV, TURTLE];
 
+/// An item's status events, read before a write that records one, so that the write names
+/// them (ledger #3256).
+///
+/// # ★ Why they are read first and listed
+///
+/// The store's narrow write door copies into a private store the quads each triple pattern can
+/// match by its constants (`ikigai_store::confine`), and refuses past
+/// `DurableStore::max_scoped_copy_quads`, 250,000 by default. Through 0.20.0 a close and a
+/// reopen counted `?past a StatusEvent ; onItem <item>`, and a close found the close that
+/// stands by `?standing a StatusEvent ; status closed ; eventSequence ?n`: a pattern's
+/// constants are its own, whatever the join says, so `?past a StatusEvent` copied every status
+/// event of the ledger and `?standing status closed` every closed item's status too, at least
+/// four quads per closed item. A ledger of about 62,500 closed items could close nothing
+/// (measured in PR 97, `tests/scale_round.rs`). So the events are read (a read copies nothing)
+/// and listed in a `VALUES` beside each such pattern, which the store narrows to the listed
+/// subjects (ikigai-store 0.3.3, ledger #2940), as a delete lists its dependents
+/// (`Selector`). The copy is then the item's own events.
+///
+/// # ★ And the write holds only while the list is whole
+///
+/// A status event written after the read would be missing from the list, so a sequence would
+/// repeat or a close would miss the close that stands. [`StatusEvents::unchanged`] is the
+/// guard every operation of the write carries: the item still has as many dependents under
+/// `{item}:status:` as were read, those this write mints aside. Every status event this crate
+/// writes is minted there (an import's too), none is removed but with its item, and the count
+/// is anchored on the item by `onItem`, so it copies the item's dependents and nothing else. A
+/// write that finds the count changed writes nothing at all, and its caller reads again
+/// ([`StatusEvents::changed`]).
+///
+/// ⚠ A status event that is a blank node has no name to list (this crate writes none; one can
+/// only come through the broad door). Then the patterns are the 0.20.0 ones, bound included,
+/// and there is no guard, as `Selector::Whole` does for a delete.
+pub(super) struct StatusEvents {
+    item: String,
+    /// The item's status events that count toward its sequence (every one an import did not
+    /// write), as read; `None` when one is a blank node.
+    counted: Option<Vec<String>>,
+    /// How many of the item's dependents were under `{item}:status:` when read.
+    seen: i64,
+    /// The status events this write mints, which its later operations find.
+    minted: Vec<String>,
+}
+
+impl StatusEvents {
+    /// Read `item`'s status events.
+    ///
+    /// ★ The count is read BEFORE the list: an event written between the two reads is then in
+    /// the list but not the count, and the guard refuses the write, where the other order would
+    /// let it through unlisted.
+    pub(super) async fn read(client: &StoreClient<'_, '_>, item: &str) -> Result<StatusEvents> {
+        let seen = Self::count(client, item, &[]).await?;
+        let rows = client
+            .select(&format!(
+                "SELECT DISTINCT ?event WHERE {{ {} }}",
+                client.in_graph(&format!(
+                    "?event <{}> <{}> ; <{}> <{item}> . {}",
+                    v::ext::TYPE,
+                    v::STATUS_EVENT_CLASS,
+                    v::ON_ITEM,
+                    not_imported("?event")
+                ))
+            ))
+            .await?;
+        let mut counted = Some(Vec::with_capacity(rows.len()));
+        for row in &rows {
+            let Some(event) = row.get("event") else {
+                continue;
+            };
+            if event.kind != "uri" {
+                counted = None;
+                break;
+            }
+            if let Some(list) = counted.as_mut() {
+                list.push(format!("<{}>", event.value));
+            }
+        }
+        Ok(StatusEvents {
+            item: item.to_string(),
+            counted,
+            seen,
+            minted: Vec::new(),
+        })
+    }
+
+    /// Mint the IRI of a status event this write records, and list it.
+    pub(super) fn mint(&mut self, now: u64) -> Result<String> {
+        let event = event_iri(&self.item, "status", now)?;
+        self.minted.push(event.clone());
+        Ok(event)
+    }
+
+    /// `VALUES ?var { … }`: every status event that counts, those minted here included, to put
+    /// in the same group as each pattern on `var`. Empty when they could not be listed.
+    pub(super) fn values(&self, var: &str) -> String {
+        let Some(counted) = &self.counted else {
+            return String::new();
+        };
+        let minted = self.minted.iter().map(|event| format!("<{event}>"));
+        let listed: Vec<String> = counted.iter().cloned().chain(minted).collect();
+        format!("VALUES {var} {{ {} }}", listed.join(" "))
+    }
+
+    /// The filter on `var` that leaves out an imported event: none when the events are listed,
+    /// because the list holds none, and an unanchored `eventKey` pattern would copy every
+    /// imported event of the ledger.
+    pub(super) fn not_imported(&self, var: &str) -> String {
+        match self.counted {
+            Some(_) => String::new(),
+            None => not_imported(var),
+        }
+    }
+
+    /// The guard every operation of the write carries: the item's dependents under
+    /// `{item}:status:` are still the ones read, those minted here aside. A sub-select counted
+    /// once per operation, like `Selector::no_unnamed_dependent`. Empty when unlisted.
+    pub(super) fn unchanged(&self) -> String {
+        if self.counted.is_none() {
+            return String::new();
+        }
+        format!(
+            "{{ SELECT (COUNT(DISTINCT ?statusDependent) AS ?statusDependents) WHERE {{ {} }} }} \
+             FILTER(?statusDependents = {})",
+            Self::dependents(&self.item, &self.minted),
+            self.seen
+        )
+    }
+
+    /// Whether a status event this write did not list has been written since the read: then
+    /// the write may have been refused by [`StatusEvents::unchanged`], and is made again.
+    pub(super) async fn changed(&self, client: &StoreClient<'_, '_>) -> Result<bool> {
+        if self.counted.is_none() {
+            return Ok(false);
+        }
+        Ok(Self::count(client, &self.item, &self.minted).await? != self.seen)
+    }
+
+    /// The pattern binding `?statusDependent` to each dependent of `item` under
+    /// `{item}:status:`, but those in `minted`.
+    fn dependents(item: &str, minted: &[String]) -> String {
+        let mut pattern = format!(
+            "?statusDependent <{}> <{item}> . FILTER(STRSTARTS(STR(?statusDependent), {}))",
+            v::ON_ITEM,
+            literal(&format!("{item}:status:"))
+        );
+        if !minted.is_empty() {
+            let minted: Vec<String> = minted.iter().map(|event| format!("<{event}>")).collect();
+            pattern.push_str(&format!(
+                " MINUS {{ VALUES ?statusDependent {{ {} }} }}",
+                minted.join(" ")
+            ));
+        }
+        pattern
+    }
+
+    async fn count(client: &StoreClient<'_, '_>, item: &str, minted: &[String]) -> Result<i64> {
+        let rows = client
+            .select(&format!(
+                "SELECT (COUNT(DISTINCT ?statusDependent) AS ?n) WHERE {{ {} }}",
+                client.in_graph(&Self::dependents(item, minted))
+            ))
+            .await?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.get("n"))
+            .and_then(|n| n.as_i64())
+            .unwrap_or(0))
+    }
+}
+
 /// A status event belongs to the item via onItem, so delete/archive/purge owns it.
 /// A graph-local sequence orders transitions even when the kernel clock is frozen.
 ///
-/// It is written only while `guard` (a pattern over the ledger's graph) also holds, and it
-/// comes with the minted event's IRI, so the caller can read back whether this update wrote
-/// it (ledger #2764, #2766). It carries its committer (ledger #2819), and `claimed`, a close
-/// date an import principal claimed, dates it instead of `now`, marked `closedAtSource
-/// "import"`, so the daily series places the close on its source date.
+/// It is written only while `guard` (a pattern over the ledger's graph) also holds, under the
+/// IRI `event` the caller minted from `events`, so the caller can read back whether this update
+/// wrote it (ledger #2764, #2766). Its sequence counts `events`, listed (ledger #3256). It
+/// carries its committer (ledger #2819), and `claimed`, a close date an import principal
+/// claimed, dates it instead of `now`, marked `closedAtSource "import"`, so the daily series
+/// places the close on its source date.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn status_event_when(
     client: &StoreClient<'_, '_>,
     item: &str,
+    event: &str,
+    events: &StatusEvents,
     status: &str,
     now: u64,
     guard: &str,
     who: &Attribution,
     claimed: Option<u64>,
-) -> Result<(String, String)> {
-    let event = format!("{item}:status:{}", mint_id(now)?);
+) -> String {
     let mut triples = format!(
         "<{event}> <{}> <{}> ; <{}> <{item}> ; <{}> <{status}> ; <{}> {} ; <{}> ?sequence .",
         v::ext::TYPE,
@@ -35,7 +207,7 @@ pub(super) fn status_event_when(
         datetime(claimed.unwrap_or(now)),
         v::EVENT_SEQUENCE
     );
-    triples.push_str(&who.commit(&event, now));
+    triples.push_str(&who.commit(event, now));
     if claimed.is_some() {
         triples.push_str(&format!(
             "\n<{event}> <{}> {} .",
@@ -46,22 +218,26 @@ pub(super) fn status_event_when(
     let triples = client.in_graph(&triples);
     let guard = client.in_graph(&format!("{} {guard}", live(item)));
     let previous = client.in_graph(&format!(
-        "?past <{}> <{}> ; <{}> <{item}> . {}",
+        "{} ?past <{}> <{}> ; <{}> <{item}> . {}",
+        events.values("?past"),
         v::ext::TYPE,
         v::STATUS_EVENT_CLASS,
         v::ON_ITEM,
-        not_imported("?past")
+        events.not_imported("?past")
     ));
-    Ok((
-        format!("INSERT {{ {triples} }} WHERE {{ {guard} {{ SELECT (COUNT(?past) + 1 AS ?sequence) WHERE {{ {previous} }} }} }}"),
-        event,
-    ))
+    format!("INSERT {{ {triples} }} WHERE {{ {guard} {{ SELECT (COUNT(?past) + 1 AS ?sequence) WHERE {{ {previous} }} }} }}")
 }
 
-/// Preserve a close stamp imported directly through the store before reopen removes it.
-/// Normal endpoint closes already have their event, so this is then a no-op.
-pub(super) fn preserve_close(client: &StoreClient<'_, '_>, item: &str, now: u64) -> Result<String> {
-    let event = format!("{item}:status:{}", mint_id(now)?);
+/// Preserve a close stamp imported directly through the store before reopen removes it, under
+/// the IRI `event` the caller minted from `events`, only while `guard` also holds. Normal
+/// endpoint closes already have their event, so this is then a no-op.
+pub(super) fn preserve_close(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    event: &str,
+    events: &StatusEvents,
+    guard: &str,
+) -> String {
     let triples = client.in_graph(&format!(
         "<{event}> <{}> <{}> ; <{}> <{item}> ; <{}> <{}> ; <{}> ?at ; <{}> 0 ; <{}> ?source .",
         v::ext::TYPE,
@@ -74,22 +250,23 @@ pub(super) fn preserve_close(client: &StoreClient<'_, '_>, item: &str, now: u64)
         v::CLOSED_AT_SOURCE
     ));
     let guard = client.in_graph(&format!(
-        "{} <{item}> <{}> <{}> ; <{}> ?at . OPTIONAL {{ <{item}> <{}> ?source }} \
-         FILTER NOT EXISTS {{ ?past <{}> <{}> ; <{}> <{item}> ; <{}> <{}> ; <{}> ?at . {} }}",
+        "{} <{item}> <{}> <{}> ; <{}> ?at . OPTIONAL {{ <{item}> <{}> ?source }} {guard} \
+         FILTER NOT EXISTS {{ {} ?past <{}> <{}> ; <{}> <{item}> ; <{}> <{}> ; <{}> ?at . {} }}",
         live(item),
         v::STATUS,
         v::CLOSED,
         v::CLOSED_AT,
         v::CLOSED_AT_SOURCE,
+        events.values("?past"),
         v::ext::TYPE,
         v::STATUS_EVENT_CLASS,
         v::ON_ITEM,
         v::STATUS,
         v::CLOSED,
         v::ext::CREATED,
-        not_imported("?past")
+        events.not_imported("?past")
     ));
-    Ok(format!("INSERT {{ {triples} }} WHERE {{ {guard} }}"))
+    format!("INSERT {{ {triples} }} WHERE {{ {guard} }}")
 }
 
 #[derive(Default)]
@@ -337,6 +514,7 @@ async fn backfill_all(
     }
     let suffix = format!(":status:backfill:{}", mint_id(now_ms(inv)?)?);
     let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
     let mut values = Vec::new();
     for row in rows {
         let item = &row["item"].value;
@@ -350,6 +528,7 @@ async fn backfill_all(
         if !seen.insert(item.clone()) || at < filed {
             return Err(Error::Endpoint(format!("backfill refuses multiple timestamps or updated before filing for {item}; nothing changed")));
         }
+        items.push(row["item"].term("item")?.to_string());
         values.push(format!(
             "({} {} {} {} <{item}{suffix}>)\n",
             row["item"].term("item")?,
@@ -372,22 +551,31 @@ async fn backfill_all(
         v::EVENT_SEQUENCE,
         v::CLOSED_AT_SOURCE
     ));
-    let guard = client.in_graph(&format!(
-        "?item <{}> <{}> ; <{}> <{}> ; <{}> ?updated ; <{}> ?created . \
-         FILTER NOT EXISTS {{ ?item <{}> ?existing }}",
-        v::ext::TYPE,
-        v::ITEM_CLASS,
-        v::STATUS,
-        v::CLOSED,
-        v::ext::MODIFIED,
-        v::ext::CREATED,
-        v::CLOSED_AT
-    ));
+    // ★ The snapshot is listed INSIDE the graph's group, and the `NOT EXISTS` lists the
+    // chunk's items again (ledger #3256): the store narrows a pattern only by a `VALUES` in its
+    // own group, so with the list outside it `?item status closed` copied every closed item's
+    // status into the scoped update, and `?item closedAt ?existing` every `closedAt`.
+    let guard = |values: &str, items: &str| {
+        client.in_graph(&format!(
+            "VALUES (?item ?at ?updated ?created ?event) {{ {values} }} \
+             ?item <{}> <{}> ; <{}> <{}> ; <{}> ?updated ; <{}> ?created . \
+             FILTER NOT EXISTS {{ VALUES ?item {{ {items} }} ?item <{}> ?existing }}",
+            v::ext::TYPE,
+            v::ITEM_CLASS,
+            v::STATUS,
+            v::CLOSED,
+            v::ext::MODIFIED,
+            v::ext::CREATED,
+            v::CLOSED_AT
+        ))
+    };
     // Keep each request below the store's SPARQL byte bound, just as bulk item
     // reads do. This is still one operator Sink, with no per-item sub-invocations.
-    for chunk in values.chunks(400) {
-        let values = chunk.concat();
-        client.update(&format!("INSERT {{ {triples} }} WHERE {{ VALUES (?item ?at ?updated ?created ?event) {{ {values} }} {guard} }}")).await?;
+    for (chunk, items) in values.chunks(400).zip(items.chunks(400)) {
+        let guard = guard(&chunk.concat(), &items.join(" "));
+        client
+            .update(&format!("INSERT {{ {triples} }} WHERE {{ {guard} }}"))
+            .await?;
     }
     // Count this invocation's events, rather than claiming every candidate was written
     // when another writer may have changed an item between our read and update.
