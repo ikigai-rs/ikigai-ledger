@@ -725,9 +725,11 @@ an item that has a key, and (0.12.0) a `child:` line per child, only for an item
 children.
 
 ★ **For the total alone, read `count`, not `items limit=1`** (ledger #1128). Both faces of
-`items` that state a total also run the corpus check — two scans of the whole graph — because
-they show what it finds (`unreadable`, and the plain face's ⚠ footer); that check is most of
-what a one-row listing costs. `count` takes the same filter, parsed by the same function and
+`items` that state a total also run the corpus check — since ledger #3255 behind one `ASK` that
+skips it over a clean ledger (see "Assume an editor got there first"), and over a ledger
+holding an unreadable item two scans of the whole graph — because they show what it finds
+(`unreadable`, and the plain face's ⚠ footer). Before that probe, the check was most of what
+a one-row listing cost. `count` takes the same filter, parsed by the same function and
 counted by the same query, so its number is `total` exactly, and it pays for the count alone.
 Measured over a kernel that caches nothing, at 3000 open items (`tests/listing_cost.rs`, run by
 hand, on a machine with other builds running, so read the ratios rather than the
@@ -848,6 +850,20 @@ cannot parse, such as a `dcterms:created` written as an `xsd:date` — is **repo
 what is wrong, rather than quietly dropped — the worst outcome being work that is neither
 visible nor gone. Asking for such an item directly says what is wrong with it, which "not
 found" would not. `model::REQUIRED` is the one list both directions use.
+
+★ **The check runs only when a probe says it could find something** (ledger #3255). The corpus
+check scans every item, open and closed, whatever the filter and the limit; measured in the
+scale round at 10x (11,320 open, 25,000 closed), it was 3.5 s of a 4.0 s `items`. So `items`
+first sends one `ASK` (`model::may_have_defects`): is there a typed item without a title or a
+status, without a `ledger:number` that is surely an integer, or without a `dcterms:created` or
+`dcterms:modified` that is surely a timestamp the reader parses? Over a ledger written through
+its Sinks the answer is no, and the check is skipped. Otherwise the check runs and its answer
+is the one shown, so the ⚠ footer and JSON `unreadable` are unchanged. The probe is narrower
+than the reader on purpose (a timestamp with a `+02:00` offset is readable but not vouched
+for), so a value it cannot vouch for costs the full check and is never a missed report.
+`tests/unreadable_probe.rs` holds the probe against the check. A COUNT of typed items against
+a COUNT of the listed pattern would not do: it compares presence, and `ledger:number
+"twelve"` is present.
 
 **And one bad timestamp does not take an item out of the list.** An unreadable or missing
 `dcterms:created` or `dcterms:modified` is read as ABSENT, and the other one stands in for it:

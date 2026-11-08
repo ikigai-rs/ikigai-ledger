@@ -1543,7 +1543,11 @@ impl Endpoint for ItemsEndpoint {
             entries.extend(matching.into_iter().map(|item| (index, item)));
             if want != TURTLE {
                 total = total.saturating_add(model::count_items(&client, &local).await?);
-                broken.extend(model::defects(&client).await?);
+                // The corpus check scans every item, open and closed; the probe is one
+                // ASK and is false on a clean graph, which is the common case (#3255).
+                if model::may_have_defects(&client).await? {
+                    broken.extend(model::defects(&client).await?);
+                }
             }
         }
         if !sort.is_default() {
@@ -1788,7 +1792,9 @@ const COUNT_FACES: [&str; 2] = [PLAIN, JSON];
 /// returning a row per item per timestamp and number, to fill an `unreadable` list the caller
 /// never read. Measured over an uncached kernel at 3000 items, the check was ~60% of the read
 /// and the COUNT ~6% (`tests/listing_cost.rs`). The listing faces keep the check, unchanged:
-/// they show what it finds. This is the door for a caller that wants only the number.
+/// they show what it finds (since ledger #3255 behind [`model::may_have_defects`], one `ASK`
+/// that skips it over a clean ledger). This is the door for a caller that wants only the
+/// number.
 ///
 /// The same filter, parsed by the same function ([`listing_filter`]), counted by the same
 /// query ([`model::count_items`]) — so this is `items`' `total` for the same arguments, an
