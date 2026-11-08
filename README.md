@@ -2212,6 +2212,28 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.21.0: a label grammar enforced everywhere, and a ledger that stays fast and closable as it grows
+
+A minor release, because one input that was accepted is now refused: a label outside the label
+grammar. Everything else is a fix or a speedup, and no answer's shape changes.
+
+- **The label grammar is enforced wherever a label is written** (ledger #2634), `append labels=`
+  included: `label content="repo:x worker:y p2"` is refused instead of being stored as one label
+  with spaces in it, and nothing is stored.
+- **Close, reopen and backfill stay possible in a large ledger** (ledger #3256): their patterns are
+  anchored on the item's own status events, so the store's scoped copy no longer grows with every
+  closed item in the ledger. Before this, a ledger of about 62,500 closed items refused every close.
+  A close or reopen that loses a race with another status write retries from a fresh read, and after
+  eight tries is refused as Conflict, naming the item. See "What a close and a reopen cost".
+- **Listings no longer scan the whole ledger** (ledger #3255): `items` runs the corpus check behind a
+  one-query probe, so the ⚠ footer and JSON `unreadable` are unchanged while an ordinary listing skips
+  the two full scans (about 3.9 s to 0.5 s at ten times today's size).
+- **`next` loads only what readiness reads** (ledger #3257), and an unbounded load fills labels and
+  links linearly (about 1.8 s to 0.85 s at ten times today's size).
+- **Dated close and reopen history is marked as claimed** (PR 95), like dated filing already was.
+- **A scale harness** (ledger #3241), `tests/scale_round.rs`, ignored by default: the listings, `next`,
+  `append` and `close` at 1x, 10x and 100x of a realistic ledger.
+
 ### 0.20.0: listings across ledgers, by priority and sorted; the claim's fencing epoch
 
 A minor release: new arguments and terms, all additive, so an existing caller is unaffected.
