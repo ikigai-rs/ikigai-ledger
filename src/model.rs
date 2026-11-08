@@ -1090,6 +1090,58 @@ pub async fn defects(client: &StoreClient<'_, '_>) -> Result<Vec<(String, Vec<St
         .collect())
 }
 
+/// A `ledger:number` lexical form [`Binding::as_i64`](crate::sparql) surely reads: an
+/// optional sign and at most 18 digits, which always fits an `i64`.
+const SURE_NUMBER: &str = "^[+-]?[0-9]{1,18}$";
+
+/// A timestamp lexical form [`millis`] surely reads: a year from 1970, a real month,
+/// day, hour, minute and second, an optional fraction, and `Z` or no zone. Narrower than
+/// [`millis`] on purpose (no offsets, no leap second, no surrounding space): a value
+/// outside it is only a reason to run the full check, never a verdict.
+const SURE_TIME: &str = "^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\
+                         T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[Zz]?$";
+
+/// Whether [`defects`] could find anything in this graph: one `ASK`, no rows, no
+/// `ORDER BY` — the probe that keeps the corpus check off the listing path (ledger #3255).
+///
+/// ★ **Exact in the direction that matters.** `false` means every typed item has a title,
+/// a status, a number in `SURE_NUMBER` and a timestamp in `SURE_TIME`, and each of
+/// those values is one the reader parses, so [`defects`] would return nothing. `true`
+/// means some item falls outside that, and the caller runs [`defects`] for the verdict:
+/// an item stamped with an offset is a false alarm that costs the full check, never a
+/// missed report. `tests/unreadable_probe.rs` holds the two together.
+///
+/// ⚠ **Why not a COUNT of typed items against a COUNT of the listed pattern.** That
+/// compares presence, and present is not readable (see [`defects`]): `ledger:number
+/// "twelve"` or two `xsd:date` timestamps leave both counts equal while the reader drops
+/// the item. So the probe tests the values the reader parses, in the store.
+pub async fn may_have_defects(client: &StoreClient<'_, '_>) -> Result<bool> {
+    client
+        .ask(&defect_probe_query(&client.ledger().graph()))
+        .await
+}
+
+/// The `ASK` [`may_have_defects`] sends, over the named graph — public so a test can hold
+/// it against [`defects`] through the store's own door.
+pub fn defect_probe_query(graph: &str) -> String {
+    format!(
+        "ASK WHERE {{ GRAPH <{graph}> {{ ?item <{type_}> <{class}> .\n\
+         FILTER(NOT EXISTS {{ ?item <{title}> ?title }}\n\
+           || NOT EXISTS {{ ?item <{status}> ?status }}\n\
+           || NOT EXISTS {{ ?item <{number}> ?number \
+                FILTER(REGEX(STR(?number), \"{SURE_NUMBER}\")) }}\n\
+           || NOT EXISTS {{ VALUES ?p {{ <{created}> <{modified}> }} ?item ?p ?time \
+                FILTER(REGEX(STR(?time), \"{SURE_TIME}\")) }}) }} }}",
+        type_ = v::ext::TYPE,
+        class = v::ITEM_CLASS,
+        title = v::ext::TITLE,
+        status = v::STATUS,
+        number = v::NUMBER,
+        created = v::ext::CREATED,
+        modified = v::ext::MODIFIED,
+    )
+}
+
 /// One unreadable value, in the words every face reports it in.
 fn unreadable(predicate: &str, value: &str) -> String {
     format!("unreadable {} {value:?}", short_name(predicate))
