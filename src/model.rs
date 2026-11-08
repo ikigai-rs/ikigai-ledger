@@ -5,7 +5,7 @@
 //! deferred, has these labels, has none of those) is a *filter*, and keeping it there is
 //! why a ranking policy can be a dozen lines instead of a rules engine.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ikigai_core::{Error, Result};
 use oxrdf::{Graph, Literal, NamedNode, Triple};
@@ -1236,7 +1236,7 @@ pub async fn load_open_items(client: &StoreClient<'_, '_>) -> Result<Vec<Item>> 
 pub async fn matching_iris(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
-) -> Result<std::collections::BTreeSet<String>> {
+) -> Result<BTreeSet<String>> {
     let query = format!(
         "SELECT DISTINCT ?item WHERE {{ {} }}",
         client.in_graph(&format!(
@@ -1348,8 +1348,164 @@ async fn load(
         None => client.select(&query("")).await?,
     };
     let mut items = items_from_rows(&rows);
-    fill_multivalued(client, &mut items).await?;
+    // ★ An unbounded load fills by scanning each predicate once (ledger #3257): a `VALUES`
+    // list of every item joined with the pattern is superlinear in the store.
+    match page {
+        Some(_) => fill_multivalued(client, &mut items).await?,
+        None => fill_by_scan(client, &mut items, MULTIVALUED).await?,
+    }
     Ok(items)
+}
+
+/// Every open item with only what readiness and the ordering policies read (ledger #3257):
+/// number, title, kind, status, priority, timestamps, the claim and its lease, deferred,
+/// awaiting, the lifecycle state, labels, `about` and `blocks`.
+///
+/// ★ **Not a record to show.** Body, provenance, parents, related and children are left
+/// unread; [`complete`] reloads in full the few items an answer shows. `next` read every
+/// open item's whole record through [`load_open_items`], and at 113,200 open items that
+/// load took 48 s and its fill 86 s.
+pub async fn load_open_for_readiness(client: &StoreClient<'_, '_>) -> Result<Vec<Item>> {
+    let query = format!(
+        "SELECT ?item ?kind ?number ?title ?status ?priority ?deferred ?holder ?created \
+         ?modified ?state ?expires ?awaiting WHERE {{ {} }} \
+         ORDER BY DESC({RECENCY}) DESC(?number)",
+        client.in_graph(&format!(
+            "{listed}OPTIONAL {{ ?item <{created}> ?created }}\n\
+             OPTIONAL {{ ?item <{modified}> ?modified }}\n\
+             OPTIONAL {{ ?item <{type_}> ?kind . FILTER(?kind != <{item_class}>) }}\n\
+             OPTIONAL {{ ?item <{priority}> ?priority }}\n\
+             OPTIONAL {{ ?item <{deferred}> ?deferred }}\n\
+             OPTIONAL {{ ?item <{holder}> ?holder }}\n\
+             OPTIONAL {{ ?item <{state}> ?state }}\n\
+             OPTIONAL {{ ?item <{expires}> ?expires }}\n\
+             OPTIONAL {{ ?item <{awaiting}> ?awaiting }}\n{filters}",
+            listed = listed_pattern(),
+            type_ = v::ext::TYPE,
+            item_class = v::ITEM_CLASS,
+            created = v::ext::CREATED,
+            modified = v::ext::MODIFIED,
+            priority = v::PRIORITY,
+            deferred = v::DEFERRED,
+            holder = v::CLAIMED_BY,
+            state = v::STATE,
+            expires = v::LEASE_EXPIRES,
+            awaiting = v::AWAITING,
+            filters = filter_clauses(&Filter::default())?,
+        ))
+    );
+    let rows = client.select(&query).await?;
+    let mut items = items_from_rows(&rows);
+    fill_by_scan(client, &mut items, &[v::LABEL, v::ABOUT, v::BLOCKS]).await?;
+    Ok(items)
+}
+
+/// `items` replaced by their full records, in the same order — for the few items an answer
+/// built over [`load_open_for_readiness`] shows. An item gone since is kept as it was.
+pub async fn complete(client: &StoreClient<'_, '_>, items: &mut [Item]) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let iris: Vec<String> = items.iter().map(|i| i.iri.clone()).collect();
+    let mut full: BTreeMap<String, Item> = if iris.len() > COMPLETE_BY_PAGE {
+        // Most of the ledger: one unbounded load, filled linearly, is cheaper than `VALUES`.
+        let wanted: BTreeSet<&str> = iris.iter().map(String::as_str).collect();
+        load(client, &Filter::default(), None)
+            .await?
+            .into_iter()
+            .filter(|i| wanted.contains(i.iri.as_str()))
+            .map(|i| (i.iri.clone(), i))
+            .collect()
+    } else {
+        load(client, &Filter::default(), Some(&iris))
+            .await?
+            .into_iter()
+            .map(|i| (i.iri.clone(), i))
+            .collect()
+    };
+    for item in items.iter_mut() {
+        if let Some(found) = full.remove(&item.iri) {
+            *item = found;
+        }
+    }
+    Ok(())
+}
+
+/// Above this many items [`complete`] loads every open item rather than naming them.
+const COMPLETE_BY_PAGE: usize = 500;
+
+/// The multi-valued predicates a full record carries.
+const MULTIVALUED: &[&str] = &[v::LABEL, v::ABOUT, v::BLOCKS, v::PARENT, v::RELATED];
+
+/// [`fill_multivalued`] for a set too large to name: one scan per predicate in `predicates`
+/// over the whole graph, joined to `items` in Rust, so its cost is linear in the graph. The
+/// children are read when `parent` is among them.
+async fn fill_by_scan(
+    client: &StoreClient<'_, '_>,
+    items: &mut [Item],
+    predicates: &[&str],
+) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let at: BTreeMap<String, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| (item.iri.clone(), i))
+        .collect();
+    for predicate in predicates {
+        let query = format!(
+            "SELECT ?item ?o WHERE {{ {} }}",
+            client.in_graph(&format!("?item <{predicate}> ?o ."))
+        );
+        for row in client.select(&query).await? {
+            let (Some(subject), Some(o)) = (row.get("item"), row.get("o")) else {
+                continue;
+            };
+            let Some(&i) = at.get(&subject.value) else {
+                continue;
+            };
+            let item = &mut items[i];
+            let list = match *predicate {
+                p if p == v::LABEL => &mut item.labels,
+                p if p == v::ABOUT => &mut item.about,
+                p if p == v::BLOCKS => &mut item.blocks,
+                p if p == v::PARENT => &mut item.parents,
+                p if p == v::RELATED => &mut item.related,
+                _ => continue,
+            };
+            list.push(o.value.clone());
+        }
+    }
+    if predicates.contains(&v::PARENT) {
+        // The inbound `parent` edges, from items only (ledger #1454).
+        let query = format!(
+            "SELECT ?item ?child WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "?child <{}> ?item ;\n  <{}> <{}> .",
+                v::PARENT,
+                v::ext::TYPE,
+                v::ITEM_CLASS,
+            ))
+        );
+        for row in client.select(&query).await? {
+            if let (Some(item), Some(child)) = (row.get("item"), row.get("child")) {
+                if let Some(&i) = at.get(&item.value) {
+                    items[i].children.push(child.value.clone());
+                }
+            }
+        }
+    }
+    for item in items.iter_mut() {
+        item.children.sort();
+        item.children.dedup();
+        item.labels.sort();
+        item.about.sort();
+        item.blocks.sort();
+        item.parents.sort();
+        item.related.sort();
+    }
+    Ok(())
 }
 
 /// How many bytes of IRIs one `VALUES` list may hold.
@@ -1710,7 +1866,7 @@ fn gather_comment(comments: &mut Vec<Comment>, comment: Comment) {
 /// target is named in the JSON face. An IRI that is not a live item is simply absent.
 pub async fn numbers_of(
     client: &StoreClient<'_, '_>,
-    iris: &std::collections::BTreeSet<String>,
+    iris: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, i64>> {
     if iris.is_empty() {
         return Ok(BTreeMap::new());

@@ -6738,7 +6738,12 @@ impl Endpoint for NextEndpoint {
             ..Filter::default()
         };
         let limit = parse_limit(inv, 3)?;
-        let mut set = select::ready_at(&client, &filter, now).await?;
+        // ★ Slim records unless the face shows every excluded item whole (ledger #3257).
+        let mut set = if want == JSON {
+            select::ready_full_at(&client, &filter, now).await?
+        } else {
+            select::ready_at(&client, &filter, now).await?
+        };
         // ★ After the ready set, like `labels=`: blocked, the cycle check and leverage have been
         // computed over the whole ledger, so these only choose which items are being asked about.
         // Before the horizons below, because an item this leaves out cannot change this answer.
@@ -6759,6 +6764,9 @@ impl Endpoint for NextEndpoint {
             (a, b) => a.or(b),
         };
         let mut selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
+        if want != JSON {
+            select::complete(&client, &mut selection).await?;
+        }
         let repr = match want {
             TURTLE => Representation::new(
                 ReprType::new(TURTLE).with_param("charset", "utf-8"),

@@ -182,14 +182,25 @@ fn current_state<'l>(lifecycle: &'l Lifecycle, item: &Item) -> Option<&'l Lifecy
 /// a DAG. A cycle is not exotic — it is what happens when someone links carelessly — and
 /// the alternative answer, "nothing is ready", is indistinguishable from having finished.
 pub async fn ready(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<ReadySet> {
-    ready_inner(client, filter, None).await
+    ready_inner(client, filter, None, false).await
 }
 
 /// [`ready`], judging leases at `now` (ms since the epoch, from the kernel's clock): a claim
 /// whose lease has run out is excluded as [`Excluded::LeaseExpired`] rather than
 /// [`Excluded::Claimed`]. It is excluded either way — an expired lease is never free.
 pub async fn ready_at(client: &StoreClient<'_, '_>, filter: &Filter, now: u64) -> Result<ReadySet> {
-    ready_inner(client, filter, Some(now)).await
+    ready_inner(client, filter, Some(now), false).await
+}
+
+/// [`ready_at`] over full records, for an answer that shows every open item it read (the
+/// JSON face renders each excluded item whole): reloading most of the ledger after a slim
+/// read would cost more than reading it whole once.
+pub async fn ready_full_at(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+    now: u64,
+) -> Result<ReadySet> {
+    ready_inner(client, filter, Some(now), true).await
 }
 
 /// The earliest lease, among the items `set` excluded as claimed, that is still running at
@@ -208,8 +219,15 @@ async fn ready_inner(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
     now: Option<u64>,
+    full: bool,
 ) -> Result<ReadySet> {
-    let open = model::load_open_items(client).await?;
+    // ★ Only what readiness and the policies read unless `full` (ledger #3257); [`complete`]
+    // reloads the items an answer shows.
+    let open = if full {
+        model::load_open_items(client).await?
+    } else {
+        model::load_open_for_readiness(client).await?
+    };
     // ★ Blockers in other ledgers, from this ledger's own graph (ledger #2829): the mirror the
     // ledger keeps of each cross-ledger `blocks` says whether its subject is open, and that is
     // all a ledger reads of another.
@@ -441,6 +459,22 @@ pub fn rank(
         ready_count,
         excluded: set.excluded,
     }
+}
+
+/// Reload in full the items `selection` ranks: the ready set is computed over records
+/// slimmed to what readiness reads ([`model::load_open_for_readiness`]), so a ranked item is
+/// complete only once this has run. The excluded items are only named, by number.
+pub async fn complete(client: &StoreClient<'_, '_>, selection: &mut Selection) -> Result<()> {
+    let mut shown: Vec<Item> = selection
+        .ranked
+        .iter()
+        .map(|(_, item)| item.clone())
+        .collect();
+    model::complete(client, &mut shown).await?;
+    for ((_, item), full) in selection.ranked.iter_mut().zip(shown) {
+        *item = full;
+    }
+    Ok(())
 }
 
 /// What a policy is handed for a ready set.
