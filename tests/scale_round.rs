@@ -419,13 +419,27 @@ fn count_query() -> String {
     )
 }
 
-/// `model::page_iris` for the open filter at `limit`: GROUP BY and ORDER BY over every
-/// open item before the LIMIT.
+/// The original `model::page_iris` query (now its duplicate-heavy fallback): GROUP BY
+/// and ORDER BY over every open item before the LIMIT. Kept for a same-store baseline.
 fn page_query(limit: usize) -> String {
     format!(
         "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ GRAPH <{GRAPH}> {{ \
          {}OPTIONAL {{ ?item <{}> ?created }}\nOPTIONAL {{ ?item <{}> ?modified }}\n{} }} }} \
          GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET 0",
+        listed(),
+        v::ext::CREATED,
+        v::ext::MODIFIED,
+        open_clause()
+    )
+}
+
+/// `model::page_iris`'s bounded row sort, before deduplicating subjects. On this fixture
+/// every item has one row, so its first `limit` subjects must equal the grouped page above.
+fn page_rows_query(limit: usize) -> String {
+    format!(
+        "SELECT ?item WHERE {{ GRAPH <{GRAPH}> {{ \
+         {}OPTIONAL {{ ?item <{}> ?created }}\nOPTIONAL {{ ?item <{}> ?modified }}\n{} }} }} \
+         ORDER BY DESC({RECENCY}) DESC(?number) ?item LIMIT {limit}",
         listed(),
         v::ext::CREATED,
         v::ext::MODIFIED,
@@ -691,10 +705,24 @@ fn scale_round() {
         };
         let [missing, values] = defect_queries();
         let fills = fill_queries(&open_iris);
+        for limit in [1, 50] {
+            let items = |query: &str| {
+                let json: Value = serde_json::from_str(&select(&kernel, query)).expect("JSON");
+                json["results"]["bindings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["item"].clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(items(&page_query(limit)), items(&page_rows_query(limit)));
+        }
         let parts: Vec<(&str, Vec<String>)> = vec![
             ("q: count (open)", vec![count_query()]),
             ("q: page limit=1", vec![page_query(1)]),
             ("q: page limit=50", vec![page_query(50)]),
+            ("q: page rows limit=1", vec![page_rows_query(1)]),
+            ("q: page rows limit=50", vec![page_rows_query(50)]),
             ("q: load every open", vec![load_query()]),
             ("q: fill every open", fills),
             ("q: defects (2 scans)", vec![missing, values]),
