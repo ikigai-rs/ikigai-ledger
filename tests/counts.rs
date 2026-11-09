@@ -269,6 +269,67 @@ fn second_read_is_a_cache_hit_writes_invalidate_and_midnight_extends_series() {
     assert!(source(&k, "urn:iki:ledger:counts", &[]).ends_with("2026-09-16,0,1\n"));
 }
 
+// Ledger #2916: this exercises the complete dependency chain, including the store
+// sub-request. Equal bytes alone cannot distinguish a cache hit from a repeated query.
+// This is an executable specification of the missing behavior, not a passing
+// regression guard yet. Run explicitly with --ignored to reproduce the defect.
+// Store 0.4.0's graph-select inherits all three global write threads, so counts
+// cannot narrow its dependencies here. The store must first expose graph-scoped
+// freshness that also accounts for broad update/load and external writers; then
+// counts must stop using cached(), which adds the global graph-update thread.
+#[test]
+#[ignore = "ledger #2916: requires graph-scoped freshness in ikigai-store"]
+fn a_write_to_one_named_ledger_keeps_the_other_counts_cached() {
+    let (k, _) = dated_kernel();
+    for ledger in ["alpha", "beta"] {
+        sink(
+            &k,
+            &format!("urn:iki:ledger:{ledger}:append"),
+            &[("content", "Cache me")],
+        );
+    }
+    let trace = Arc::new(Trace::default());
+    let read = |ledger: &str| {
+        trace.0.lock().unwrap().clear();
+        let repr = futures::executor::block_on(k.issue_traced(
+            ikigai_core::Request::new(
+                Verb::Source,
+                ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:counts")).unwrap(),
+            ),
+            &Capability::root(),
+            trace.clone(),
+        ))
+        .unwrap();
+        let events = trace.0.lock().unwrap();
+        let hit = events.len() == 1 && events[0].cache_hit;
+        (repr.bytes, hit, format!("{events:?}"))
+    };
+    let alpha = read("alpha").0;
+    let beta = read("beta").0;
+    for ledger in ["alpha", "beta"] {
+        let (_, hit, events) = read(ledger);
+        assert!(
+            hit,
+            "{ledger} counts must be cached before the write: {events}"
+        );
+    }
+    sink(
+        &k,
+        "urn:iki:ledger:alpha:append",
+        &[("content", "Only alpha changes")],
+    );
+    let (changed, hit, events) = read("alpha");
+    assert!(!hit, "alpha counts must refresh: {events}");
+    assert_ne!(changed, alpha);
+    assert!(String::from_utf8(changed).unwrap().ends_with(",2,0\n"));
+    let (unchanged, hit, events) = read("beta");
+    assert_eq!(unchanged, beta);
+    assert!(
+        hit,
+        "beta counts must stay cached after an alpha write: {events}"
+    );
+}
+
 #[test]
 fn frozen_clock_transitions_and_reclosing_preserve_history() {
     let (k, clock) = dated_kernel();
