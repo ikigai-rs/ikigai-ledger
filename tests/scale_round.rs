@@ -420,8 +420,8 @@ fn count_query() -> String {
     )
 }
 
-/// The original `model::page_iris` query (now its duplicate-heavy fallback): GROUP BY
-/// and ORDER BY over every open item before the LIMIT. Kept for a same-store baseline.
+/// `model::page_iris`: GROUP BY and ORDER BY over every open item before the LIMIT.
+/// Kept beside the row-prefix candidate for a same-store comparison.
 fn page_query(limit: usize) -> String {
     format!(
         "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ GRAPH <{GRAPH}> {{ \
@@ -434,13 +434,13 @@ fn page_query(limit: usize) -> String {
     )
 }
 
-/// `model::page_iris`'s bounded row sort, before deduplicating subjects. On this fixture
+/// A candidate that limits rows before deduplicating subjects. On this fixture
 /// every item has one row, so its first `limit` subjects must equal the grouped page above.
 fn page_rows_query(limit: usize) -> String {
     format!(
         "SELECT ?item WHERE {{ GRAPH <{GRAPH}> {{ \
-         {}OPTIONAL {{ ?item <{}> ?created }}\nOPTIONAL {{ ?item <{}> ?modified }}\n{} }} }} \
-         ORDER BY DESC({RECENCY}) DESC(?number) ?item LIMIT {limit}",
+         {}OPTIONAL {{ ?item <{}> ?created }}\nOPTIONAL {{ ?item <{}> ?modified }}\n{} BIND({RECENCY} AS ?recency) }} }} \
+         ORDER BY DESC(?recency) DESC(?number) ?item LIMIT {limit}",
         listed(),
         v::ext::CREATED,
         v::ext::MODIFIED,

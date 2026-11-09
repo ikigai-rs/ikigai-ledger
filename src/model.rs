@@ -1244,51 +1244,25 @@ fn listed_pattern() -> String {
     )
 }
 
-/// The IRIs of one page, in the listing's order. Sort a bounded row prefix before
-/// deduplicating subjects, then apply the item offset. Usually each item has one row,
-/// so the store can keep only `offset + limit` rows instead of grouping every match.
+/// The IRIs of one page, in the listing's order: grouped by subject BEFORE the `LIMIT` and
+/// `OFFSET`, so both count items. A row bound (what 0.6.0 applied) cut an item a hand edit
+/// had given two rows, and an offset over rows would put the halves on different pages.
 async fn page_iris(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
     limit: usize,
 ) -> Result<Vec<String>> {
-    let pattern = client.in_graph(&format!(
-        "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
-         OPTIONAL {{ ?item <{modified}> ?modified }}\n{filters}",
-        listed_pattern(),
-        created = v::ext::CREATED,
-        modified = v::ext::MODIFIED,
-        filters = filter_clauses(filter)?,
-    ));
-    let wanted = filter.offset.saturating_add(limit);
-    let mut bound = wanted;
-    // A hand edit can multiply rows. Expand a short prefix, but fall back to the
-    // grouped query after four attempts rather than retrieving arbitrarily many
-    // copies of one subject. OFFSET always counts subjects, never these rows.
-    for _ in 0..4 {
-        let query = format!(
-            "SELECT ?item WHERE {{ {pattern} }} \
-             ORDER BY DESC({RECENCY}) DESC(?number) ?item LIMIT {bound}"
-        );
-        let rows = client.select(&query).await?;
-        let mut seen = BTreeSet::new();
-        let items: Vec<String> = rows
-            .iter()
-            .filter_map(|row| row.get("item"))
-            .filter(|item| seen.insert(item.value.as_str()))
-            .map(|item| item.value.clone())
-            .collect();
-        // For a subject, number and timestamp values form a Cartesian product:
-        // its first sorted row has both maxima from the old grouped query. Every
-        // later row ranks no higher, so first occurrences give exactly its order.
-        if items.len() >= wanted || rows.len() < bound {
-            return Ok(items.into_iter().skip(filter.offset).take(limit).collect());
-        }
-        bound = bound.saturating_mul(2);
-    }
     let query = format!(
-        "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {pattern} }} \
+        "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {} }} \
          GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET {offset}",
+        client.in_graph(&format!(
+            "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
+             OPTIONAL {{ ?item <{modified}> ?modified }}\n{filters}",
+            listed_pattern(),
+            created = v::ext::CREATED,
+            modified = v::ext::MODIFIED,
+            filters = filter_clauses(filter)?,
+        )),
         offset = filter.offset,
     );
     Ok(client
