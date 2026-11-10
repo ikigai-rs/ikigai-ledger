@@ -2212,6 +2212,15 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.21.1: daily counts stay cached across ledgers, on ikigai-store 0.5.0
+
+A patch release; no answer's shape changes.
+
+- **A write to one ledger no longer recomputes another ledger's daily counts** (ledger #2916): `counts`
+  hangs on its own ledger's graph thread, which ikigai-store 0.5.0 provides (per-graph freshness,
+  ledger #3322), instead of the thread every scoped write cuts.
+- **ikigai-store 0.5.0**, which also binds `urn:iki:store:graph-written:{graph}`.
+
 ### 0.21.0: a label grammar enforced everywhere, and a ledger that stays fast and closable as it grows
 
 A minor release, because one input that was accepted is now refused: a label outside the label
