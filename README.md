@@ -468,6 +468,32 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) existing
   comments, keys and all, to the graveyard; a replay naming the deleted item is refused as not
   found, but one naming a different live item would write. Comments have no tombstones.
 
+### Resending writes after a lost answer
+
+The action contracts declare `resend_safe_with_key("key")` on `append` and `comment`:
+a client may resend the same request with a nonblank `key`. A replay writes nothing and
+answers `existing` in plain text or `"outcome": "existing"` in JSON. Without `key`, these
+writes have no resend safety declaration. `item=key:…` only selects an item; it does not
+make another write safe to resend. Keys belong to one ledger, with the lifetimes described
+above.
+
+The history import Sink declares `resend_safe()`: every accepted event already has a
+caller-supplied source ID in its Turtle content. Replaying a batch records no new events;
+JSON answers `existing`, and plain text says how many were already recorded.
+
+Claims remain undeclared. Repeating a same-holder claim preserves its epoch and records
+no second claim event, but renews its lease from the new request time. It can also take a
+new claim after a release. A lost answer is therefore not permission to resend a claim.
+
+State moves remain undeclared too. A replay after a successful move still answers Conflict;
+read the state and history before deciding what to do. `from=` is a state precondition,
+not a request ID: after a cycle back to that state, an identical request can move again.
+The current state token is minted by the server, not supplied by the caller, and callers
+without a principal are supported. Neither a matching target state nor an earlier event
+establishes that this request was already applied by this caller. An unambiguous replay
+answer requires a durable caller-supplied move identity; declaring `from` as a resend key
+would promise safety the endpoint does not provide.
+
 ### Handing back: an item awaiting its dispatcher
 
 A worker that finishes hands the item back with its evidence, and from then on the item waits

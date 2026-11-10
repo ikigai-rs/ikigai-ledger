@@ -26,7 +26,8 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 [dependencies]
 # Core 0.3.0 scopes held content to its deliverer and makes unscoped content-store
 # writes root-only (ledger #2965); all ikigai dependencies must share these core types.
-ikigai-core = "0.3.0"
+# Core 0.3.4 adds the resend safety declaration used by keyed writes.
+ikigai-core = "0.3.4"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's
@@ -123,4 +124,5 @@ ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
 # 0.3.0 shares core 0.3.0 and its scoped content store (ledger #2965).
-ikigai-vocab = "0.3.0"
+# 0.3.4 projects resend declarations in the Turtle Meta face.
+ikigai-vocab = "0.3.4"
