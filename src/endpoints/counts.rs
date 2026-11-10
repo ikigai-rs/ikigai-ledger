@@ -464,8 +464,10 @@ impl Endpoint for CountsEndpoint {
         } else {
             Representation::new(ReprType::new(CSV), csv.into_bytes())
         };
-        // A graph write invalidates it; midnight also extends the requested date domain.
-        Ok(cached(repr).cacheable_until(ikigai_core::Time::from_millis((today + 1) * DAY)))
+        // A write to THIS ledger's graph invalidates it, and a write to another ledger does
+        // not; midnight also extends the requested date domain.
+        Ok(cached_in(repr, &client.ledger().graph())
+            .cacheable_until(ikigai_core::Time::from_millis((today + 1) * DAY)))
     }
     fn name(&self) -> &str {
         "ledger-counts"

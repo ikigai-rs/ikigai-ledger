@@ -364,6 +364,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "store-graph-info",
             "store-graph-select",
             "store-graph-update",
+            "store-graph-written",
             "store-graphs",
             "store-info",
             "store-load",
