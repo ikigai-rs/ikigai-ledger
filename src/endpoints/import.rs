@@ -597,6 +597,8 @@ impl Endpoint for ImportEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    // Every accepted event has a stable source ID in content.
+                    .resend_safe()
                     .input(ledger_arg("history"))
                     .summary("Record a batch of past-dated events on one item, or none of them.")
                     .input(item_arg("The item the events happened to."))

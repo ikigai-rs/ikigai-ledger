@@ -335,6 +335,9 @@ fn a_re_send_changes_nothing() {
     let kernel = seeded();
     import(&kernel, &whole_history());
     let triples = triple_count(&kernel);
+    let graph_query =
+        format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{LIVE}> {{ ?s ?p ?o }} }} ORDER BY ?s ?p ?o");
+    let before = select(&kernel, &graph_query);
     let history = source(&kernel, &at("item:1:history"), &[]);
     assert_eq!(
         import(&kernel, &whole_history()),
@@ -343,6 +346,24 @@ fn a_re_send_changes_nothing() {
     );
     assert_eq!(triple_count(&kernel), triples);
     assert_eq!(source(&kernel, &at("item:1:history"), &[]), history);
+    let content = format!("{PREFIXES}{}", whole_history());
+    let replay = try_as(
+        &kernel,
+        &importer(),
+        Verb::Sink,
+        &at("history"),
+        &[
+            ("item", "1"),
+            ("content", &content),
+            ("as", "application/json"),
+        ],
+    )
+    .unwrap();
+    let replay: serde_json::Value = serde_json::from_str(&replay).unwrap();
+    assert_eq!(replay["outcome"], "existing");
+    assert_eq!(replay["recorded"], 0);
+    assert_eq!(replay["already_recorded"], 10);
+    assert_eq!(select(&kernel, &graph_query), before);
 }
 
 /// ★ As a keyed comment's key is, a source id is the ledger's: naming it again on another item,

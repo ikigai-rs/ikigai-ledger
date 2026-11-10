@@ -606,7 +606,9 @@ impl Endpoint for StateEndpoint {
                          declares moves (`ledger:movesTo`), a pair it does not declare is a \
                          Conflict naming every legal move from `from`, also before anything is \
                          written. A closed item refuses entry into an in-flight state, with a \
-                         Conflict naming its close.",
+                         Conflict naming its close. Resending is not declared safe: `from` \
+                         is a state precondition, not a request ID. A replay after a move \
+                         conflicts, and after a cycle back to `from` can move again.",
                     )
                     .input(item_id_input())
                     .input(state_arg("to", "The state to move the item to."))

@@ -3495,6 +3495,7 @@ impl Endpoint for AppendEndpoint {
     fn describe(&self) -> Description {
         let spec = write_scopes(
             ikigai_core::ActionSpec::new(Verb::Sink)
+                .resend_safe_with_key("key")
                 .input(ledger_arg("append"))
                 .summary(
                     "File a new item. The number is allocated from the ledger's counter in \
@@ -3895,6 +3896,7 @@ impl Endpoint for CommentEndpoint {
             .verb(Verb::Meta)
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Sink)
+                    .resend_safe_with_key("key")
                     .input(ledger_arg("comment"))
                     .summary("Append a stamped, attributed comment.")
                     .input(item_arg("The item to comment on."))
@@ -5697,7 +5699,8 @@ impl Endpoint for ClaimEndpoint {
                          renews the claim and its lease. When the capability carries a \
                          principal, the claim records it (`ledger:claimPrincipal`) beside the \
                          holder's name, and \"the same holder\" means the same name AND the \
-                         same principal.",
+                         same principal. Resending is not declared safe: the epoch and claim \
+                         event stay the same, but the lease is renewed from the new request time.",
                     )
                     .input(item_arg("The item to claim."))
                     .input(
