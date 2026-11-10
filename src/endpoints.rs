@@ -623,6 +623,19 @@ fn cached(repr: Representation) -> Representation {
         .depends_on(ikigai_store::GRAPH_UPDATE_THREAD)
 }
 
+/// [`cached`] for a read confined to ONE ledger's graph: hung from that graph's own thread
+/// in place of [`ikigai_store::GRAPH_UPDATE_THREAD`], which every scoped write cuts, so a
+/// write to another ledger leaves it cached (ledger #2916). A broad update and a load can
+/// write any graph, so their threads stay. ⚠ Only for a read whose every store read went
+/// to `graph`: a second graph read here and not named is a write that never invalidates it.
+/// `a_write_to_one_named_ledger_keeps_the_other_counts_cached` in `tests/counts.rs` keeps it.
+fn cached_in(repr: Representation, graph: &str) -> Representation {
+    repr.cacheable()
+        .depends_on(ikigai_store::UPDATE_THREAD)
+        .depends_on(ikigai_store::LOAD_THREAD)
+        .depends_on(ikigai_store::graph_thread(graph))
+}
+
 /// Which face was asked for. An `as` this endpoint cannot serve is **refused**, never
 /// substituted — the caller asked a question and a different answer is not a better one.
 fn wanted_face(inv: &Invocation<'_>, faces: &[&'static str]) -> Result<&'static str> {

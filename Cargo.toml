@@ -54,8 +54,11 @@ ikigai-core = "0.3.0"
 # the floor since ledger #2941: its scoped door narrows a pattern whose subject an inline `VALUES`
 # lists (ledger #2940), which a delete and a purge now rely on to list an item's dependents in one
 # pattern. On 0.3.2 the same update observes the whole graph and is refused past the copy bound.
-# 0.4.0 carries these fixes onto core 0.3.0 and its scoped content store (ledger #2965).
-ikigai-store = { version = "0.4.0", default-features = false }
+# 0.4.0 carries these fixes onto core 0.3.0 and its scoped content store (ledger #2965). 0.5.0
+# is the floor since ledger #2916: a read confined to named graphs depends on each graph's own
+# `graph_thread` (ledger #3322), so counts hangs on its ledger's thread and a write to another
+# ledger leaves it cached. It also binds `urn:iki:store:graph-written:{graph}`.
+ikigai-store = { version = "0.5.0", default-features = false }
 
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
@@ -113,8 +116,9 @@ ikigai-conformance = "0.14.0"
 # `oxigraph/rocksdb` for the whole TEST build (the library build is untouched), which
 # costs an `oxrocksdb-sys` compile once per cache. Since store 0.2.24:
 # `tests/conformance.rs` names the inherited store doors exactly, and 0.2.24 adds `store-graph-info`
-# and `store-dump` (ledger #2111). 0.4.0 shares core 0.3.0, with the fixes above.
-ikigai-store = { version = "0.4.0", features = ["persistent"] }
+# and `store-dump` (ledger #2111). 0.4.0 shares core 0.3.0, with the fixes above; 0.5.0 adds
+# `store-graph-written` and per-graph freshness (ledger #2916).
+ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
