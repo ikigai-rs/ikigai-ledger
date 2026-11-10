@@ -2242,7 +2242,7 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 
 A patch; no answer changes shape.
 
-- **Resend declarations** (ledger #3382, on ikigai-core 0.3.4's `ActionSpec.resend`): `append` and `comment` declare a resend safe when it carries `key` (a replay answers `existing` and writes nothing); history imports declare it safe outright (every accepted event has a stable source id). Claims and `from=` moves stay undeclared: a same-holder claim replay extends the lease, and `from=` is a precondition rather than a request identity. See "Resending a write".
+- **Resend declarations** (ledger #3382, on ikigai-core 0.3.4's `ActionSpec.resend`): `append` and `comment` declare a resend safe when it carries `key` (a replay answers `existing` and writes nothing); history imports declare it safe outright (every accepted event has a stable source id). Claims and `from=` moves stay undeclared: a same-holder claim replay extends the lease, and `from=` is a precondition rather than a request identity. See "Resending writes after a lost answer".
 
 ### 0.21.1: daily counts stay cached across ledgers, on ikigai-store 0.5.0
 
