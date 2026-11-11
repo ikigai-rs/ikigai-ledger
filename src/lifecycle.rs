@@ -680,6 +680,65 @@ mod tests {
     }
 
     #[test]
+    fn a_state_cannot_declare_several_orders() {
+        let text = MINIMAL.replace("ledger:order 1", "ledger:order 1, 2");
+        match Lifecycle::parse(&text) {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "lifecycle");
+                assert_eq!(
+                    detail,
+                    "`urn:iki:ledger:lifecycle:tiny:doing` declares more than one \
+                    ledger:order; a state has one value for this field. Keep one literal value"
+                );
+            }
+            other => panic!("expected a lifecycle refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_state_cannot_declare_several_drains() {
+        let text = MINIMAL.replace("ledger:drain \"me\"", "ledger:drain \"me\", \"you\"");
+        assert!(matches!(
+            Lifecycle::parse(&text),
+            Err(Error::InvalidArgument { name, .. }) if name == "lifecycle"
+        ));
+    }
+
+    #[test]
+    fn an_in_flight_state_cannot_hide_a_nonliteral_drain() {
+        let text = MINIMAL.replace(
+            "ledger:inFlight true .",
+            "ledger:inFlight true ; ledger:drain <urn:drain:hidden> .",
+        );
+        match Lifecycle::parse(&text) {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "lifecycle");
+                assert_eq!(detail, "`urn:iki:ledger:lifecycle:tiny:doing` declares ledger:drain \
+                    as <urn:drain:hidden>, which is not a literal; give this field one literal value");
+            }
+            other => panic!("expected a lifecycle refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_state_cannot_declare_several_names() {
+        let text = MINIMAL.replace("rdfs:label \"doing\"", "rdfs:label \"doing\", \"doing\"@en");
+        assert!(matches!(
+            Lifecycle::parse(&text),
+            Err(Error::InvalidArgument { name, .. }) if name == "lifecycle"
+        ));
+    }
+
+    #[test]
+    fn a_state_cannot_declare_several_flight_values() {
+        let text = MINIMAL.replace("ledger:inFlight true", "ledger:inFlight true, \"true\"");
+        assert!(matches!(
+            Lifecycle::parse(&text),
+            Err(Error::InvalidArgument { name, .. }) if name == "lifecycle"
+        ));
+    }
+
+    #[test]
     fn every_rule_the_state_sink_relies_on_is_refused_at_load() {
         let refused = |from: &str, to: &str| {
             let text = MINIMAL.replace(from, to);
