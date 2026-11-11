@@ -111,7 +111,8 @@ impl Lifecycle {
     /// resource relies on: a state's IRI is `{lifecycle IRI}:{name}`; names and orders are
     /// unique; a state is in flight or names a drain, never both and never neither; and
     /// [`FILED`] is declared, first, and not in flight; a `ledger:movesTo` goes from one of these
-    /// states to another of them; and the document has one version, on one line.
+    /// states to another of them; and the document has one version, on one line. A state's
+    /// name, order, flight flag and optional drain each have one literal value when present.
     pub fn parse(turtle: &str) -> Result<Lifecycle> {
         let bad = |detail: String| Error::InvalidArgument {
             name: "lifecycle".to_string(),
@@ -182,7 +183,7 @@ impl Lifecycle {
                      `{iri}:{{state}}`"
                 )));
             };
-            let label = literal(&state, v::ext::LABEL)
+            let label = state_literal(&graph, &state, v::ext::LABEL, "rdfs:label")?
                 .ok_or_else(|| bad(format!("`{state}` has no rdfs:label (its name)")))?;
             check_name(&label, "state")?;
             let expected = format!("{iri}:{label}");
@@ -193,20 +194,21 @@ impl Lifecycle {
                     state.as_str()
                 )));
             }
-            let order = literal(&state, v::ORDER)
+            let order = state_literal(&graph, &state, v::ORDER, "ledger:order")?
                 .and_then(|o| o.parse::<i64>().ok())
                 .ok_or_else(|| bad(format!("`{label}` has no integer ledger:order")))?;
-            let in_flight = match literal(&state, v::IN_FLIGHT).as_deref() {
-                Some("true") | Some("1") => true,
-                Some("false") | Some("0") => false,
-                _ => {
-                    return Err(bad(format!(
+            let in_flight =
+                match state_literal(&graph, &state, v::IN_FLIGHT, "ledger:inFlight")?.as_deref() {
+                    Some("true") | Some("1") => true,
+                    Some("false") | Some("0") => false,
+                    _ => {
+                        return Err(bad(format!(
                         "`{label}` has no boolean ledger:inFlight; every state says whether it \
                          is in flight"
                     )))
-                }
-            };
-            let drain = literal(&state, v::DRAIN);
+                    }
+                };
+            let drain = state_literal(&graph, &state, v::DRAIN, "ledger:drain")?;
             match (in_flight, &drain) {
                 (false, None) => {
                     return Err(bad(format!(
@@ -371,6 +373,42 @@ impl Lifecycle {
             .map(|s| s.name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+/// Read a state's scalar field without silently choosing among values or dropping an IRI.
+/// Comments remain descriptive text, but these fields determine the state machine.
+fn state_literal(
+    graph: &Graph,
+    state: &NamedNode,
+    predicate: &str,
+    field: &str,
+) -> Result<Option<String>> {
+    let bad = |detail| Error::InvalidArgument {
+        name: "lifecycle".to_string(),
+        detail,
+    };
+    let mut values = graph.objects_for_subject_predicate(
+        state.as_ref(),
+        NamedNode::new_unchecked(predicate).as_ref(),
+    );
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(bad(format!(
+            "`{state}` declares more than one {field}; a state has one value for this field. \
+             Keep one literal value",
+            state = state.as_str(),
+        )));
+    }
+    match value {
+        oxrdf::TermRef::Literal(value) => Ok(Some(value.value().to_string())),
+        other => Err(bad(format!(
+            "`{state}` declares {field} as {other}, which is not a literal; give this field \
+             one literal value",
+            state = state.as_str(),
+        ))),
     }
 }
 
