@@ -675,6 +675,8 @@ $ source urn:iki:ledger:acme:item:7                                    # under a
   grants too; without them the close is refused before anything changes, naming the grants. A
   subject that carries a `blocks` or `parent` link across is not deleted until it is unlinked. Deleting the target
   archives its mirrors with it.
+  The recoverable delete checks this on every retry and in its commit condition, so a link
+  added while it is deleting cannot leave a mirror pointing at a deleted subject.
 
 ★ **Two graphs cannot be one update, so the mirror is a compare-and-set on a version.**
 `urn:iki:store:graph-update` changes one graph and its `WHERE` cannot read another, so the
@@ -1215,6 +1217,9 @@ state resource relies on not having: a state whose IRI is not `{lifecycle}:{name
 names or orders, a state outside the flight with no drain, a state in flight with one, a
 lifecycle that does not declare `filed` first, a `ledger:movesTo` that is not a move between
 two of its states, and a document that does not say its one version.
+Each state's `rdfs:label`, `ledger:order`, `ledger:inFlight` and optional `ledger:drain`
+must have one literal value when present. Multiple values are refused rather than choosing
+one, and a nonliteral drain is refused rather than treated as absent.
 
 ### A lifecycle may declare its moves
 

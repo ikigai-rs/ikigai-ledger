@@ -490,8 +490,22 @@ pub(super) async fn require_mirror_grants(
     )))
 }
 
-/// Refuse to delete an item that carries a `blocks` or `parent` link into another ledger: the
+/// A delete's commit condition: no `blocks` or `parent` link into another ledger, since the
 /// mirror there would go on naming it, open, with nothing left to close.
+pub(super) fn no_mirrored_links(subject: &str) -> String {
+    format!(
+        "FILTER NOT EXISTS {{ ?outboundLink <{}> <{}> ; <{}> <{subject}> ; <{}> ?outboundType . \
+         FILTER(?outboundType IN (<{}>, <{}>)) }}",
+        v::ext::TYPE,
+        v::LINK_CLASS,
+        v::ON_ITEM,
+        v::LINK_TYPE,
+        v::BLOCKS,
+        v::PARENT,
+    )
+}
+
+/// Explain the same condition as [`no_mirrored_links`] before a recoverable delete writes.
 pub(super) async fn refuse_delete_with_links(
     client: &StoreClient<'_, '_>,
     item: &Item,

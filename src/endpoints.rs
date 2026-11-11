@@ -2969,6 +2969,13 @@ async fn delete_item(
         // among them.
         let selector = Selector::read(client, LedgerGraph::Live, &item.iri).await?;
         let rows = selector.rows(client, LedgerGraph::Live).await?;
+        // Check every attempt, after its snapshot: a link that raced the first commit must
+        // not be archived and removed by the retry while its mirror still blocks elsewhere.
+        // The commit guard below closes the window after this read. A purge deliberately
+        // does not check cross-ledger links (see README, "Links across ledgers").
+        if !destroy {
+            across::refuse_delete_with_links(client, item).await?;
+        }
         let digest = content_hash(&rows);
 
         // Step 1 of 2 — the graveyard, which no read in this crate can see, so nothing a
@@ -3028,8 +3035,9 @@ async fn delete_item(
                 "DELETE {{ {} }} WHERE {{ {} }}",
                 client.in_graph(&data),
                 client.in_graph(&format!(
-                    "{} {} FILTER NOT EXISTS {{ {{ {} }} MINUS {{ VALUES (?s ?p ?o) {{ {} }} }} }}",
+                    "{} {} {} FILTER NOT EXISTS {{ {{ {} }} MINUS {{ VALUES (?s ?p ?o) {{ {} }} }} }}",
                     live(&item.iri),
+                    across::no_mirrored_links(&item.iri),
                     selector.no_unnamed_dependent(),
                     selector.pattern(),
                     rows_as_values(&rows)?

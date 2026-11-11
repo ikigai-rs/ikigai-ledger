@@ -563,6 +563,41 @@ fn arm(armed: &Armed, verb: Verb, iri: &str, args: &[(&str, &str)]) {
     *armed.0.lock().unwrap() = Some(request(verb, iri, args));
 }
 
+/// The delete checked links before reading its archive. A new link at its commit must not
+/// be swallowed by its retry, leaving a mirror whose subject can never be closed.
+#[test]
+fn a_cross_ledger_link_racing_a_delete_keeps_its_subject_live() {
+    for kind in ["blocks", "parent"] {
+        let (cell, armed) = scheduled();
+        let kernel = cell.get().unwrap();
+        // The gate is on acme's graph, so acme is the subject in this schedule.
+        file(kernel, TARGET, "Blocker");
+        let target = file(kernel, SUBJECT, "Blocked");
+        arm(
+            &armed,
+            Verb::Sink,
+            &at(TARGET, "link"),
+            &[("item", "1"), ("content", &target), ("type", kind)],
+        );
+        let result = try_verb(kernel, Verb::Delete, &at(TARGET, "item:1"), &[]);
+        assert!(armed.0.lock().unwrap().is_none(), "the link ran in between");
+        assert!(
+            matches!(result, Err(Error::InvalidArgument { .. })),
+            "the new link must refuse the delete, got {result:?}; target next: {}",
+            next(kernel, SUBJECT)
+        );
+        assert!(source(kernel, &at(TARGET, "item:1"), &[]).contains("Blocker"));
+        // Once the edge is removed, the delete can finish and the target is ready.
+        delete(
+            kernel,
+            &at(TARGET, "link"),
+            &[("item", "1"), ("content", &target), ("type", kind)],
+        );
+        delete(kernel, &at(TARGET, "item:1"), &[]);
+        assert!(next(kernel, SUBJECT).starts_with(" 1. cli#1"));
+    }
+}
+
 /// ★ A close whose mirror write lands LAST, after a whole reopen ran in between: the close read
 /// "closed", the reopen read "open" and wrote it, and then the close's write arrives. A mirror
 /// written from what each writer read would end "closed" with the subject open, and `acme#1`

@@ -146,6 +146,7 @@ technology you used, if you are comfortable sharing them. Anything security-sens
 
 | Date | Change |
 |---|---|
+| 2026-11-11 | Lifecycle loading refuses multiple values or a nonliteral value for a state's name, order, flight flag or drain. Each refusal names the state and field and says to keep or give it one literal value. The unit tests in `src/lifecycle.rs` reproduce the previously accepted documents and pin both new refusal sentences. A recoverable delete racing a cross-ledger link now gives the existing link refusal; `tests/cross_ledger_links.rs` forces the race for blocks and parent links. Existing plain faces are covered by `tests/faces.rs`; no browser, automated accessibility checker or assistive technology was used. |
 | 2026-10-31 | First version. |
 | 2026-11-01 | `close closed-at=` (ledger #2819) adds refusals; each names the argument, the reason and the remedy in words. No plain face changed: `tests/faces.rs` passes unchanged. |
 | 2026-11-01 | Aliases (ledger #2828) add write answers (`scheme gh owned by …`, `gh:acme/web#12 names acme#12 …`, `… no longer names …`) and refusals, each naming in words the alias, the scheme, its owner or the item that already holds it, and the grant that would do. An alias value appears percent-encoded in an IRI (`acme%2Fweb%2312`), which a screen reader reads character by character; the decoded value is what every answer shows. No existing plain face changed: `tests/faces.rs` passes unchanged. |
