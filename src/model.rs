@@ -1193,18 +1193,13 @@ pub async fn load_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result
 /// chose its page, and then counted, in two queries: an append landing between them answered
 /// `count: 3, total: 4` over a page that held every match, and a client paging until it had
 /// seen `total` asked for an item no answer it had read contained. The page's IRIs and the
-/// count are now one SELECT ([`page_iris`]), evaluated over one snapshot of the store. The
-/// rows are then loaded by those IRIs, so a later append cannot join the page.
+/// count and the selected records are one SELECT, evaluated over one snapshot of the
+/// store. Loading records in a later query would let a close remove a counted row.
 pub(crate) async fn load_page(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
 ) -> Result<(Vec<Item>, usize)> {
-    let limit = page_limit(filter);
-    let (page, total) = page_iris(client, filter, limit).await?;
-    if page.is_empty() {
-        return Ok((Vec::new(), total));
-    }
-    Ok((load(client, filter, Some(&page)).await?, total))
+    load_counted(client, filter, ItemSelection::Page, true).await
 }
 
 /// Every matching item, before a shared listing sort and its page selection, and the
@@ -1215,7 +1210,7 @@ pub(crate) async fn load_matching_items(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
 ) -> Result<(Vec<Item>, usize)> {
-    load_counted(client, filter, None, true).await
+    load_counted(client, filter, ItemSelection::All, true).await
 }
 
 /// The page length a listing uses for `filter.limit`: the limit, or 500 for `0`.
@@ -1273,24 +1268,12 @@ fn listed_pattern() -> String {
     )
 }
 
-/// The IRIs of one page, in the listing's order, and how many items the filter admits.
-/// Grouped by subject BEFORE the `LIMIT` and `OFFSET`, so both count items. A row bound
-/// (what 0.6.0 applied) cut an item a hand edit had given two rows, and an offset over rows
-/// would put the halves on different pages.
-///
-/// ★ **The total is in the same query** (ledger #1741): a 1-row count joined with the page,
-/// the page OPTIONAL so a page past the end still carries the total.
-async fn page_iris(
-    client: &StoreClient<'_, '_>,
-    filter: &Filter,
-    limit: usize,
-) -> Result<(Vec<String>, usize)> {
-    let query = format!(
-        "SELECT ?item ?recency ?n ?listed WHERE {{ {count} OPTIONAL {{ \
-         SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {page} }} \
-         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET {offset} \
-         }} }} ORDER BY DESC(?recency) DESC(?n) ?item",
-        count = count_subquery(client, filter)?,
+/// Select page subjects before joining their records, so multiple values of a property
+/// cannot split one item across pages. The count and records join this in the same query.
+fn page_pattern(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<String> {
+    Ok(format!(
+        "{{ SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {page} }} \
+         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET {offset} }}",
         page = client.in_graph(&format!(
             "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
              OPTIONAL {{ ?item <{modified}> ?modified }}\n{filters}",
@@ -1299,14 +1282,9 @@ async fn page_iris(
             modified = v::ext::MODIFIED,
             filters = filter_clauses(filter)?,
         )),
+        limit = page_limit(filter),
         offset = filter.offset,
-    );
-    let rows = client.select(&query).await?;
-    let page = rows
-        .iter()
-        .filter_map(|row| row.get("item").map(|b| b.value.clone()))
-        .collect();
-    Ok((page, listed_total(&rows)))
+    ))
 }
 
 /// **Every** open item in the ledger, unfiltered and unbounded — the pool a computation
@@ -1349,7 +1327,15 @@ async fn load(
     filter: &Filter,
     page: Option<&[String]>,
 ) -> Result<Vec<Item>> {
-    Ok(load_counted(client, filter, page, false).await?.0)
+    let selection = page.map_or(ItemSelection::All, ItemSelection::Iris);
+    Ok(load_counted(client, filter, selection, false).await?.0)
+}
+
+#[derive(Clone, Copy)]
+enum ItemSelection<'a> {
+    All,
+    Iris(&'a [String]),
+    Page,
 }
 
 /// [`load`], and with `counted` the [`count_items`] of the filter from the same query: a
@@ -1358,7 +1344,7 @@ async fn load(
 async fn load_counted(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
-    page: Option<&[String]>,
+    selection: ItemSelection<'_>,
     counted: bool,
 ) -> Result<(Vec<Item>, usize)> {
     let filters = filter_clauses(filter)?;
@@ -1368,12 +1354,19 @@ async fn load_counted(
         String::new()
     };
     let listed = if counted { " ?listed" } else { "" };
+    // Keep the count even when the page is past the end. The OPTIONAL covers both the
+    // selected subjects and their records; neither is read again after this snapshot.
+    let (page, start, end) = if matches!(selection, ItemSelection::Page) {
+        (page_pattern(client, filter)?, "OPTIONAL {", "}")
+    } else {
+        (String::new(), "", "")
+    };
     let query = |values: &str| {
         format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
          ?principal ?epoch ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
-         ?modifiedSource ?claimedModified{listed} WHERE {{ {count}{} }} \
+         ?modifiedSource ?claimedModified{listed} WHERE {{ {count}{start}{page}{}{end} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
             "{values}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -1437,10 +1430,10 @@ async fn load_counted(
         ))
         )
     };
-    // ★ A page is named by its IRIs, in lists under the store's bound (ledger #1423). The rows
-    // of one item are all in one list, and `items_from_rows` sorts them as a whole.
-    let rows = match page {
-        Some(iris) => {
+    // Explicit IRI loads use lists under the store's bound (ledger #1423). A listing
+    // instead selects its page inside this query, alongside the count and records.
+    let rows = match selection {
+        ItemSelection::Iris(iris) => {
             let mut rows = Vec::new();
             for list in values_lists(iris)? {
                 rows.extend(
@@ -1451,15 +1444,17 @@ async fn load_counted(
             }
             rows
         }
-        None => client.select(&query("")).await?,
+        ItemSelection::All | ItemSelection::Page => client.select(&query("")).await?,
     };
     let total = listed_total(&rows);
     let mut items = items_from_rows(&rows);
     // ★ An unbounded load fills by scanning each predicate once (ledger #3257): a `VALUES`
     // list of every item joined with the pattern is superlinear in the store.
-    match page {
-        Some(_) => fill_multivalued(client, &mut items).await?,
-        None => fill_by_scan(client, &mut items, MULTIVALUED).await?,
+    match selection {
+        ItemSelection::Iris(_) | ItemSelection::Page => {
+            fill_multivalued(client, &mut items).await?
+        }
+        ItemSelection::All => fill_by_scan(client, &mut items, MULTIVALUED).await?,
     }
     Ok((items, total))
 }

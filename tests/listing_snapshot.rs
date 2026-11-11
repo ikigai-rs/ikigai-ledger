@@ -248,3 +248,74 @@ fn the_item_appended_during_a_listing_is_in_the_next_one() {
     assert_eq!(doc["total"], 4);
     assert_eq!(numbers(&doc), vec![4, 3, 2, 1]);
 }
+
+/// Removing a match after any read must not erase it from the counted page.
+fn every_removal_schedule_agrees(mutation: Request, args: &[(&str, &str)]) {
+    let mut wrong = Vec::new();
+    let mut schedules = 0;
+    for after in 1.. {
+        let shared = gated();
+        let kernel = shared.kernel.get().unwrap();
+        for title in ["first", "second", "third"] {
+            append(kernel, title, &[]);
+        }
+        shared.reads.store(0, Ordering::SeqCst);
+        shared.after.store(after, Ordering::SeqCst);
+        *shared.armed.lock().unwrap() = Some(mutation.clone());
+        let mut all = vec![("as", "application/json")];
+        all.extend_from_slice(args);
+        let doc: serde_json::Value =
+            serde_json::from_str(&source(kernel, "urn:iki:ledger:items", &all)).unwrap();
+        if shared.armed.lock().unwrap().take().is_some() {
+            break;
+        }
+        schedules += 1;
+        let all_open = doc["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["status"] == "open");
+        if doc["count"] != doc["total"] || !all_open {
+            wrong.push((
+                after,
+                doc["count"].clone(),
+                doc["total"].clone(),
+                numbers(&doc),
+            ));
+        }
+    }
+    assert!(schedules > 0, "the mutation never ran inside the listing");
+    assert!(
+        wrong.is_empty(),
+        "removal schedules disagreed (read, count, total, rows): {wrong:?}"
+    );
+}
+
+#[test]
+fn a_close_during_the_default_listing_leaves_page_and_total_agreeing() {
+    every_removal_schedule_agrees(
+        request(Verb::Sink, "urn:iki:ledger:close", &[("item", "3")]),
+        &[],
+    );
+}
+
+#[test]
+fn a_close_during_a_union_listing_leaves_page_and_total_agreeing() {
+    every_removal_schedule_agrees(
+        request(Verb::Sink, "urn:iki:ledger:close", &[("item", "3")]),
+        &[("ledgers", "default")],
+    );
+}
+
+#[test]
+fn a_close_during_a_sorted_listing_leaves_page_and_total_agreeing() {
+    every_removal_schedule_agrees(
+        request(Verb::Sink, "urn:iki:ledger:close", &[("item", "3")]),
+        &[("sort", "number")],
+    );
+}
+
+#[test]
+fn a_delete_during_the_default_listing_leaves_page_and_total_agreeing() {
+    every_removal_schedule_agrees(request(Verb::Delete, "urn:iki:ledger:item:3", &[]), &[]);
+}
