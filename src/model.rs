@@ -1184,21 +1184,38 @@ pub async fn defects_of(client: &StoreClient<'_, '_>, iri: &str) -> Result<Vec<S
 /// its footer said `50 item(s)` over a ledger of 385, and a reader took it for the total
 /// (ledger #419).
 pub async fn load_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Vec<Item>> {
-    let limit = page_limit(filter);
-    let page = page_iris(client, filter, limit).await?;
-    if page.is_empty() {
-        return Ok(Vec::new());
-    }
-    load(client, filter, Some(&page)).await
+    Ok(load_page(client, filter).await?.0)
 }
 
-/// Every matching item, before a shared listing sort and its page selection.
-/// Explicit sorts need the whole set; a recency page cannot supply an older blocker.
+/// [`load_items`] and the [`count_items`] of the same filter, both decided by ONE query.
+///
+/// ★ **One read, so the page and the total describe one ledger** (ledger #1741). The listing
+/// chose its page, and then counted, in two queries: an append landing between them answered
+/// `count: 3, total: 4` over a page that held every match, and a client paging until it had
+/// seen `total` asked for an item no answer it had read contained. The page's IRIs and the
+/// count are now one SELECT ([`page_iris`]), evaluated over one snapshot of the store. The
+/// rows are then loaded by those IRIs, so a later append cannot join the page.
+pub(crate) async fn load_page(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+) -> Result<(Vec<Item>, usize)> {
+    let limit = page_limit(filter);
+    let (page, total) = page_iris(client, filter, limit).await?;
+    if page.is_empty() {
+        return Ok((Vec::new(), total));
+    }
+    Ok((load(client, filter, Some(&page)).await?, total))
+}
+
+/// Every matching item, before a shared listing sort and its page selection, and the
+/// [`count_items`] of the same filter from the SAME query (ledger #1741), so the page later
+/// cut from this set and the total agree. Explicit sorts need the whole set; a recency page
+/// cannot supply an older blocker.
 pub(crate) async fn load_matching_items(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
-) -> Result<Vec<Item>> {
-    load(client, filter, None).await
+) -> Result<(Vec<Item>, usize)> {
+    load_counted(client, filter, None, true).await
 }
 
 /// The page length a listing uses for `filter.limit`: the limit, or 500 for `0`.
@@ -1218,17 +1235,29 @@ pub fn page_limit(filter: &Filter) -> usize {
 /// listed, by the listing's ⚠ footer ([`defects`]).
 pub async fn count_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<usize> {
     let query = format!(
-        "SELECT (COUNT(DISTINCT ?item) AS ?n) WHERE {{ {} }}",
-        client.in_graph(&format!("{}{}", listed_pattern(), filter_clauses(filter)?))
+        "SELECT ?listed WHERE {{ {} }}",
+        count_subquery(client, filter)?
     );
-    Ok(client
-        .select(&query)
-        .await?
-        .first()
-        .and_then(|row| row.get("n"))
+    Ok(listed_total(&client.select(&query).await?))
+}
+
+/// The count [`count_items`] makes, as a subquery binding `?listed`, so a query that selects
+/// rows can carry the total in the same read (ledger #1741).
+fn count_subquery(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<String> {
+    Ok(format!(
+        "{{ SELECT (COUNT(DISTINCT ?item) AS ?listed) WHERE {{ {} }} }}",
+        client.in_graph(&format!("{}{}", listed_pattern(), filter_clauses(filter)?))
+    ))
+}
+
+/// The `?listed` a [`count_subquery`] bound: on every row, so the first is enough; `0` when
+/// there is no row at all.
+fn listed_total(rows: &[Row]) -> usize {
+    rows.first()
+        .and_then(|row| row.get("listed"))
         .and_then(|n| n.as_i64())
         .map(|n| n.max(0) as usize)
-        .unwrap_or(0))
+        .unwrap_or(0)
 }
 
 /// The triple patterns every listed item matches, before the filter's own clauses.
@@ -1244,18 +1273,25 @@ fn listed_pattern() -> String {
     )
 }
 
-/// The IRIs of one page, in the listing's order: grouped by subject BEFORE the `LIMIT` and
-/// `OFFSET`, so both count items. A row bound (what 0.6.0 applied) cut an item a hand edit
-/// had given two rows, and an offset over rows would put the halves on different pages.
+/// The IRIs of one page, in the listing's order, and how many items the filter admits.
+/// Grouped by subject BEFORE the `LIMIT` and `OFFSET`, so both count items. A row bound
+/// (what 0.6.0 applied) cut an item a hand edit had given two rows, and an offset over rows
+/// would put the halves on different pages.
+///
+/// ★ **The total is in the same query** (ledger #1741): a 1-row count joined with the page,
+/// the page OPTIONAL so a page past the end still carries the total.
 async fn page_iris(
     client: &StoreClient<'_, '_>,
     filter: &Filter,
     limit: usize,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, usize)> {
     let query = format!(
-        "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {} }} \
-         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET {offset}",
-        client.in_graph(&format!(
+        "SELECT ?item ?recency ?n ?listed WHERE {{ {count} OPTIONAL {{ \
+         SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {page} }} \
+         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET {offset} \
+         }} }} ORDER BY DESC(?recency) DESC(?n) ?item",
+        count = count_subquery(client, filter)?,
+        page = client.in_graph(&format!(
             "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
              OPTIONAL {{ ?item <{modified}> ?modified }}\n{filters}",
             listed_pattern(),
@@ -1265,12 +1301,12 @@ async fn page_iris(
         )),
         offset = filter.offset,
     );
-    Ok(client
-        .select(&query)
-        .await?
+    let rows = client.select(&query).await?;
+    let page = rows
         .iter()
         .filter_map(|row| row.get("item").map(|b| b.value.clone()))
-        .collect())
+        .collect();
+    Ok((page, listed_total(&rows)))
 }
 
 /// **Every** open item in the ledger, unfiltered and unbounded — the pool a computation
@@ -1313,13 +1349,31 @@ async fn load(
     filter: &Filter,
     page: Option<&[String]>,
 ) -> Result<Vec<Item>> {
+    Ok(load_counted(client, filter, page, false).await?.0)
+}
+
+/// [`load`], and with `counted` the [`count_items`] of the filter from the same query: a
+/// 1-row count subquery joined to every row, so the set and its total are one read (ledger
+/// #1741). Without `counted` the total is `0`.
+async fn load_counted(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+    page: Option<&[String]>,
+    counted: bool,
+) -> Result<(Vec<Item>, usize)> {
     let filters = filter_clauses(filter)?;
+    let count = if counted {
+        count_subquery(client, filter)?
+    } else {
+        String::new()
+    };
+    let listed = if counted { " ?listed" } else { "" };
     let query = |values: &str| {
         format!(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
          ?principal ?epoch ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
-         ?modifiedSource ?claimedModified WHERE {{ {} }} \
+         ?modifiedSource ?claimedModified{listed} WHERE {{ {count}{} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
             "{values}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
@@ -1399,6 +1453,7 @@ async fn load(
         }
         None => client.select(&query("")).await?,
     };
+    let total = listed_total(&rows);
     let mut items = items_from_rows(&rows);
     // ★ An unbounded load fills by scanning each predicate once (ledger #3257): a `VALUES`
     // list of every item joined with the pattern is superlinear in the store.
@@ -1406,7 +1461,7 @@ async fn load(
         Some(_) => fill_multivalued(client, &mut items).await?,
         None => fill_by_scan(client, &mut items, MULTIVALUED).await?,
     }
-    Ok(items)
+    Ok((items, total))
 }
 
 /// Every open item with only what readiness and the ordering policies read (ledger #3257):
