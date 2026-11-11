@@ -1533,8 +1533,11 @@ impl Endpoint for ItemsEndpoint {
                 filter.limit
             };
             local.offset = if union { 0 } else { filter.offset };
-            let mut matching = if sort.is_default() {
-                model::load_items(&client, &local).await?
+            // ★ The rows and the total come from ONE store query (ledger #1741): counted
+            // apart, an append landing between the two reads answered a total no page of
+            // this answer could reach.
+            let (mut matching, counted) = if sort.is_default() {
+                model::load_page(&client, &local).await?
             } else {
                 model::load_matching_items(&client, &local).await?
             };
@@ -1555,7 +1558,7 @@ impl Endpoint for ItemsEndpoint {
             }
             entries.extend(matching.into_iter().map(|item| (index, item)));
             if want != TURTLE {
-                total = total.saturating_add(model::count_items(&client, &local).await?);
+                total = total.saturating_add(counted);
                 // The corpus check scans every item, open and closed; the probe is one
                 // ASK and is false on a clean graph, which is the common case (#3255).
                 if model::may_have_defects(&client).await? {
