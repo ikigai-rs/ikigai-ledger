@@ -178,6 +178,12 @@ pub const CAP_ABOUT: &str = "urn:cap:ledger:about:*";
 /// importer holds this grant on the ledgers it imports into, and owns its scheme.
 pub const CAP_ALIAS: &str = "urn:cap:ledger:alias:*";
 
+/// The family of the session grant (ledger #3022): recording an agent session's content-free
+/// summary on an item's hand-back, at `…:item:{id}:sessions`, and nothing else. A held grant
+/// names one ledger: [`Ledger::cap_session`]. It is in the published worker grant, and
+/// `write:{ledger}` covers it too. Declared as [`CAP_ANY`]; see [`CAP_CLAIM`].
+pub const CAP_SESSION: &str = "urn:cap:ledger:session:*";
+
 /// "Holds some ledger grant": the floor `claim`, `comment`, `close`, `reopen` and
 /// `item:{id}:about` DECLARE,
 /// because it is the only family both the narrow grant and `write:{ledger}` satisfy (see
@@ -222,6 +228,9 @@ pub(crate) enum Need {
     /// Link an item of another ledger to one of this ledger's: `link-in:{ledger}` and nothing
     /// else (ledger #2829).
     LinkIn,
+    /// Record a session summary on a hand-back: `session:{ledger}`, or `write:{ledger}`
+    /// (ledger #3022).
+    Session,
 }
 
 impl Need {
@@ -238,6 +247,7 @@ impl Need {
             Need::About => ledger.cap_about(),
             Need::Alias => ledger.cap_alias(),
             Need::LinkIn => ledger.cap_link_in(),
+            Need::Session => ledger.cap_session(),
         }
     }
 
@@ -247,7 +257,7 @@ impl Need {
     fn write_covers(self) -> bool {
         matches!(
             self,
-            Need::Claim | Need::Comment | Need::Close | Need::About | Need::Alias
+            Need::Claim | Need::Comment | Need::Close | Need::About | Need::Alias | Need::Session
         )
     }
 
@@ -258,7 +268,12 @@ impl Need {
             Need::Write => CAP_WRITE,
             Need::Delete => CAP_DELETE,
             Need::Purge => CAP_PURGE,
-            Need::Claim | Need::Comment | Need::Close | Need::About | Need::Alias => CAP_ANY,
+            Need::Claim
+            | Need::Comment
+            | Need::Close
+            | Need::About
+            | Need::Alias
+            | Need::Session => CAP_ANY,
             Need::LinkIn => CAP_LINK_IN,
         }
     }
@@ -330,6 +345,7 @@ mod evidence;
 mod flight;
 mod history;
 mod import;
+mod session;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
 pub const SPACE_ID: &str = "urn:iki:space:ledger";
@@ -492,6 +508,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             },
         )
         .bind(ItemPartGrammar::part("history"), history::HistoryEndpoint)
+        .bind(ItemPartGrammar::part("sessions"), session::SessionsEndpoint)
         .bind(
             LedgerGrammar::with_id("item"),
             ItemEndpoint {

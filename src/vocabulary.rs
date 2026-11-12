@@ -328,6 +328,38 @@ term! {
     CLAIMED_MODIFIED => "claimedModified";
     /// `ledger:Importer` — an import or sync principal, read from the participants graph.
     IMPORTER_CLASS => "Importer";
+    /// `ledger:SessionSummary` — an agent run's content-free record, on its hand-back (#3022).
+    SESSION_SUMMARY_CLASS => "SessionSummary";
+    /// `ledger:SessionSummaryShape` — the closed SHACL shape every summary is checked against.
+    SESSION_SUMMARY_SHAPE => "SessionSummaryShape";
+    /// `ledger:sessionId` — the harness's own session id.
+    SESSION_ID => "sessionId";
+    /// `ledger:sessionItem` — the item a session summary is about.
+    SESSION_ITEM => "sessionItem";
+    /// `ledger:handBackEvent` — the hand-back comment a session summary is recorded on.
+    HAND_BACK_EVENT => "handBackEvent";
+    /// `ledger:machineName` — the machine the session ran on.
+    MACHINE_NAME => "machineName";
+    /// `ledger:harness` — `claude` or `codex`.
+    HARNESS => "harness";
+    /// `ledger:model` — the model the session ran.
+    MODEL => "model";
+    /// `ledger:exitStatus` — the harness process's exit status.
+    EXIT_STATUS => "exitStatus";
+    /// `ledger:wallClockMs` — the session's wall-clock time, in milliseconds.
+    WALL_CLOCK_MS => "wallClockMs";
+    /// `ledger:turns` — the session's turns.
+    TURNS => "turns";
+    /// `ledger:toolCalls` — the session's tool calls.
+    TOOL_CALLS => "toolCalls";
+    /// `ledger:inputTokens` — uncached input tokens.
+    INPUT_TOKENS => "inputTokens";
+    /// `ledger:cachedInputTokens` — input tokens read from a cache.
+    CACHED_INPUT_TOKENS => "cachedInputTokens";
+    /// `ledger:cacheCreationTokens` — input tokens written to a cache.
+    CACHE_CREATION_TOKENS => "cacheCreationTokens";
+    /// `ledger:outputTokens` — output tokens.
+    OUTPUT_TOKENS => "outputTokens";
     /// `ledger:AliasScheme` — a registered alias scheme and its owner (ledger #2828).
     ALIAS_SCHEME_CLASS => "AliasScheme";
     /// `ledger:Alias` — one `(scheme, value)` pair naming one item (ledger #2828).

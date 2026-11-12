@@ -215,6 +215,32 @@ fn script() -> Vec<Step> {
             at("comment"),
             &[("item", "#1"), ("content", "A note on it.")],
         ),
+        // A hand-back and the session summary recorded on it (ledger #3022).
+        step(
+            "ledger-comment",
+            Verb::Sink,
+            at("comment"),
+            &[
+                ("item", "#1"),
+                ("content", "Over to you."),
+                ("handback", "true"),
+            ],
+        ),
+        step(
+            "ledger-item-sessions",
+            Verb::Sink,
+            at("item:1:sessions"),
+            &[(
+                "content",
+                r#"{"session": "grants", "machineName": "m", "harness": "claude", "model": "x", "exitStatus": 0, "wallClockMs": 5}"#,
+            )],
+        ),
+        step(
+            "ledger-item-sessions",
+            Verb::Source,
+            at("item:1:sessions"),
+            &[],
+        ),
         step(
             "ledger-label",
             Verb::Sink,

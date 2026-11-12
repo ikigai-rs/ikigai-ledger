@@ -555,6 +555,36 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) cleared-awaiting
   awaiting its dispatcher can still be claimed (the dispatcher may, to review it); `next` simply
   does not offer it.
 
+## Agent sessions: a summary on the hand-back
+
+Since 0.22.0 (ledger #3022) a worker records the RAW, content-free facts of its agent run on the
+hand-back it just made, at `urn:iki:ledger:{ledger}:item:{id}:sessions`, under
+`urn:cap:ledger:session:{ledger}` (in the worker grant; `write:{ledger}` covers it too):
+
+```text
+$ sink urn:iki:ledger:acme:comment item=12 handback=true <<< "PR is up, CI green"
+$ sink urn:iki:ledger:acme:item:12:sessions <<< '{"session": "0b5e41aa", "machineName": "lawnboy",
+    "harness": "claude", "model": "claude-opus-5-5", "exitStatus": 0, "wallClockMs": 1830000,
+    "turns": 41, "toolCalls": 118, "inputTokens": 5120, "cachedInputTokens": 880000,
+    "cacheCreationTokens": 64000, "outputTokens": 21000}'
+recorded session 0b5e41aa on acme#12's hand-back
+```
+
+- **Content-free, and the shape says so.** Each key is the `ledger:` property of that name, and
+  the node is checked against `ledger:SessionSummaryShape` in `src/vocabulary.ttl`, a CLOSED
+  SHACL shape. A key it does not name (`transcript`, `prompt`, `cost`) is refused as
+  `InvalidArgument` and nothing is written, as is a harness other than `claude` or `codex`, a
+  negative count or a missing required field. There is no cost field.
+- **A separate request after the hand-back**, so a refused summary leaves the hand-back
+  standing. It is recorded on the item's newest hand-back comment (`ledger:handBackEvent`); an
+  item with none is a `Conflict`. The same session sent again on the same hand-back writes
+  nothing; on another hand-back it is a `Conflict`, because one session hands back once.
+- **Named singular, type first**: `urn:agent:session:id:{id}`, the harness's own session id. The
+  older `urn:agents:session:{id}` an `about` edge may carry is linked by `owl:sameAs` and never
+  rewritten. A worker still cannot write `about`; the dispatcher sets it at close.
+- **The read face is one item's sessions**, newest first, in text, Turtle and JSON. Nothing
+  here totals across items, holders or models, and nothing prices a run.
+
 ## Aliases: an external id, in a scheme one principal owns
 
 Since 0.15.0 (ledger #2828) an item may carry many **aliases**, each a `(scheme, value)` pair
@@ -1987,6 +2017,7 @@ worker can be handed the work without the verdict on it:
 | `urn:cap:ledger:close:{ledger}` | `close` and `reopen` | |
 | `urn:cap:ledger:about:{ledger}` (0.10.0) | `item:{id}:about` Sink (add) and Delete (remove) | not the item Sink's own `about=`, which is the edit door |
 | `urn:cap:ledger:alias:{ledger}` (0.15.0) | giving one of this ledger's items an alias, in a scheme the caller owns | see "Aliases" |
+| `urn:cap:ledger:session:{ledger}` (0.22.0) | `item:{id}:sessions` Sink: recording an agent session's summary on the item's newest hand-back | see "Agent sessions"; in the worker grant |
 | `urn:cap:ledger:link-in:{ledger}` (0.17.0) | linking an item of ANOTHER ledger to one of this ledger's items, and unlinking it | **not** covered by `write:{ledger}`; see "Links across ledgers" |
 | `urn:cap:ledger:write:{ledger}` | **all four of the above**, and filing, linking, labeling, deferring, editing, `about=` on the item, state | unchanged: no grant issued before 0.7.0 or 0.10.0 changed meaning |
 
@@ -2003,12 +2034,14 @@ and removes, it is refused at close, comment, claim, label, edit, append and at 
 and `write:{ledger}` still does both.
 
 ★ **The worker grant**, as an operator's config line (here for ledger `acme`): claim, renew,
-release, comment and read, and **no close, no relabel, no edit, no filing**:
+release, comment, record its session's summary (0.22.0) and read, and **no close, no relabel,
+no edit, no filing, no `about`**:
 
 ```text
 urn:cap:ledger:read:acme
 urn:cap:ledger:claim:acme
 urn:cap:ledger:comment:acme
+urn:cap:ledger:session:acme
 urn:cap:store:read:graph:urn:iki:ledger:graph:acme
 urn:cap:store:write:graph:urn:iki:ledger:graph:acme
 ```
@@ -2019,7 +2052,8 @@ grant, and the close grant is also what makes the dispatcher's own comment answe
 (see "Handing back"). When the host's door mints a principal for each worker, a worker's claim
 is its own: another worker holding the same lines cannot release it (see "Claims"). `tests/worker_grant.rs` runs exactly the worker lines above: claim, renew,
 comment and release succeed; close, reopen, label, edit, append, defer and delete are each a
-typed `Denied` naming the grant that would do.
+typed `Denied` naming the grant that would do. `tests/session_summary.rs` runs the same lines
+with the session line: a hand-back and its session summary succeed, and `about` is `Denied`.
 
 ★ **Routing a filed item to another worker is a label edit** (ledger #1234). A worker reads
 `next labels=worker:<name>`, so the dispatcher moves an item by removing one label and adding
@@ -2235,7 +2269,7 @@ is, the rules it follows, what is not tested, and how to report a barrier.
 
 ## Status
 
-All twenty-six resources are bound, tested, and walked clean by `ikigai-conformance`
+All twenty-seven resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces). So are the two
 alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 

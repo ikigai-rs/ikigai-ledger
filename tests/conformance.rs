@@ -85,6 +85,18 @@ fn seeded() -> (Kernel, String, String, String) {
         &[("item", &a), ("content", "the conformance seed")],
     );
     delete(&kernel, "urn:iki:ledger:claim", &[("item", &a)]);
+    // Item #5, handed back, so a session summary has a hand-back to be recorded on
+    // (ledger #3022). Filed after everything else, so no other fixture's dates move.
+    let sessions = append_iri(&kernel, "A session fixture", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:comment",
+        &[
+            ("item", &sessions),
+            ("content", "over to you"),
+            ("handback", "true"),
+        ],
+    );
     let id = |iri: &str| {
         iri.rsplit(':')
             .next()
@@ -195,6 +207,17 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .binding("id", b)
                 .arg("content", "urn:agents:session:conformance"),
         )
+        // `item:{id}:sessions` (ledger #3022) points at #5, the handed-back fixture. A second
+        // firing of the Sink is a resend of the same session, which writes nothing.
+        .fixture(Fixture::new("ledger-item-sessions", Verb::Source).binding("id", "5"))
+        .fixture(
+            Fixture::new("ledger-item-sessions", Verb::Sink)
+                .binding("id", "5")
+                .arg(
+                    "content",
+                    r#"{"session": "conformance", "machineName": "walk", "harness": "codex", "model": "m", "exitStatus": 0, "wallClockMs": 1}"#,
+                ),
+        )
         // `urn:iki:ledger:lifecycle:{name}` — the built-in.
         .fixture(Fixture::new("ledger-lifecycle", Verb::Source).binding("name", "kata-flight"))
         .fixture(Fixture::new("ledger-lifecycle", Verb::Exists).binding("name", "kata-flight"))
@@ -258,6 +281,7 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-item-holder-is")
         .cacheable("ledger-item-closed")
         .cacheable("ledger-item-history")
+        .cacheable("ledger-item-sessions")
         .cacheable("ledger-doctor")
         .pure("ledger-policy")
         .pure("ledger-lifecycle")
@@ -304,7 +328,7 @@ fn conforms() {
 fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
-    // `Suite::own("ledger-*")` walks only the twenty-six THIS crate binds, so the whole of
+    // `Suite::own("ledger-*")` walks only the twenty-seven THIS crate binds, so the whole of
     // `walked` is the module; no filter stands between this list and what was checked.
     let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
     walked.sort_unstable();
@@ -326,6 +350,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-item-closed",
             "ledger-item-history",
             "ledger-item-holder-is",
+            "ledger-item-sessions",
             "ledger-item-state",
             "ledger-item-state-is",
             "ledger-items",

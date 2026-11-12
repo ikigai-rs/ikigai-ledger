@@ -390,6 +390,18 @@ impl Ledger {
         format!("{CAP_ALIAS_PREFIX}{}", self.name)
     }
 
+    /// `urn:cap:ledger:session:{name}` — recording an agent session's summary on one of this
+    /// ledger's hand-backs, at `…:item:{id}:sessions`, and nothing else (ledger #3022). Part of
+    /// the published worker grant; `write:{name}` covers it too.
+    ///
+    /// ```
+    /// use ikigai_ledger::Ledger;
+    /// assert_eq!(Ledger::parse("acme").unwrap().cap_session(), "urn:cap:ledger:session:acme");
+    /// ```
+    pub fn cap_session(&self) -> String {
+        format!("{CAP_SESSION_PREFIX}{}", self.name)
+    }
+
     /// `urn:cap:ledger:link-in:{name}` — linking an item of ANOTHER ledger to one of this
     /// ledger's items with `blocks`, `parent` or `related`, and removing that link (since 0.17.0,
     /// ledger #2829). It is held beside `write` on the subject's ledger, and `write:{name}` does
@@ -425,6 +437,7 @@ pub(crate) const CAP_COMMENT_PREFIX: &str = "urn:cap:ledger:comment:";
 pub(crate) const CAP_CLOSE_PREFIX: &str = "urn:cap:ledger:close:";
 pub(crate) const CAP_ABOUT_PREFIX: &str = "urn:cap:ledger:about:";
 pub(crate) const CAP_ALIAS_PREFIX: &str = "urn:cap:ledger:alias:";
+pub(crate) const CAP_SESSION_PREFIX: &str = "urn:cap:ledger:session:";
 pub(crate) const CAP_LINK_IN_PREFIX: &str = "urn:cap:ledger:link-in:";
 
 /// A grammar matching **both** `urn:iki:ledger:{ledger}:{action}` and the bare
