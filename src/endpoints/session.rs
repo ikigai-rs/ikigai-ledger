@@ -92,6 +92,12 @@ fn int_of(term: &Term) -> Option<i64> {
 /// Parse `ledger:SessionSummaryShape` out of the vocabulary document. It reads `sh:path`,
 /// `sh:datatype`, `sh:nodeKind`, `sh:minCount`, `sh:maxCount`, `sh:minInclusive` and `sh:in`; a
 /// shape using any other constraint is an error, never a constraint silently skipped.
+///
+/// Why not ikigai-shacl, the ecosystem's SHACL validator: it links the rudof stack, which this
+/// crate's wasm build and its two-crate dependency set (core and store) cannot carry, for one
+/// closed shape of seven constraint kinds. This checker reads only those and refuses the rest,
+/// so a shape that grows past it fails loudly; move to ikigai-shacl if the ledger ever validates
+/// more than this one shape.
 pub(crate) fn shape() -> Result<Shape> {
     let broken = |why: String| Error::Endpoint(format!("ledger:SessionSummaryShape: {why}"));
     let mut graph = Graph::new();
