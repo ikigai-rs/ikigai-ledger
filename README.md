@@ -953,7 +953,7 @@ are three different resources, because they are three different authorities:
 | act | resource | what survives |
 | --- | --- | --- |
 | **close** | `…:{ledger}:close` | everything. The item is still in the graph, still queryable, and stops blocking what it blocked. This is the normal end of work. |
-| **delete** | `Delete …:{ledger}:item:{id}` (`urn:cap:ledger:delete:{ledger}`) | the item's quads, its comments and the edges pointing at it MOVE to that ledger's own `urn:iki:ledger:graph:{ledger}:deleted`. Out of every ledger read; still there; recoverable. A **tombstone** stays in the live graph. |
+| **delete** | `Delete …:{ledger}:item:{id}` (`urn:cap:ledger:delete:{ledger}`) | the item's quads, its comments, events, links, session summaries and the edges pointing at it MOVE to that ledger's own `urn:iki:ledger:graph:{ledger}:deleted`. Out of every ledger read; still there; recoverable. A **tombstone** stays in the live graph. |
 | **purge** | `…:{ledger}:purge` (`urn:cap:ledger:purge:{ledger}`) | only the tombstone. The content is destroyed in both graphs — and an item that was already deleted is purged the same way, found by its tombstone, so a secret deleted first and purged second is really gone. |
 
 The tombstone carries the number, the time, the actor, the reason, the quad count and the
@@ -986,7 +986,8 @@ read and the commit makes the commit match nothing, and the delete reads, archiv
 commits again, so the write is archived with the item. Through 0.14.1 it was kept in the live
 graph beside the tombstone instead, an orphan that no later purge could reach. A purge
 still removes by selector — it is asked to leave nothing of the item — so a write racing a
-purge goes with it, except a new comment or event, which makes the purge read again (below).
+purge goes with it, except a new comment, event or session summary, which makes the purge
+read again (below).
 
 ### What a close and a reopen cost: the item, not the ledger's closed history
 

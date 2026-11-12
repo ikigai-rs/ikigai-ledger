@@ -64,7 +64,10 @@ const SUMMARY: &str = r#"{
 
 /// A ledger with item #1, claimed and handed back by the worker.
 fn handed_back() -> Kernel {
-    let kernel = kernel();
+    hand_back_in(kernel())
+}
+
+fn hand_back_in(kernel: Kernel) -> Kernel {
     sink(&kernel, &at("append"), &[("content", "Fix the widget")]);
     let w = worker();
     try_as(
@@ -314,4 +317,131 @@ fn sessions_read_newest_first_and_a_session_hands_back_once() {
         Err(Error::Conflict(why)) => assert!(why.contains("another hand-back"), "{why}"),
         other => panic!("expected Conflict, got {other:?}"),
     }
+}
+
+/// Delete archives a summary whole; purge forgets it from either graph.
+fn check_session_removal(kernel: Kernel, archive_first: bool) {
+    record(&kernel, &worker(), SUMMARY).unwrap();
+    let operator = Capability::scoped(vec![
+        format!("urn:cap:ledger:delete:{LEDGER}"),
+        format!("urn:cap:ledger:purge:{LEDGER}"),
+        graph_read(LEDGER),
+        graph_write(LEDGER),
+        graveyard_read(LEDGER),
+        graveyard_write(LEDGER),
+    ]);
+    let rows = |graph: &str| -> serde_json::Value {
+        let query = format!("SELECT ?p ?o WHERE {{ GRAPH <{graph}> {{ <urn:agent:session:id:0b5e-41aa_7.c> ?p ?o }} }} ORDER BY ?p ?o");
+        serde_json::from_str(
+            &try_as(
+                &kernel,
+                &operator,
+                Verb::Source,
+                "urn:iki:store:graph-select",
+                &[("graph", graph), ("query", &query)],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let live = "urn:iki:ledger:graph:acme";
+    let graveyard = "urn:iki:ledger:graph:acme:deleted";
+    let before = rows(live)["results"]["bindings"].clone();
+    assert!(before.as_array().unwrap().len() > 10);
+    if archive_first {
+        try_as(&kernel, &operator, Verb::Delete, &at("item:1"), &[]).unwrap();
+        assert_eq!(
+            rows(live)["results"]["bindings"].as_array().unwrap().len(),
+            0,
+            "delete must leave no summary properties live"
+        );
+        assert_eq!(
+            rows(graveyard)["results"]["bindings"],
+            before,
+            "delete must archive the entire summary"
+        );
+    }
+    try_as(
+        &kernel,
+        &operator,
+        Verb::Delete,
+        &at("purge"),
+        &[("content", "1")],
+    )
+    .unwrap();
+    for graph in [live, graveyard] {
+        assert_eq!(
+            rows(graph)["results"]["bindings"].as_array().unwrap().len(),
+            0,
+            "purge must forget every summary property in {graph}"
+        );
+    }
+}
+
+#[test]
+fn session_summaries_go_with_live_purge() {
+    check_session_removal(handed_back(), false);
+}
+
+#[test]
+fn session_summaries_go_with_delete_then_purge() {
+    check_session_removal(handed_back(), true);
+}
+
+/// Session ownership must remain narrow in both graphs, under the scoped store copy bound.
+#[test]
+fn session_removal_does_not_copy_the_whole_ledger() {
+    for archive_first in [false, true] {
+        let kernel = hand_back_in(kernel_over(
+            ikigai_store::DurableStore::in_memory()
+                .unwrap()
+                .with_max_scoped_copy_quads(200),
+        ));
+        for graph in [
+            "urn:iki:ledger:graph:acme",
+            "urn:iki:ledger:graph:acme:deleted",
+        ] {
+            let data: String = (0..600)
+                .map(|n| format!("<urn:filler:{n}> <urn:field> {n} . "))
+                .collect();
+            sink(
+                &kernel,
+                "urn:iki:store:graph-update",
+                &[
+                    ("graph", graph),
+                    (
+                        "content",
+                        &format!("INSERT DATA {{ GRAPH <{graph}> {{ {data} }} }}"),
+                    ),
+                ],
+            );
+        }
+        check_session_removal(kernel, archive_first);
+    }
+}
+
+/// A blank-node dependent selects the fallback path; named summaries must still go whole.
+#[test]
+fn session_purge_also_works_with_the_blank_node_fallback() {
+    let kernel = handed_back();
+    sink(
+        &kernel,
+        "urn:iki:store:graph-update",
+        &[
+            ("graph", "urn:iki:ledger:graph:acme"),
+            (
+                "content",
+                "INSERT {
+                GRAPH <urn:iki:ledger:graph:acme> {
+                    _:note <https://ikigai-rs.dev/ns/ledger#onItem> ?item .
+                }
+            } WHERE {
+                GRAPH <urn:iki:ledger:graph:acme> {
+                    ?item a <https://ikigai-rs.dev/ns/ledger#Item> .
+                }
+            }",
+            ),
+        ],
+    );
+    check_session_removal(kernel, false);
 }

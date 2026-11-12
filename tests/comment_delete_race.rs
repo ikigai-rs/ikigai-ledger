@@ -213,3 +213,64 @@ fn a_comment_racing_a_delete_is_destroyed_by_the_purge_that_follows() {
         &leaked[..leaked.len().min(10)]
     );
 }
+
+/// A session acknowledged after the delete's read must be archived whole on its retry.
+#[test]
+fn a_session_inside_a_deletes_window_is_archived_and_then_purged() {
+    let (cell, armed) = gated();
+    let kernel = cell.get().unwrap();
+    append_iri(kernel, "an item with a session", &[]);
+    sink(
+        kernel,
+        "urn:iki:ledger:comment",
+        &[
+            ("item", "1"),
+            ("content", "handing back"),
+            ("handback", "true"),
+        ],
+    );
+    *armed.lock().unwrap() = Some(request(
+        Verb::Sink,
+        "urn:iki:ledger:item:1:sessions",
+        &[(
+            "content",
+            r#"{
+            "session": "during-delete",
+            "machineName": "worker",
+            "harness": "codex",
+            "model": "model",
+            "exitStatus": 0,
+            "wallClockMs": 100
+        }"#,
+        )],
+    ));
+    delete(kernel, "urn:iki:ledger:item:1", &[]);
+    assert!(
+        armed.lock().unwrap().is_none(),
+        "the session ran in the window"
+    );
+    let quads = || -> serde_json::Value {
+        serde_json::from_str(&select(
+            kernel,
+            "SELECT ?g ?p ?o WHERE { GRAPH ?g {
+                <urn:agent:session:id:during-delete> ?p ?o
+            } }",
+        ))
+        .unwrap()
+    };
+    let after_delete = quads();
+    let rows = after_delete["results"]["bindings"].as_array().unwrap();
+    assert!(
+        rows.len() > 10,
+        "the entire summary was archived: {after_delete}"
+    );
+    assert!(
+        rows.iter().all(|r| r["g"]["value"] == GRAVEYARD),
+        "the summary must be only in the graveyard: {after_delete}"
+    );
+    delete(kernel, "urn:iki:ledger:purge", &[("content", "1")]);
+    assert!(quads()["results"]["bindings"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
