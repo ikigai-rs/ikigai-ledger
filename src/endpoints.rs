@@ -2570,8 +2570,8 @@ impl LedgerGraph {
 }
 
 /// Everything that goes with an item when it goes: its own triples, the triples of its
-/// dependents (its comments, events and links, which hang off it by `ledger:onItem`), and every
-/// edge POINTING AT it.
+/// dependents (comments, events and links by `ledger:onItem`, session summaries by
+/// `ledger:sessionItem`), and every edge POINTING AT it.
 ///
 /// ⚠ An event's `ledger:editTarget` is not an edge (ledger #2841), and neither is a close's
 /// `ledger:evidence` (ledger #2842): each is another item's history, saying what happened there
@@ -2596,7 +2596,7 @@ impl LedgerGraph {
 /// the store narrows to the listed subjects since 0.3.3 (ledger #2940, #2941): one pattern for
 /// any number of dependents. Until then each was a `UNION` branch of its own, three of the
 /// store's 1,024 algebra operators apiece, so past 250 dependents the ledger fell back to the
-/// whole-graph form below. A dependent written after that read is still seen: its own `onItem`
+/// whole-graph form below. A dependent written after that read is still seen: its ownership
 /// edge points at the item, so the item-as-object pattern matches it, and each use below says
 /// what it does about one.
 ///
@@ -2617,6 +2617,16 @@ enum Selector {
 }
 
 impl Selector {
+    /// Both kinds of item ownership. Keep discovery, fallback and retry guards together:
+    /// removing only a new dependent's inbound edge would strand the rest of its quads.
+    fn dependent_pattern(subject: &str, item: &str) -> String {
+        format!(
+            "{{ {{ {subject} <{}> {item} }} UNION {{ {subject} <{}> {item} }} }}",
+            v::ON_ITEM,
+            v::SESSION_ITEM
+        )
+    }
+
     /// Read `item`'s dependents in `graph` and list them, or fall back to [`Selector::Whole`]
     /// when one is a blank node.
     async fn read(
@@ -2630,7 +2640,7 @@ impl Selector {
                 client,
                 &format!(
                     "SELECT DISTINCT ?s WHERE {{ {} }}",
-                    graph.wrap(client, &format!("?s <{}> {item}", v::ON_ITEM))
+                    graph.wrap(client, &Self::dependent_pattern("?s", &item))
                 ),
             )
             .await?;
@@ -2677,8 +2687,8 @@ impl Selector {
             }
             Selector::Whole { item } => format!(
                 "?s ?p ?o . FILTER(?s = {item} || (?o = {item} && ?p NOT IN (<{target}>, \
-                 <{evidence}>)) || EXISTS {{ ?s <{on}> {item} }})",
-                on = v::ON_ITEM,
+                 <{evidence}>)) || EXISTS {{ {dependent} }})",
+                dependent = Self::dependent_pattern("?s", item),
                 target = v::EDIT_TARGET,
                 evidence = v::EVIDENCE,
             ),
@@ -2687,7 +2697,7 @@ impl Selector {
 
     /// `DELETE … WHERE` of the whole set in `graph`, under `guard` (a pattern over `graph`).
     ///
-    /// A dependent written after [`Selector::read`] is left WHOLE, its `onItem` edge included,
+    /// A dependent written after [`Selector::read`] is left WHOLE, its ownership edge included,
     /// rather than half removed: a narrow removal names no pattern for its other quads, so taking
     /// its edge alone would orphan them where no later read could find them. With
     /// `refuse_unnamed`, the removal instead matches nothing at all while such a dependent exists,
@@ -2706,7 +2716,10 @@ impl Selector {
                     format!("{{ {item} ?p0 ?o0 }}"),
                     format!(
                         "{{ ?s1 ?p1 {item} {} }}",
-                        Self::inbound_filter("?p1", &format!(", <{}>", v::ON_ITEM))
+                        Self::inbound_filter(
+                            "?p1",
+                            &format!(", <{}>, <{}>", v::ON_ITEM, v::SESSION_ITEM),
+                        )
                     ),
                 ];
                 // ★ The template's `?d` is bound only by the `VALUES` branch, so the store
@@ -2746,7 +2759,7 @@ impl Selector {
     ///
     /// ★ A commit that removes what was read needs it as well as its rows check (ledger #2922):
     /// a dependent written between the read of the dependents and the read of the rows put its
-    /// `onItem` edge, and only that, into the rows, so the rows check passed and the rest of it
+    /// ownership edge, and only that, into the rows, so the rows check passed and the rest of it
     /// stayed live as an orphan. Found by `comment_delete_race`, 1 round in 300.
     ///
     /// ⚠ A sub-select counted ONCE, not a `FILTER NOT EXISTS`: a group's filter is evaluated
@@ -2756,9 +2769,9 @@ impl Selector {
     fn no_unnamed_dependent(&self) -> String {
         match self {
             Selector::Narrow { item, dependents } => format!(
-                "{{ SELECT (COUNT(?x) AS ?unnamedDependents) WHERE {{ ?x <{}> {item} \
+                "{{ SELECT (COUNT(?x) AS ?unnamedDependents) WHERE {{ {} \
                  MINUS {{ VALUES ?x {{ {} }} }} }} }} FILTER(?unnamedDependents = 0)",
-                v::ON_ITEM,
+                Self::dependent_pattern("?x", item),
                 dependents.join(" ")
             ),
             Selector::Whole { .. } => String::new(),
