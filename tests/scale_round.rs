@@ -6,6 +6,7 @@
 //! ```text
 //! cargo test --release --test scale_round -- --ignored --nocapture
 //! IKIGAI_LEDGER_SCALES=1,10 cargo test --release --test scale_round -- --ignored --nocapture
+//! IKIGAI_LEDGER_PAGES_ONLY=1 cargo test --release --test scale_round -- --ignored --nocapture
 //! ```
 //!
 //! ★ **The store is a scratch one.** Each size gets a fresh RocksDB `DurableStore` in a new
@@ -419,13 +420,27 @@ fn count_query() -> String {
     )
 }
 
-/// `model::page_iris` for the open filter at `limit`: GROUP BY and ORDER BY over every
-/// open item before the LIMIT.
+/// `model::page_iris`: GROUP BY and ORDER BY over every open item before the LIMIT.
+/// Kept beside the row-prefix candidate for a same-store comparison.
 fn page_query(limit: usize) -> String {
     format!(
         "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ GRAPH <{GRAPH}> {{ \
          {}OPTIONAL {{ ?item <{}> ?created }}\nOPTIONAL {{ ?item <{}> ?modified }}\n{} }} }} \
          GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET 0",
+        listed(),
+        v::ext::CREATED,
+        v::ext::MODIFIED,
+        open_clause()
+    )
+}
+
+/// A candidate that limits rows before deduplicating subjects. On this fixture
+/// every item has one row, so its first `limit` subjects must equal the grouped page above.
+fn page_rows_query(limit: usize) -> String {
+    format!(
+        "SELECT ?item WHERE {{ GRAPH <{GRAPH}> {{ \
+         {}OPTIONAL {{ ?item <{}> ?created }}\nOPTIONAL {{ ?item <{}> ?modified }}\n{} BIND({RECENCY} AS ?recency) }} }} \
+         ORDER BY DESC(?recency) DESC(?number) ?item LIMIT {limit}",
         listed(),
         v::ext::CREATED,
         v::ext::MODIFIED,
@@ -594,6 +609,7 @@ fn scratch_dir(scale: usize) -> PathBuf {
 #[test]
 #[ignore = "a measurement: run it in release, with --ignored --nocapture"]
 fn scale_round() {
+    let pages_only = std::env::var_os("IKIGAI_LEDGER_PAGES_ONLY").is_some();
     let scales: Vec<usize> = std::env::var("IKIGAI_LEDGER_SCALES")
         .unwrap_or_else(|_| "1,10,100".to_string())
         .split(',')
@@ -631,7 +647,7 @@ fn scale_round() {
         let runs = if scale >= 100 { 3 } else { 5 };
         // The probe in the LAST copy, so it is not the first row of any index.
         let item = format!("urn:iki:ledger:item:{}", probe + ITEMS * (scale - 1));
-        let reads: Vec<Read> = vec![
+        let mut reads: Vec<Read> = vec![
             ("next", "urn:iki:ledger:next", vec![]),
             (
                 "next as=json",
@@ -657,6 +673,9 @@ fn scale_round() {
             ),
             ("item:{n}", &item, vec![]),
         ];
+        if pages_only {
+            reads.retain(|(name, _, _)| name.starts_with("items"));
+        }
         println!(
             "{:<24} {:>9} {:>9} {:>9}   (s; median of {runs}; ! over 1 s)",
             "read", "first", "cold", "warm"
@@ -691,14 +710,31 @@ fn scale_round() {
         };
         let [missing, values] = defect_queries();
         let fills = fill_queries(&open_iris);
-        let parts: Vec<(&str, Vec<String>)> = vec![
+        for limit in [1, 50] {
+            let items = |query: &str| {
+                let json: Value = serde_json::from_str(&select(&kernel, query)).expect("JSON");
+                json["results"]["bindings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["item"].clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(items(&page_query(limit)), items(&page_rows_query(limit)));
+        }
+        let mut parts: Vec<(&str, Vec<String>)> = vec![
             ("q: count (open)", vec![count_query()]),
             ("q: page limit=1", vec![page_query(1)]),
             ("q: page limit=50", vec![page_query(50)]),
+            ("q: page rows limit=1", vec![page_rows_query(1)]),
+            ("q: page rows limit=50", vec![page_rows_query(50)]),
             ("q: load every open", vec![load_query()]),
             ("q: fill every open", fills),
             ("q: defects (2 scans)", vec![missing, values]),
         ];
+        if pages_only {
+            parts.retain(|(name, _)| name.starts_with("q: page"));
+        }
         let parts: Vec<(&str, (Duration, Duration))> = parts
             .iter()
             .map(|(name, queries)| {
@@ -721,6 +757,11 @@ fn scale_round() {
         }
         for (name, (first, cold)) in parts {
             println!("{name:<24} {} {}", secs(first), secs(cold));
+        }
+        if pages_only {
+            drop(kernel);
+            let _ = std::fs::remove_dir_all(&dir);
+            continue;
         }
         // The writes: never cached, so one column.
         let (_, append_time) = first_and_median(runs, || {
