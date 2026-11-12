@@ -42,6 +42,14 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   what happened, and `(claimed by an importer)` after who did it at the source. A state change
   names the lifecycle's version in words (`lifecycle version 2`), or says it has none
   (`no lifecycle version recorded (written before 0.18.0)`).
+- **An item's sessions** (`src/endpoints/session.rs`): a first line with the item and a count
+  (`acme#1: 2 session(s), newest first`), or the sentence `acme#1 has no recorded sessions`, then
+  a block per session: `session {id} recorded {time}` and labeled lines in words (`harness:`,
+  `model:`, `machine:`, `exit status:`, `wall clock: … ms`, `turns:`, `tool calls:`, `tokens:
+  input …, cached input …, cache creation …, output …`, `hand-back:`, `iri:`). A count the harness
+  did not report says `not reported`. Recording one answers
+  `recorded session {id} on acme#1's hand-back`; a refused summary names the property and what is
+  accepted (`ledger:harness must be one of claude, codex, and … is not`).
 - **Write answers** (`src/endpoints.rs`): one sentence each, such as
   `#1 urn:iki:ledger:default:item:…`, `commented on #1 (…)`, `linked #1 blocks #2`,
   `closed #2 (done)`, `closed #2 done (2 evidence)`, `closed #2 duplicate of #1`,

@@ -40,10 +40,11 @@
 @prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
 @prefix sig:    <https://ikigai-rs.dev/ns/sign#> .
 @prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix sh:     <http://www.w3.org/ns/shacl#> .
 
 <https://ikigai-rs.dev/ns/ledger> a owl:Ontology ;
     rdfs:label "ikigai-ledger" ;
-    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841); ledger:evidence: what closed an item, on that close's StatusEvent, beside its ledger:closedReason, which therefore drops its rdfs:domain (ledger #2842); ledger:eventKey: an imported event's id at its source, on claim, release, edit and status events an import principal records with claimed dates, which change nothing on the item (ledger #2843); ledger:movesTo: the moves a lifecycle allows from each state, which the state Sink enforces when any are declared (ledger #2863); ledger:lifecycleVersion: the version of the lifecycle a state event was checked against, read from the document (ledger #2864); ledger:claimedModified: the dcterms:modified an import principal last claimed, which the claim holds while dcterms:modified equals (ledger #2932). And 0.20.0 adds ledger:claimEpoch: a claim's fencing epoch, raised by every grant and takeover and never lowered, which a holder's write may name to be refused once its claim is no longer current (ledger #3205)." ;
+    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841); ledger:evidence: what closed an item, on that close's StatusEvent, beside its ledger:closedReason, which therefore drops its rdfs:domain (ledger #2842); ledger:eventKey: an imported event's id at its source, on claim, release, edit and status events an import principal records with claimed dates, which change nothing on the item (ledger #2843); ledger:movesTo: the moves a lifecycle allows from each state, which the state Sink enforces when any are declared (ledger #2863); ledger:lifecycleVersion: the version of the lifecycle a state event was checked against, read from the document (ledger #2864); ledger:claimedModified: the dcterms:modified an import principal last claimed, which the claim holds while dcterms:modified equals (ledger #2932). And 0.20.0 adds ledger:claimEpoch: a claim's fencing epoch, raised by every grant and takeover and never lowered, which a holder's write may name to be refused once its claim is no longer current (ledger #3205). And 0.22.0 adds ledger:SessionSummary, ledger:SessionSummaryShape and the summary's properties (ledger:sessionId, ledger:sessionItem, ledger:handBackEvent, ledger:machineName, ledger:harness, ledger:model, ledger:exitStatus, ledger:wallClockMs, ledger:turns, ledger:toolCalls, ledger:inputTokens, ledger:cachedInputTokens, ledger:cacheCreationTokens, ledger:outputTokens): the raw, content-free facts of an agent run, recorded on its hand-back (ledger #3022)." ;
     owl:versionInfo "0.21.2" .
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -757,3 +758,119 @@ ledger:aliasOf a rdf:Property ;
     rdfs:range ledger:Item ;
     rdfs:label "alias of" ;
     rdfs:comment "The item an alias names. Exactly one per alias, decided inside the write that adds it." .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Agent sessions (ledger #3022)
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:SessionSummary a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Session summary" ;
+    rdfs:comment "The content-free record of one agent run, which a worker attaches to its hand-back: the harness's session id, the item, the machine, the harness, the model, the exit status, the wall-clock time, turns and tool calls, and tokens by category. Never transcript text, prompts, tool results or file contents, and no cost. Skolemized as urn:agent:session:id:{id}, the harness's own id; owl:sameAs links it to urn:agents:session:{id}, the older convention an about edge may carry, which is never rewritten. Checked against ledger:SessionSummaryShape, which is closed." .
+
+ledger:sessionId a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:string ;
+    rdfs:label "session id" ;
+    rdfs:comment "The harness's own session id: A-Z a-z 0-9 - _ and ., at most 128 characters. The last segment of the summary's IRI." .
+
+ledger:sessionItem a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range ledger:Item ;
+    rdfs:label "session item" ;
+    rdfs:comment "The item a session worked on." .
+
+ledger:handBackEvent a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range ledger:Comment ;
+    rdfs:label "hand-back event" ;
+    rdfs:comment "The hand-back comment (comment handback=true) a summary is recorded on: the item's newest when the summary was written." .
+
+ledger:machineName a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:string ;
+    rdfs:label "machine name" ;
+    rdfs:comment "The machine the session ran on, as the worker names it." .
+
+ledger:harness a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:string ;
+    rdfs:label "harness" ;
+    rdfs:comment "The agent harness that ran the session: claude or codex." .
+
+ledger:model a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:string ;
+    rdfs:label "model" ;
+    rdfs:comment "The model the session ran, as the harness names it." .
+
+ledger:exitStatus a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:integer ;
+    rdfs:label "exit status" ;
+    rdfs:comment "The harness process's exit status." .
+
+ledger:wallClockMs a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:integer ;
+    rdfs:label "wall-clock time" ;
+    rdfs:comment "The session's wall-clock time in milliseconds, 0 or more." .
+
+ledger:turns a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:integer ;
+    rdfs:label "turns" ;
+    rdfs:comment "The session's turns, 0 or more, when the harness reports them." .
+
+ledger:toolCalls a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:integer ;
+    rdfs:label "tool calls" ;
+    rdfs:comment "The session's tool calls, 0 or more, when the harness reports them." .
+
+ledger:inputTokens a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:integer ;
+    rdfs:label "input tokens" ;
+    rdfs:comment "Uncached input tokens, 0 or more." .
+
+ledger:cachedInputTokens a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:integer ;
+    rdfs:label "cached input tokens" ;
+    rdfs:comment "Input tokens read from a prompt cache, 0 or more." .
+
+ledger:cacheCreationTokens a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:integer ;
+    rdfs:label "cache creation tokens" ;
+    rdfs:comment "Input tokens written to a prompt cache, 0 or more." .
+
+ledger:outputTokens a rdf:Property ;
+    rdfs:domain ledger:SessionSummary ;
+    rdfs:range xsd:integer ;
+    rdfs:label "output tokens" ;
+    rdfs:comment "Output tokens, 0 or more." .
+
+ledger:SessionSummaryShape a sh:NodeShape ;
+    rdfs:label "Session summary shape" ;
+    rdfs:comment "What a session summary may hold, and nothing else: the shape is CLOSED, so a property it does not name (a transcript, a prompt, a tool result, a cost) is refused, and the summary is not written. The ledger writes rdf:type, ledger:sessionId, ledger:sessionItem, ledger:handBackEvent, dcterms:created and owl:sameAs itself; the worker sends the rest." ;
+    sh:targetClass ledger:SessionSummary ;
+    sh:closed true ;
+    sh:property [ sh:path rdf:type ; sh:minCount 1 ; sh:maxCount 1 ; sh:in ( ledger:SessionSummary ) ] ;
+    sh:property [ sh:path ledger:sessionId ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ledger:sessionItem ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ;
+    sh:property [ sh:path ledger:handBackEvent ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ;
+    sh:property [ sh:path dcterms:created ; sh:datatype xsd:dateTime ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path owl:sameAs ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ;
+    sh:property [ sh:path ledger:machineName ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ledger:harness ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ; sh:in ( "claude" "codex" ) ] ;
+    sh:property [ sh:path ledger:model ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ledger:exitStatus ; sh:datatype xsd:integer ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ledger:wallClockMs ; sh:datatype xsd:integer ; sh:minCount 1 ; sh:maxCount 1 ; sh:minInclusive 0 ] ;
+    sh:property [ sh:path ledger:turns ; sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ] ;
+    sh:property [ sh:path ledger:toolCalls ; sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ] ;
+    sh:property [ sh:path ledger:inputTokens ; sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ] ;
+    sh:property [ sh:path ledger:cachedInputTokens ; sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ] ;
+    sh:property [ sh:path ledger:cacheCreationTokens ; sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ] ;
+    sh:property [ sh:path ledger:outputTokens ; sh:datatype xsd:integer ; sh:maxCount 1 ; sh:minInclusive 0 ] .
