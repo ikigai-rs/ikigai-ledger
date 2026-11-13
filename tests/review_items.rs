@@ -80,3 +80,49 @@ fn review_jobs_and_findings_round_trip_by_kind_and_replays_do_not_duplicate_find
     }
     assert_eq!(source(&kernel, "urn:iki:ledger:count", &[]), "2\n");
 }
+
+#[test]
+fn finding_severities_document_all_four_levels_and_runner_mapping() {
+    let quads: Vec<_> = oxrdfio::RdfParser::from_format(oxrdfio::RdfFormat::Turtle)
+        .for_reader(VOCABULARY_TTL.as_bytes())
+        .map(|quad| quad.expect("the vocabulary parses"))
+        .collect();
+    let comments: Vec<_> = quads
+        .iter()
+        .filter(|q| {
+            q.subject.to_string() == format!("<{FINDING}>")
+                && q.predicate.as_str() == "http://www.w3.org/2000/01/rdf-schema#comment"
+        })
+        .map(|q| q.object.to_string())
+        .collect();
+    assert_eq!(comments.len(), 1);
+    assert!(comments[0].contains(
+        "Severity is one label, from highest to lowest: severity:critical, severity:major, severity:minor or severity:trivial."
+    ), "{}", comments[0]);
+    assert!(comments[0].contains(
+        "Review runner mapping: critical = critical, high = major, medium = minor, low = trivial."
+    ), "{}", comments[0]);
+}
+
+#[test]
+fn all_four_finding_severity_labels_round_trip() {
+    let kernel = kernel();
+    for level in ["critical", "major", "minor", "trivial"] {
+        let label = format!("severity:{level}");
+        let title = format!("Finding with {level} severity");
+        append(&kernel, &title, &[("kind", FINDING), ("labels", &label)]);
+        let listing = source(
+            &kernel,
+            "urn:iki:ledger:items",
+            &[
+                ("kind", FINDING),
+                ("labels", &label),
+                ("as", "application/json"),
+            ],
+        );
+        let listing: serde_json::Value = serde_json::from_str(&listing).unwrap();
+        assert_eq!(listing["items"].as_array().unwrap().len(), 1);
+        assert_eq!(listing["items"][0]["title"], title);
+        assert_eq!(listing["items"][0]["labels"], serde_json::json!([label]));
+    }
+}
