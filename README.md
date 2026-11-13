@@ -2303,17 +2303,34 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### 0.21.3: findings have four severity levels
+### 0.22.0: agent session summaries, a summaries-only grant, and a fourth finding severity
 
-`ledger:Finding` documents one severity label, from highest to lowest:
-`severity:critical`, `severity:major`, `severity:minor`, `severity:trivial`.
-Review runners map critical = critical, high = major, medium = minor, low = trivial.
-Existing labels keep their meaning. Severity labels use the shared label plumbing;
-the built-in `next` policies do not rank by severity.
+A minor release: new resources and a new grant; no existing answer changes shape.
 
-After release, Brian must redeploy `/ns/ledger` so the published vocabulary carries
-version 0.21.3 and the fourth severity level. Finding docs in `ikigai-gonk-starter`
-that list severity levels need the same update in that repository.
+- **An agent session's summary on its hand-back** (ledger #3022, PR 111): a worker records a content-free
+  summary of the session that did the work (model, tokens by category, time, turns; no cost) under
+  `urn:cap:ledger:session:*`, read one item at a time at `…:item:{id}:sessions`. Delete and purge carry an
+  item's summaries with it (PR 112).
+- **A ledger's summaries as one set** (ledger #3647, PR 114): `urn:iki:ledger:{ledger}:sessions`, newest
+  first, paged, raw, item ids only. A new grant `urn:cap:ledger:summaries:{ledger}` reads that set and is
+  refused every item's title at this crate's doors; `read:{ledger}` also covers it. ⚠ The grant still needs
+  the ledger graph's store read beside it, which reads the whole graph at the store; summaries in their own
+  graph is ledger #3661. A ledger named `sessions` is now reserved.
+- **The ledgers listing has a JSON face** (ledger #3654, PR 116): `urn:iki:ledger:ledgers as=application/json`
+  answers schema 1, `{schema, ledgers: [{name, graph, open, total}]}`, with the same rows and permission checks as
+  the plain and Turtle faces.
+- **Findings have four severity levels** (ledger #3656, PR 115): `ledger:Finding` documents
+  `severity:critical`, `severity:major`, `severity:minor`, `severity:trivial`, highest first. Review runners map
+  critical = critical, high = major, medium = minor, low = trivial; existing labels keep their meaning, and the
+  built-in `next` policies do not rank by severity.
+- **Consistency fixes**: the items page and its total come from one store query (ledger #1741, PR 108); a
+  listing's records and totals from one store snapshot (PR 109); a lifecycle field ambiguity and a cross-ledger
+  delete race are fixed (PR 110).
+- `ACCESSIBILITY.md` records each check as Pass, Fail or Blocked (PR 113).
+
+After the release, `/ns/ledger` needs a redeploy (Brian's) so the published vocabulary carries 0.22.0, the session
+summary terms and the fourth severity level. Finding docs in `ikigai-gonk-starter` that list severity levels need the
+same update there.
 
 ### 0.21.2: contracts say which writes a retrying client may send again
 
