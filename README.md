@@ -2278,6 +2278,18 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.21.3: findings have four severity levels
+
+`ledger:Finding` documents one severity label, from highest to lowest:
+`severity:critical`, `severity:major`, `severity:minor`, `severity:trivial`.
+Review runners map critical = critical, high = major, medium = minor, low = trivial.
+Existing labels keep their meaning. Severity labels use the shared label plumbing;
+the built-in `next` policies do not rank by severity.
+
+After release, Brian must redeploy `/ns/ledger` so the published vocabulary carries
+version 0.21.3 and the fourth severity level. Finding docs in `ikigai-gonk-starter`
+that list severity levels need the same update in that repository.
+
 ### 0.21.2: contracts say which writes a retrying client may send again
 
 A patch; no answer changes shape.
