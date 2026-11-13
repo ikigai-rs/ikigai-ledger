@@ -1,4 +1,4 @@
-//! **The JSON face**: `as=application/json` on `items`, `count`, `item:{id}` and `next`, and
+//! **The JSON face**: `as=application/json` on `ledgers`, `items`, `count`, `item:{id}` and `next`, and
 //! on the answers of `append`, `comment`, `close` and `link`.
 //!
 //! # ★ Why this exists
@@ -10,8 +10,8 @@
 //!
 //! # The shape, and how it is versioned
 //!
-//! Every document is an object carrying `"schema": 1` and `"ledger"`, then its payload. The
-//! number is [`SCHEMA`]. **Adding a field does not change it** (a reader ignores what it does
+//! Every document is an object carrying `"schema": 1` and, except for the inventory,
+//! `"ledger"`, then its payload. The number is [`SCHEMA`]. **Adding a field does not change it** (a reader ignores what it does
 //! not know, and these types deserialize that way); **renaming, removing or retyping a field
 //! does**. Field order is fixed (the order below), absent values are `null` rather than
 //! missing — except the per-outcome fields of an [`Answer`], listed there — and times are
@@ -58,7 +58,9 @@
 //! ```
 //!
 //! The other documents, field by field: [`ItemsDocument`] (`items`), [`CountDocument`]
-//! (`count`), [`NextDocument`] (`next`) and [`Answer`] (the four writes). `tests/faces.rs` pins each one as a literal.
+//! (`count`), [`LedgersDocument`] (`ledgers`), [`NextDocument`] (`next`) and [`Answer`]
+//! (the four writes). `tests/faces.rs` pins the ledger-bound documents as literals;
+//! `tests/ledgers.rs` pins the inventory.
 //!
 //! ⚠ **The types are `#[non_exhaustive]`**: read them and deserialize into them, but they
 //! cannot be built outside this crate — which is what lets schema 1 gain a field in a patch
@@ -374,6 +376,31 @@ pub struct ItemsDocument {
     /// unreadable or missing timestamp) is in `items` instead, carrying it in its own
     /// `defects`, and is not repeated here.
     pub unreadable: Vec<Unreadable>,
+}
+
+/// `ledgers`: the inventory this capability may read, in ledger name order.
+/// Unlike ledger-bound documents, the inventory has no top-level `ledger` field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LedgersDocument {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The same ledgers and counts as the plain inventory; empty when none exist.
+    pub ledgers: Vec<LedgerSummary>,
+}
+
+/// One ledger's row in the inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LedgerSummary {
+    /// The ledger's name.
+    pub name: String,
+    /// The IRI of its named graph.
+    pub graph: String,
+    /// How many items are open.
+    pub open: i64,
+    /// How many live items it holds, open and closed.
+    pub total: i64,
 }
 
 /// `count` (since 0.9.0): how many items a filter admits, and nothing else.

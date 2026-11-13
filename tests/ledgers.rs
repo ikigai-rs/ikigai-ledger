@@ -735,3 +735,66 @@ fn a_ledger_granted_here_but_not_in_the_store_refuses_the_listing() {
         .expect("both halves granted");
     assert!(listing.contains("2 ledger(s)"), "{listing}");
 }
+
+#[test]
+fn the_inventory_json_pins_counts_order_and_capability_filtering() {
+    let kernel = kernel();
+    append(&kernel, "Default work", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:acme:append",
+        &[("content", "Open")],
+    );
+    sink(
+        &kernel,
+        "urn:iki:ledger:acme:append",
+        &[("content", "Closed")],
+    );
+    sink(&kernel, "urn:iki:ledger:acme:close", &[("item", "acme#2")]);
+    let all = source(
+        &kernel,
+        "urn:iki:ledger:ledgers",
+        &[("as", "application/json")],
+    );
+    assert_eq!(all, concat!(
+        "{\"schema\":1,\"ledgers\":[",
+        "{\"name\":\"acme\",\"graph\":\"urn:iki:ledger:graph:acme\",\"open\":1,\"total\":2},",
+        "{\"name\":\"default\",\"graph\":\"urn:iki:ledger:graph:default\",\"open\":1,\"total\":1}]}\n"
+    ));
+    let doc: ikigai_ledger::json::LedgersDocument = serde_json::from_str(&all).unwrap();
+    assert_eq!(doc.ledgers[0].total, 2);
+    let scoped = try_as(
+        &kernel,
+        &grants_for("acme"),
+        Verb::Source,
+        "urn:iki:ledger:ledgers",
+        &[("as", "application/json")],
+    )
+    .unwrap();
+    assert_eq!(scoped, "{\"schema\":1,\"ledgers\":[{\"name\":\"acme\",\"graph\":\"urn:iki:ledger:graph:acme\",\"open\":1,\"total\":2}]}\n");
+    let empty = try_as(
+        &kernel,
+        &grants_for("unfiled"),
+        Verb::Source,
+        "urn:iki:ledger:ledgers",
+        &[("as", "application/json")],
+    )
+    .unwrap();
+    assert_eq!(empty, "{\"schema\":1,\"ledgers\":[]}\n");
+}
+
+#[test]
+fn the_inventory_json_refuses_a_missing_store_grant() {
+    let kernel = kernel();
+    let half = Capability::scoped(["urn:cap:ledger:read:acme".to_string(), graph_read("other")]);
+    let error = try_as(
+        &kernel,
+        &half,
+        Verb::Source,
+        "urn:iki:ledger:ledgers",
+        &[("as", "application/json")],
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Denied(_)), "{error}");
+    assert!(error.to_string().contains(&graph_read("acme")), "{error}");
+}

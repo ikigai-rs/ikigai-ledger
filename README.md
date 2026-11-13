@@ -272,7 +272,7 @@ need no store grant at all: each is configuration the host registered at boot, a
 about it is in the graph.
 
 Every read serves `text/plain` (the default — a line per item, greppable) and
-`text/turtle` (the graph); `items`, `item:{id}` and `next` also serve `application/json`,
+`text/turtle` (the graph); `ledgers`, `items`, `item:{id}` and `next` also serve `application/json`,
 and so do the answers of `append`, `comment`, `close` and `link` — see "The JSON face"
 below. `count` is the exception: a number is not a graph, so it serves `text/plain` (the bare
 number, which pipes) and `application/json`, and no Turtle. An `as=` this module cannot
@@ -744,7 +744,8 @@ both items are simply excluded, each naming the other.
 ## The JSON face
 
 `as=application/json` is the machine contract; the plain face is for people and is not a
-format to parse. Every document is one compact line carrying `"schema": 1` and `"ledger"`.
+format to parse. Every document is one compact line carrying `"schema": 1` and, except
+for the ledger inventory, `"ledger"`.
 **Adding a field does not change the schema number; renaming, removing or retyping one
 does.** Absent values are `null`, times are `xsd:dateTime` strings in UTC, and the item
 object is the same wherever it appears:
@@ -777,6 +778,7 @@ first".
 
 | resource | document |
 | --- | --- |
+| `ledgers` | `{schema, ledgers: [{name, graph, open, total}]}` — the plain inventory’s rows in name order, filtered by the same read grants; `graph` is the graph IRI, counts are integers, and an empty inventory has `ledgers: []` |
 | `item:{id}` | `{schema, ledger, item}` |
 | `items` | `{schema, ledger, count, total, offset, items: [item…], unreadable: [{iri, defects}]}` — `count` is the PAGE (`items`' length), `total` how many items the filter admits, `offset` how many the page skipped; `count < total` says the page is not the set. `unreadable` is the plain face's ⚠ footer, as data: the items NOT in `items`. An item listed with a stand-in timestamp carries its own `defects` instead |
 | `count` | `{schema, ledger, total}` — `items`' `total` for the same filter, without the page and without the corpus check behind `unreadable` |
