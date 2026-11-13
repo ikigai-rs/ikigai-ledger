@@ -155,8 +155,8 @@ pub mod vocabulary;
 
 pub use endpoints::{
     space, space_with, space_with_policies, SpaceConfig, CAP_ABOUT, CAP_ALIAS, CAP_ANY, CAP_CLAIM,
-    CAP_CLOSE, CAP_COMMENT, CAP_DELETE, CAP_LINK_IN, CAP_PURGE, CAP_READ, CAP_SESSION, CAP_WRITE,
-    SPACE_ID,
+    CAP_CLOSE, CAP_COMMENT, CAP_DELETE, CAP_LINK_IN, CAP_PURGE, CAP_READ, CAP_SESSION,
+    CAP_SUMMARIES, CAP_WRITE, SPACE_ID,
 };
 pub use ledger::Ledger;
 pub use lifecycle::{Lifecycle, Lifecycles};

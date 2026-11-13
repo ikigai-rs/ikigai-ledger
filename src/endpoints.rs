@@ -184,6 +184,22 @@ pub const CAP_ALIAS: &str = "urn:cap:ledger:alias:*";
 /// `write:{ledger}` covers it too. Declared as [`CAP_ANY`]; see [`CAP_CLAIM`].
 pub const CAP_SESSION: &str = "urn:cap:ledger:session:*";
 
+/// The family of the summaries grant (ledger #3647): reading every session summary in a
+/// ledger at `…:{ledger}:sessions`, and nothing else. A held grant names one ledger:
+/// [`Ledger::cap_summaries`]. `read:{ledger}` covers it too, so it is declared as
+/// [`CAP_ANY`]; see [`CAP_CLAIM`].
+///
+/// ★ **Named apart from [`CAP_SESSION`] on purpose.** `urn:cap:ledger:session:*` is the WRITE
+/// family a worker records with; a read grant under it would let every holder of that family
+/// read every run in the ledger, and a family is matched only as a prefix. `summaries` is no
+/// extension of `session:`, so neither family contains the other.
+///
+/// ⚠ **Narrow at this module's doors, like every grant here.** The set is read through the
+/// ledger graph's store read grant, which the caller must hold too (a sub-request carries the
+/// caller's capability unchanged), and that grant reaches the raw graph at the store's own
+/// `urn:iki:store:graph-select`. See `README.md`, "What is enforced, and where".
+pub const CAP_SUMMARIES: &str = "urn:cap:ledger:summaries:*";
+
 /// "Holds some ledger grant": the floor `claim`, `comment`, `close`, `reopen` and
 /// `item:{id}:about` DECLARE,
 /// because it is the only family both the narrow grant and `write:{ledger}` satisfy (see
@@ -231,6 +247,9 @@ pub(crate) enum Need {
     /// Record a session summary on a hand-back: `session:{ledger}`, or `write:{ledger}`
     /// (ledger #3022).
     Session,
+    /// Read every session summary in the ledger: `summaries:{ledger}`, or `read:{ledger}`
+    /// (ledger #3647).
+    Summaries,
 }
 
 impl Need {
@@ -248,6 +267,19 @@ impl Need {
             Need::Alias => ledger.cap_alias(),
             Need::LinkIn => ledger.cap_link_in(),
             Need::Session => ledger.cap_session(),
+            Need::Summaries => ledger.cap_summaries(),
+        }
+    }
+
+    /// The broader grant that also satisfies it, if any: `write:{ledger}` for the verbs split
+    /// out of it, `read:{ledger}` for the summaries set.
+    fn covered_by(self, ledger: &Ledger) -> Option<String> {
+        if self.write_covers() {
+            Some(ledger.cap_write())
+        } else if self == Need::Summaries {
+            Some(ledger.cap_read())
+        } else {
+            None
         }
     }
 
@@ -273,7 +305,8 @@ impl Need {
             | Need::Close
             | Need::About
             | Need::Alias
-            | Need::Session => CAP_ANY,
+            | Need::Session
+            | Need::Summaries => CAP_ANY,
             Need::LinkIn => CAP_LINK_IN,
         }
     }
@@ -304,13 +337,12 @@ pub(crate) fn grant_for(inv: &Invocation<'_>, ledger: Ledger, need: Need) -> Res
     if inv.capability.allows(&scope) {
         return Ok(ledger);
     }
-    if need.write_covers() {
-        let write = ledger.cap_write();
-        if inv.capability.allows(&write) {
+    if let Some(broader) = need.covered_by(&ledger) {
+        if inv.capability.allows(&broader) {
             return Ok(ledger);
         }
         return Err(Error::Denied(format!(
-            "this capability holds neither `{scope}` nor `{write}`, and this resource takes \
+            "this capability holds neither `{scope}` nor `{broader}`, and this resource takes \
              either. A ledger grant names exactly one ledger, and a grant for another verb \
              (a worker's claim and comment, say) does not reach this one"
         )));
@@ -509,6 +541,10 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
         )
         .bind(ItemPartGrammar::part("history"), history::HistoryEndpoint)
         .bind(ItemPartGrammar::part("sessions"), session::SessionsEndpoint)
+        .bind(
+            LedgerGrammar::action("sessions"),
+            session::SessionSetEndpoint,
+        )
         .bind(
             LedgerGrammar::with_id("item"),
             ItemEndpoint {

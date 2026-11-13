@@ -251,6 +251,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}:holder:{holder}` | Exists | is it held by that holder? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:closed` | Exists | is it closed? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:about` | Sink · Delete | add / remove what it is about, title and body untouched | `about:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:sessions` | Source | every session summary in the ledger, newest first, paged; item ids only | `summaries:{ledger}` or `read:{ledger}` |
 | `…:{ledger}:item:{id}:history` | Source | every event on the item, oldest first, with what each edit changed | `read:{ledger}` |
 | `…:{ledger}:history` | Sink | an import principal's past claim, release, edit and status events for one item; history only | `write:{ledger}`, and enrolled as `ledger:Importer` |
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
@@ -584,6 +585,18 @@ recorded session 0b5e41aa on acme#12's hand-back
   rewritten. A worker still cannot write `about`; the dispatcher sets it at close.
 - **The read face is one item's sessions**, newest first, in text, Turtle and JSON. Nothing
   here totals across items, holders or models, and nothing prices a run.
+- **And the ledger's whole set** (ledger #3647): `urn:iki:ledger:{ledger}:sessions` is every
+  summary in the ledger, newest first, paged with `limit` (default 50; `0` means 500) and
+  `offset`, raw: the same fields, no totals and no cost. Each summary names its item by id only
+  (`item: acme#1 urn:iki:ledger:acme:item:…` in text, `item` as `{number, display, iri}` in JSON),
+  never by title. There is no total either: the text face ends `more sessions follow: read again
+  with offset=50` when there are more, and JSON gives `next_offset` (`null` on the last page).
+  It reads under `urn:cap:ledger:summaries:{ledger}`, a grant that admits this set and **no item
+  text**: `item:{id}`, `items`, `next`, an item's history and an item's sessions are each
+  `Denied` under it. The name is deliberately not `session:…`, so it falls outside the WRITE
+  family `urn:cap:ledger:session:*`: a worker's session grant does not read the set, and this
+  grant records nothing. `read:{ledger}` covers it too. ⚠ `sessions` is now a reserved ledger
+  name. `tests/session_set.rs` runs under exactly the summaries grant and the store grant below.
 
 ## Aliases: an external id, in a scheme one principal owns
 
@@ -2019,6 +2032,7 @@ worker can be handed the work without the verdict on it:
 | `urn:cap:ledger:about:{ledger}` (0.10.0) | `item:{id}:about` Sink (add) and Delete (remove) | not the item Sink's own `about=`, which is the edit door |
 | `urn:cap:ledger:alias:{ledger}` (0.15.0) | giving one of this ledger's items an alias, in a scheme the caller owns | see "Aliases" |
 | `urn:cap:ledger:session:{ledger}` (0.22.0) | `item:{id}:sessions` Sink: recording an agent session's summary on the item's newest hand-back | see "Agent sessions"; in the worker grant |
+| `urn:cap:ledger:summaries:{ledger}` (0.22.0) | `…:{ledger}:sessions` Source: reading every session summary in the ledger | a READ grant, covered by `read:{ledger}` rather than `write`; no item, title or comment; outside the `session:*` family; see "Agent sessions" |
 | `urn:cap:ledger:link-in:{ledger}` (0.17.0) | linking an item of ANOTHER ledger to one of this ledger's items, and unlinking it | **not** covered by `write:{ledger}`; see "Links across ledgers" |
 | `urn:cap:ledger:write:{ledger}` | **all four of the above**, and filing, linking, labeling, deferring, editing, `about=` on the item, state | unchanged: no grant issued before 0.7.0 or 0.10.0 changed meaning |
 
@@ -2114,6 +2128,7 @@ are these — **per ledger, and a grant for `acme` is worth nothing at `bosatsu`
 | read (`items`, `count`, `counts`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
 | write (`append`, `backfill-closed-at`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, editing an item) | `urn:cap:ledger:write:L` | the read grant above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L` |
 | claim, comment, or close and reopen, alone | `urn:cap:ledger:claim:L`, `…:comment:L` or `…:close:L` | the same two as write |
+| read the ledger's session summaries, alone (`sessions`) | `urn:cap:ledger:summaries:L` | the read grant above |
 | delete (`Delete` on an item) | `urn:cap:ledger:delete:L` | both of the above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` |
 | purge | `urn:cap:ledger:purge:L` | the same three as delete **and** `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` |
 
@@ -2123,6 +2138,14 @@ operator will get wrong, which is why it is a row and not a footnote. ⚠ **And 
 graveyard's READ grant as well** (0.3): it looks there for what an earlier delete archived,
 and the store refuses a `DELETE … WHERE` over a graph without the read grant for it. Without
 it, purge refuses before touching anything and names the token.
+
+⚠ **The summaries grant is narrow at this module's doors, not at the store's.** Reading the set
+is a sub-request under the caller's own capability, so the caller also holds the ledger graph's
+read grant, and that grant reads the whole graph, titles included, at the store's own
+`urn:iki:store:graph-select`. This is how every narrow grant here works (a worker's claim grant
+sits beside the graph's write grant), but for a read grant it is the half that matters: a caller
+who can resolve the store's doors directly can read item text with the same lines. Closing that
+needs the summaries in a graph of their own, with its own store grant.
 
 ⚠ **The two halves are separate grants and neither implies the other.**
 `urn:cap:ledger:read:acme` without the store's graph-read token is a ledger you may address
@@ -2270,7 +2293,7 @@ is, the rules it follows, what is not tested, and how to report a barrier.
 
 ## Status
 
-All twenty-seven resources are bound, tested, and walked clean by `ikigai-conformance`
+All twenty-eight resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces). So are the two
 alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 

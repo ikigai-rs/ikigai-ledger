@@ -11,6 +11,11 @@
 //! - **Source** reads one item's summaries, newest first, in text, Turtle and JSON. Nothing
 //!   here totals across items.
 //!
+//! And the ledger's whole set (ledger #3647): `urn:iki:ledger:{ledger}:sessions`, every summary
+//! in the ledger, newest first, paged, raw. Each names its item by id alone, never by title, and
+//! nothing totals or prices. It reads under `urn:cap:ledger:summaries:{ledger}`, which admits
+//! this set and no item text, or under `read:{ledger}`.
+//!
 //! ★ **The shape decides, and it is closed.** The summary arrives as one JSON object; each key
 //! becomes the `ledger:` property of the same name, and the node is checked against
 //! `ledger:SessionSummaryShape` in `vocabulary.ttl` before anything is written. A key the shape
@@ -458,6 +463,73 @@ async fn read(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Summary>> 
     Ok(all)
 }
 
+/// One page of the ledger's summaries, newest first, each with its item's number when the item
+/// has one, and whether a later page has more. One query, so the page and its items' numbers are
+/// one snapshot; one more row than the page is asked for, to answer "more" without a total.
+async fn read_page(
+    client: &StoreClient<'_, '_>,
+    limit: usize,
+    offset: usize,
+) -> Result<(Vec<(Summary, Option<i64>)>, bool)> {
+    let rows = client
+        .select(&format!(
+            "SELECT ?s ?p ?o ?n WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "{{ SELECT ?s (MAX(?at) AS ?latest) WHERE {{ ?s <{type_}> <{class}> ; \
+                 <{created}> ?at }} GROUP BY ?s ORDER BY DESC(?latest) ASC(STR(?s)) \
+                 LIMIT {fetch} OFFSET {offset} }} \
+                 ?s ?p ?o . \
+                 OPTIONAL {{ ?s <{on}> ?item . ?item <{number}> ?n }}",
+                type_ = v::ext::TYPE,
+                class = v::SESSION_SUMMARY_CLASS,
+                created = v::ext::CREATED,
+                on = v::SESSION_ITEM,
+                number = v::NUMBER,
+                fetch = limit.saturating_add(1),
+            ))
+        ))
+        .await?;
+    let mut by: BTreeMap<String, (Summary, Option<i64>)> = BTreeMap::new();
+    for row in &rows {
+        let (Some(s), Some(p), Some(o)) = (row.get("s"), row.get("p"), row.get("o")) else {
+            continue;
+        };
+        let entry = by.entry(s.value.clone()).or_insert_with(|| {
+            (
+                Summary {
+                    iri: s.value.clone(),
+                    values: BTreeMap::new(),
+                },
+                None,
+            )
+        });
+        if let Some(n) = row.get("n").and_then(|n| n.value.parse().ok()) {
+            entry.1 = Some(n);
+        }
+        entry
+            .0
+            .values
+            .entry(p.value.clone())
+            .or_default()
+            .push(term_of(o, "o")?);
+    }
+    let mut all: Vec<(Summary, Option<i64>)> = by.into_values().collect();
+    for (summary, _) in &mut all {
+        for values in summary.values.values_mut() {
+            values.sort_by_key(|t| t.to_string());
+            values.dedup();
+        }
+    }
+    all.sort_by(|(a, _), (b, _)| {
+        b.created()
+            .cmp(&a.created())
+            .then_with(|| a.iri.cmp(&b.iri))
+    });
+    let more = all.len() > limit;
+    all.truncate(limit);
+    Ok((all, more))
+}
+
 /// The text block for one summary.
 fn block(summary: &Summary) -> String {
     let or_none = |local: &str| summary.one(local).unwrap_or_else(|| "not reported".into());
@@ -739,6 +811,168 @@ impl SessionsEndpoint {
                  nothing was written",
                 item.short()
             ))),
+        }
+    }
+}
+
+/// `urn:iki:ledger:{ledger}:sessions`: every summary in the ledger (ledger #3647).
+#[derive(Clone)]
+pub(super) struct SessionSetEndpoint;
+
+#[async_trait]
+impl Endpoint for SessionSetEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        match inv.request.verb {
+            Verb::Source => self.source(inv).await,
+            other => Err(unsupported("ledger-sessions", other)),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ledger-sessions"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("ledger-sessions")
+            .title("A ledger's agent sessions")
+            .summary(
+                "Every session summary recorded in one ledger, newest first, paged and raw: the \
+                 same content-free fields as an item's sessions, each naming its item by id \
+                 only. No item title or text, no totals and no cost. Readable under \
+                 `urn:cap:ledger:summaries:{ledger}`, which reads nothing else, or \
+                 `urn:cap:ledger:read:{ledger}`.",
+            )
+            .verb(Verb::Meta)
+            // Declares the family both `summaries:{ledger}` and `read:{ledger}` satisfy, and the
+            // store read every ledger read needs; the exact either-or is in `ledger_for`.
+            .action(
+                ikigai_core::ActionSpec::new(Verb::Source)
+                    .requires(CAP_ANY)
+                    .requires(ikigai_store::CAP_READ_GRAPH)
+                    .input(ledger_arg("sessions"))
+                    .summary(
+                        "One page of the ledger's session summaries, newest first: a block of \
+                         labeled lines each in text, with a closing line when more follow; the \
+                         summary nodes in Turtle; an array of objects and `next_offset` in JSON.",
+                    )
+                    .input(
+                        ArgSpec::new("limit")
+                            .summary(
+                                "At most this many summaries on the page (default 50; `0` \
+                                 means 500). No total is given: the text face's last line and \
+                                 the JSON face's `next_offset` say where the next page starts.",
+                            )
+                            .class(v::ext::XSD_INTEGER)
+                            .default_value("50")
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("offset")
+                            .summary(
+                                "How many summaries to skip, newest first (default 0). A \
+                                 summary recorded between page reads shifts the pages by one.",
+                            )
+                            .class(v::ext::XSD_INTEGER)
+                            .default_value("0")
+                            .optional(),
+                    )
+                    .input(as_arg(&SESSION_FACES))
+                    .output(PLAIN)
+                    .output(TURTLE)
+                    .output(JSON),
+            )
+    }
+}
+
+impl SessionSetEndpoint {
+    async fn source(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Summaries)?);
+        let want = wanted_face(inv, &SESSION_FACES)?;
+        let limit = match parse_limit(inv, 50)? {
+            0 => 500,
+            n => n,
+        };
+        let offset = parse_count(inv, "offset", 0)?;
+        let (page, more) = read_page(&client, limit, offset).await?;
+        let ledger = client.ledger();
+        let next_offset = more.then(|| offset.saturating_add(page.len()));
+        let item_of = |summary: &Summary| summary.one("sessionItem").unwrap_or_default();
+        match want {
+            JSON => {
+                let sessions: Vec<Value> = page
+                    .iter()
+                    .map(|(summary, number)| {
+                        let mut object = json_of(summary);
+                        if let Value::Object(fields) = &mut object {
+                            let iri = item_of(summary);
+                            let item = match number {
+                                Some(n) => serde_json::to_value(json::item_ref(ledger, *n, &iri)),
+                                None => Ok(serde_json::json!({ "iri": iri })),
+                            };
+                            if let Ok(item) = item {
+                                fields.insert("item".into(), item);
+                            }
+                        }
+                        object
+                    })
+                    .collect();
+                let document = serde_json::json!({
+                    "schema": json::SCHEMA,
+                    "ledger": ledger.name(),
+                    "offset": offset,
+                    "sessions": sessions,
+                    "next_offset": next_offset,
+                });
+                Ok(json_face(serde_json::to_vec(&document).map_err(|e| {
+                    Error::Endpoint(format!("the sessions document did not serialize: {e}"))
+                })?))
+            }
+            TURTLE => {
+                let mut graph = Graph::new();
+                for (summary, _) in &page {
+                    let subject = named(&summary.iri);
+                    for (predicate, values) in &summary.values {
+                        for value in values {
+                            graph.insert(&Triple::new(
+                                subject.clone(),
+                                named(predicate),
+                                value.clone(),
+                            ));
+                        }
+                    }
+                }
+                face(String::new(), Some(graph), TURTLE)
+            }
+            _ => {
+                let mut text = if page.is_empty() && offset == 0 {
+                    format!("{} has no recorded sessions\n", ledger.name())
+                } else if page.is_empty() {
+                    format!(
+                        "{} has no recorded sessions at offset {offset}\n",
+                        ledger.name()
+                    )
+                } else {
+                    format!(
+                        "{}: sessions, newest first, from offset {offset}\n",
+                        ledger.name()
+                    )
+                };
+                for (summary, number) in &page {
+                    let item = match number {
+                        Some(n) => format!("{} {}", ledger.number(*n), item_of(summary)),
+                        None => item_of(summary),
+                    };
+                    let block = block(summary);
+                    let (first, rest) = block.split_once('\n').unwrap_or((&block, ""));
+                    text.push_str(&format!("{first}\n  item: {item}\n{rest}"));
+                }
+                if let Some(next) = next_offset {
+                    text.push_str(&format!(
+                        "more sessions follow: read again with offset={next}\n"
+                    ));
+                }
+                face(text, None, PLAIN)
+            }
         }
     }
 }

@@ -241,6 +241,7 @@ fn script() -> Vec<Step> {
             at("item:1:sessions"),
             &[],
         ),
+        step("ledger-sessions", Verb::Source, at("sessions"), &[]),
         step(
             "ledger-label",
             Verb::Sink,
