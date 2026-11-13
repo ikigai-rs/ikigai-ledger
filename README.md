@@ -2316,6 +2316,9 @@ A minor release: new resources and a new grant; no existing answer changes shape
   refused every item's title at this crate's doors; `read:{ledger}` also covers it. ⚠ The grant still needs
   the ledger graph's store read beside it, which reads the whole graph at the store; summaries in their own
   graph is ledger #3661. A ledger named `sessions` is now reserved.
+- **The ledgers listing has a JSON face** (ledger #3654, PR 116): `urn:iki:ledger:ledgers as=application/json`
+  answers schema 1, `{schema, ledgers: [{name, graph, open, total}]}`, with the same rows and permission checks as
+  the plain and Turtle faces.
 - **Findings have four severity levels** (ledger #3656, PR 115): `ledger:Finding` documents
   `severity:critical`, `severity:major`, `severity:minor`, `severity:trivial`, highest first. Review runners map
   critical = critical, high = major, medium = minor, low = trivial; existing labels keep their meaning, and the
