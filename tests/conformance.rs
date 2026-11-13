@@ -282,6 +282,7 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-item-closed")
         .cacheable("ledger-item-history")
         .cacheable("ledger-item-sessions")
+        .cacheable("ledger-sessions")
         .cacheable("ledger-doctor")
         .pure("ledger-policy")
         .pure("ledger-lifecycle")
@@ -328,7 +329,7 @@ fn conforms() {
 fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
-    // `Suite::own("ledger-*")` walks only the twenty-seven THIS crate binds, so the whole of
+    // `Suite::own("ledger-*")` walks only the twenty-eight THIS crate binds, so the whole of
     // `walked` is the module; no filter stands between this list and what was checked.
     let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
     walked.sort_unstable();
@@ -362,6 +363,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-policy",
             "ledger-purge",
             "ledger-reopen",
+            "ledger-sessions",
         ],
         "{report}"
     );

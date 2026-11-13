@@ -56,7 +56,7 @@ pub const DEFAULT: &str = "default";
 /// has to mean *the default ledger's listing* rather than *a ledger called `items`*, and
 /// only one of those can be true. Reserving is the cheaper half: a ledger can be called
 /// almost anything, and the refusal says which word it must not use.
-pub const RESERVED: [&str; 24] = [
+pub const RESERVED: [&str; 25] = [
     "append",
     "backfill-closed-at",
     "claim",
@@ -80,6 +80,7 @@ pub const RESERVED: [&str; 24] = [
     "purge",
     "reopen",
     "selection",
+    "sessions",
     "tombstone",
 ];
 
@@ -402,6 +403,21 @@ impl Ledger {
         format!("{CAP_SESSION_PREFIX}{}", self.name)
     }
 
+    /// `urn:cap:ledger:summaries:{name}` — reading every session summary in this ledger, at
+    /// `…:{name}:sessions`, and nothing else: no item, no title, no comment (ledger #3647).
+    /// Named outside the session WRITE family `urn:cap:ledger:session:*`, so no session grant
+    /// reads the set and this one records nothing. `read:{name}` covers it too.
+    ///
+    /// ```
+    /// use ikigai_ledger::Ledger;
+    /// let acme = Ledger::parse("acme").unwrap();
+    /// assert_eq!(acme.cap_summaries(), "urn:cap:ledger:summaries:acme");
+    /// assert!(!acme.cap_summaries().starts_with("urn:cap:ledger:session:"));
+    /// ```
+    pub fn cap_summaries(&self) -> String {
+        format!("{CAP_SUMMARIES_PREFIX}{}", self.name)
+    }
+
     /// `urn:cap:ledger:link-in:{name}` — linking an item of ANOTHER ledger to one of this
     /// ledger's items with `blocks`, `parent` or `related`, and removing that link (since 0.17.0,
     /// ledger #2829). It is held beside `write` on the subject's ledger, and `write:{name}` does
@@ -438,6 +454,7 @@ pub(crate) const CAP_CLOSE_PREFIX: &str = "urn:cap:ledger:close:";
 pub(crate) const CAP_ABOUT_PREFIX: &str = "urn:cap:ledger:about:";
 pub(crate) const CAP_ALIAS_PREFIX: &str = "urn:cap:ledger:alias:";
 pub(crate) const CAP_SESSION_PREFIX: &str = "urn:cap:ledger:session:";
+pub(crate) const CAP_SUMMARIES_PREFIX: &str = "urn:cap:ledger:summaries:";
 pub(crate) const CAP_LINK_IN_PREFIX: &str = "urn:cap:ledger:link-in:";
 
 /// A grammar matching **both** `urn:iki:ledger:{ledger}:{action}` and the bare
