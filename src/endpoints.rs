@@ -363,9 +363,9 @@ pub(crate) const PLAIN_FACE: &str = PLAIN;
 const TURTLE: &str = "text/turtle";
 /// `application/json` — the machine face, [`crate::json`].
 const JSON: &str = json::MEDIA_TYPE;
-/// The faces of the two reads that are not about items (`ledgers`, `policy:{name}`).
+/// The faces of `policy:{name}`.
 const FACES: [&str; 2] = [PLAIN, TURTLE];
-/// The faces of the item reads: `items`, `item:{id}`, `next`.
+/// The faces of `items`, `item:{id}`, `next` and the ledger inventory.
 const READ_FACES: [&str; 3] = [PLAIN, TURTLE, JSON];
 /// The faces of a write's ANSWER: `append`, `comment`, `close`, `link`. No Turtle — an
 /// answer is a receipt, not a graph, and the graph is one read away.
@@ -7156,7 +7156,7 @@ impl Endpoint for LedgersEndpoint {
         if inv.request.verb != Verb::Source {
             return Err(unsupported("ledger-ledgers", inv.request.verb));
         }
-        let want = wanted_face(inv, &FACES)?;
+        let want = wanted_face(inv, &READ_FACES)?;
         // A ledger exists once something has been filed in it — the counter is what
         // survives closing and deleting everything, so it, and not the item count, is
         // what says a ledger is there at all.
@@ -7235,6 +7235,21 @@ impl Endpoint for LedgersEndpoint {
         }
         found.sort_by(|a, b| a.0.name().cmp(b.0.name()));
 
+        if want == JSON {
+            return Ok(json_face(json::render(&json::LedgersDocument {
+                schema: json::SCHEMA,
+                ledgers: found
+                    .iter()
+                    .map(|(ledger, total, open)| json::LedgerSummary {
+                        name: ledger.name().to_string(),
+                        graph: ledger.graph(),
+                        open: *open,
+                        total: *total,
+                    })
+                    .collect(),
+            })?));
+        }
+
         if want == TURTLE {
             let mut graph = Graph::new();
             for (ledger, items, open) in &found {
@@ -7298,9 +7313,10 @@ impl Endpoint for LedgersEndpoint {
                 )
                 .verb(Verb::Source)
                 .verb(Verb::Meta)
-                .input(as_arg(&FACES))
+                .input(as_arg(&READ_FACES))
                 .output(PLAIN)
-                .output(TURTLE),
+                .output(TURTLE)
+                .output(JSON),
         )
     }
 }
