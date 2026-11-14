@@ -117,6 +117,12 @@ term! {
     RELEASE_EVENT_CLASS => "ReleaseEvent";
     /// `ledger:EditEvent` — an edit that creates no node, and who made it (ledger #2819).
     EDIT_EVENT_CLASS => "EditEvent";
+    /// `ledger:LapseEvent` — a lease ran out on an open item not handed back (ledger #3709).
+    LAPSE_EVENT_CLASS => "LapseEvent";
+    /// `ledger:lapsedAt` — on a lapse event, when the lapsed lease ran out.
+    LAPSED_AT => "lapsedAt";
+    /// `ledger:lapsedEpoch` — on a lapse event, the epoch of the claim whose lease ran out.
+    LAPSED_EPOCH => "lapsedEpoch";
     /// `ledger:takeoverFrom` — the holder label a takeover took the claim from.
     TAKEOVER_FROM => "takeoverFrom";
     /// `ledger:releaseReason` — `released`, `closed` or `takeover`.
@@ -405,7 +411,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 22] = [
+pub const STRUCTURAL_CLASSES: [&str; 23] = [
     COMMENT_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
@@ -426,6 +432,7 @@ pub const STRUCTURAL_CLASSES: [&str; 22] = [
     CLAIM_EVENT_CLASS,
     RELEASE_EVENT_CLASS,
     EDIT_EVENT_CLASS,
+    LAPSE_EVENT_CLASS,
     LINK_CLASS,
     MIRROR_CLASS,
 ];

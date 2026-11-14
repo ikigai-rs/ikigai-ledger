@@ -131,6 +131,7 @@ fn read_script() -> Vec<(&'static str, Verb, String)> {
         ("ledger-item-sessions", Verb::Source, at("item:1:sessions")),
         ("ledger-sessions", Verb::Source, at("sessions")),
         ("ledger-doctor", Verb::Source, at("doctor")),
+        ("ledger-stalled", Verb::Source, at("stalled")),
         ("ledger-claim", Verb::Source, at("claim")),
         (
             "ledger-ledgers",

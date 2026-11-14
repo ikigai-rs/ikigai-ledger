@@ -378,6 +378,8 @@ fn script() -> Vec<Step> {
         step("ledger-reopen", Verb::Sink, at("reopen"), &[("item", "#1")]),
         step("ledger-next", Verb::Source, at("next"), &[]),
         step("ledger-doctor", Verb::Source, at("doctor"), &[]),
+        step("ledger-stalled", Verb::Source, at("stalled"), &[]),
+        step("ledger-lapse", Verb::Sink, at("lapse"), &[]),
         // The two ledger-less resources. `ledgers` is the one that must not need a broad
         // grant either: it answers what this capability may read, from what it holds.
         step(

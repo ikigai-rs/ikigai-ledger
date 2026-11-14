@@ -591,6 +591,20 @@ ledger:EditEvent a rdfs:Class ;
     rdfs:label "edit event" ;
     rdfs:comment "An edit that creates no node of its own, so that every write has a who: one per write, naming the edit in ledger:editKind, its maker in ledger:committer and, when it changed something, what it changed (ledger:editLabel, ledger:stateFrom and ledger:stateTo, ledger:editLinkType and ledger:editTarget, ledger:editField). A claim, a release and a close or reopen are recorded by their own events instead." .
 
+ledger:LapseEvent a rdfs:Class ;
+    rdfs:label "lapse event" ;
+    rdfs:comment "A claim's lease ran out while its item was open and not handed back (ledger #3709). The claim is not released by it: an expired lease is never silently free. Written by the dispatcher's sweep (urn:iki:ledger:{ledger}:lapse), once per lapse: a sweep that finds the lapse already recorded writes nothing. Carries the lapsed claim's ledger:claimedBy, ledger:claimPrincipal and ledger:claimKind (each when it had one), ledger:lapsedEpoch, ledger:lapsedAt, and the sweeper as ledger:committer." .
+
+ledger:lapsedAt a rdf:Property ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "lapsed at" ;
+    rdfs:comment "On a ledger:LapseEvent, when the lease ran out: the claim's ledger:leaseExpires as the sweep found it. One lapse event per item and value, so a claim renewed after a lapse that lapses again records a second." .
+
+ledger:lapsedEpoch a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "lapsed epoch" ;
+    rdfs:comment "On a ledger:LapseEvent, the fencing epoch (ledger:claimEpoch) of the claim whose lease ran out. Absent for a claim taken before epochs. Its own term, because ledger:claimEpoch has the domain ledger:Item and an event must not become an inferred Item." .
+
 ledger:takeoverFrom a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "takeover from" ;

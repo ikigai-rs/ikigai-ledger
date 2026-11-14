@@ -65,6 +65,14 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   `closed #2 (done)`, `closed #2 done (2 evidence)`, `closed #2 duplicate of #1`,
   `#1 claimed by worker-1 at epoch 1`, `#1 renewed by worker-1 at epoch 1 until …`, `#1: imported events recorded 3, already recorded 1; history only, so
   the item itself did not change`.
+- **Stalled items and lapses** (`src/endpoints/lapse.rs`, ledger #3709): `stalled` answers a
+  first line with the ledger and a count (`default: 2 stalled item(s), the oldest lapse first`),
+  or the sentence `default: no stalled items: no open item is held on a lease that has run out`,
+  then one sentence per item (`#2 Ten: held by worker-2 at epoch 1, whose lease ran out at …; the
+  lapse is not recorded yet`) and a `remedy:` line. The sweep, `lapse`, answers `default:
+  recorded 1 lapse(s)` and the same sentence per lapse, indented, ending `; labeled needs-person`
+  when the ledger's route added a label; a sweep that wrote nothing says so and why. An item's
+  history names a lapse in words: `lapse worker-1 at epoch 1, whose lease ran out at …`.
 - **The doctor and lifecycles**: the doctor's findings, each with a `remedy:` line; a
   lifecycle's states, one per line (`Lifecycle::plain` in `src/lifecycle.rs`), each saying in
   words where it may go when the lifecycle declares moves (`moves to: queued`, `moves to: nowhere`).
