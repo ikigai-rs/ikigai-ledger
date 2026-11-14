@@ -1397,6 +1397,50 @@ SPARQL update over the ledger's graph, so check with the doctor before dropping 
   so a batch naming `ledger:lifecycleVersion` is refused, and an imported state event's line and JSON
   do not mention one.
 
+## Waiting for a shared item
+
+```text
+$ sink urn:iki:ledger:claim item=12 wait=60 lease=30m <<< "worker-2"
+#12 claimed by worker-2 at epoch 2 until 2026-11-14T23:30:00.000Z
+```
+
+A positive `wait` (whole seconds, at most 3600) parks a claim while another holder owns
+its item. Release wakes it; lease expiry wakes it to attempt a guarded takeover, whose
+answer says `taken over from …`. A live lease or a claim without a lease is never taken
+over. This is explicit permission to take an expired lease; omitting `wait` or using
+`wait=0` keeps the immediate claim behavior, including the expired-lease refusal.
+
+Waiters for the same item take turns in registration order within one bound ledger space.
+Only the first waiter reads again on a change. Every acquisition still uses the store's
+compare-and-set and gets the usual epoch; the queue never grants ownership. A concurrent
+claim without a wait can still win that store operation. Use positive waits for all
+participants when sharing an item as a mutex. Item numbers, keys, and IRIs resolve to the
+same queue. Different items and ledgers have separate queues.
+
+The wait ends at the earlier of `wait` and the caller's run deadline. Notifications never
+restart that budget. Expiry is checked against the kernel clock, and a renewal moves the
+expiry a waiter observes. A timeout answers `OverBudget` and removes the waiter; canceling
+the request also removes it and wakes its successor. As with any interrupted write, read
+the item before trying again if no claim answer arrived. Closing or deleting an item
+wakes its first waiter to the existing closed-item refusal or `NotFound`; later waiters
+then take their turns and receive the same result. A positive wait cannot be combined
+with `renew=true`, `takeover=true`, `from`, or `epoch`. Renew an existing claim with an
+immediate request.
+
+**Feed check (ledger #3711):** this crate binds no ledger feed or long-poll endpoint.
+Core's `Kernel::listen` / `CutListener::wait` can tell a host about store graph changes,
+but endpoints cannot subscribe through `Invocation`, and a change listener neither reserves
+an item nor orders claimants. Listening alone therefore cannot provide this FIFO claim
+operation. The wait queue uses asynchronous wakeups on claim changes, closure, and deletion
+through the same bound ledger space, plus a timer for expiry and the budget; it does not
+poll refused claims. The queue is ephemeral and local to that space. Separate ledger
+space instances and direct store writes do not notify it or share its ordering; route mutex
+participants through one ledger space. The durable store guard still prevents competing
+instances from granting overlapping claims.
+
+`tests/claim_wait.rs` reproduces the former immediate refusal and checks release wakeups,
+FIFO order, cancellation, closure, deletion, expiry, renewal, and both time bounds.
+
 ## Claims: a lease, a kind, and a takeover
 
 ```text
@@ -1420,9 +1464,9 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
 - ★ **An expired lease is never silently free.** The claim stays. `next` excludes the item with
   `why: "lease-expired"`, the holder and the expiry, and a cached `next` (and doctor) holds
   only until the earliest running lease ends, because that moment changes the answer with
-  nothing written. A plain claim on it is a `Conflict` that says how to take it, and the only
-  way to take it is **`takeover=true from=<holder>`**: a compare-and-set against that holder,
-  so of two takers exactly one wins. A live lease, or a claim with no lease, is never taken
+  nothing written. A plain claim on it is a `Conflict` that says how to take it. An explicit
+  **`takeover=true from=<holder>`**, or a positive **`wait=`** as described below, takes it
+  through a compare-and-set against the observed holder, so of two takers exactly one wins. A live lease, or a claim with no lease, is never taken
   over; it is released (`delete …:claim`), which is the deliberate act.
 - **The claim's kind**, `machine`, `agent` (since 0.11.0, ledger #1329) or `person`, is in the
   JSON face (`claim.kind`) and in the graph (`ledger:claimKind`). The doctor reports a

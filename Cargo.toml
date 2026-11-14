@@ -65,6 +65,9 @@ ikigai-store = { version = "0.5.0", default-features = false }
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
 # `FnEndpoint` closures.
 async-trait = "0.1"
+# Runtime-independent wakeups and bounded claim waits.
+futures-util = "0.3"
+futures-timer = "3.0.4"
 
 # Reading and writing RDF without hand-rolling either. ★ Hand-built Turtle is how an
 # escaping bug ships: a title containing a quote, a newline or a backslash is ordinary
@@ -92,6 +95,7 @@ sha2 = "0.10"
 # costs nothing new. ⚠ `"0.3.4"` is a range `>=0.3.4, <0.4.0`.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
+futures-timer = { version = "3.0.4", features = ["wasm-bindgen"] }
 
 # ⚠ A test GATE, never a `cfg` on a code path: this crate builds no SPARQL evaluator and has
 # no network code. It turns on `oxigraph/http-client` (through the store) so a build can be

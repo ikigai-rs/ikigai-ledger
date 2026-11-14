@@ -372,6 +372,7 @@ const READ_FACES: [&str; 3] = [PLAIN, TURTLE, JSON];
 const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 
 mod across;
+mod claim_wait;
 mod counts;
 mod evidence;
 mod flight;
@@ -474,6 +475,7 @@ pub fn space_with_policies(policies: Vec<Arc<dyn OrderingPolicy>>) -> EndpointSp
 ///
 /// On an empty policy list, as [`space_with_policies`] does.
 pub fn space_with(config: SpaceConfig) -> EndpointSpace {
+    let claim_waiters = Arc::new(claim_wait::Queues::default());
     let policies = Arc::new(Policies::new(config.policies));
     let participants: Participants = config.participants.map(Arc::from);
     let lifecycles = Arc::new(config.lifecycles);
@@ -547,9 +549,9 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
         )
         .bind(
             LedgerGrammar::with_id("item"),
-            ItemEndpoint {
+            claim_waiters.wrap(ItemEndpoint {
                 participants: participants.clone(),
-            },
+            }),
         )
         .bind(
             LedgerGrammar::action("append"),
@@ -565,9 +567,9 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
         )
         .bind(
             LedgerGrammar::action("close"),
-            CloseEndpoint {
+            claim_waiters.wrap(CloseEndpoint {
                 participants: participants.clone(),
-            },
+            }),
         )
         .bind(
             LedgerGrammar::action("reopen"),
@@ -577,9 +579,10 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
         )
         .bind(
             LedgerGrammar::action("claim"),
-            ClaimEndpoint {
+            claim_waiters.wrap(ClaimEndpoint {
                 stamper: config.claim_kind,
-            },
+                waiters: Arc::clone(&claim_waiters),
+            }),
         )
         .bind(
             LedgerGrammar::action("defer"),
@@ -601,9 +604,9 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
         )
         .bind(
             LedgerGrammar::action("purge"),
-            PurgeEndpoint {
+            claim_waiters.wrap(PurgeEndpoint {
                 participants: participants.clone(),
-            },
+            }),
         )
         .bind(
             LedgerGrammar::action("doctor"),
@@ -4663,6 +4666,7 @@ impl Endpoint for ReopenEndpoint {
 #[derive(Clone)]
 struct ClaimEndpoint {
     stamper: crate::claim::ClaimKindStamper,
+    waiters: Arc<claim_wait::Queues>,
 }
 
 /// What a claim may replace, for [`claim_update`].
@@ -5358,9 +5362,12 @@ fn parse_flag(inv: &Invocation<'_>, name: &str) -> Result<bool> {
     }
 }
 
-#[async_trait]
-impl Endpoint for ClaimEndpoint {
-    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+impl ClaimEndpoint {
+    async fn invoke_once(
+        &self,
+        inv: &Invocation<'_>,
+        waiting_from: Option<&str>,
+    ) -> Result<Representation> {
         // The epoch check is a read (ledger #3205): anyone who may read the ledger may ask,
         // so a dispatcher or a reviewer learns whether a holder's authority stands without
         // the holder.
@@ -5371,34 +5378,14 @@ impl Endpoint for ClaimEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Claim)?);
         match inv.request.verb {
             Verb::Sink => {
-                let holder = inv.inline_str("content")?.trim().to_string();
-                // `none` and `any` are the `holder=` filter's keywords, so a holder by either
-                // name could claim work that no filter could then find.
-                if holder == "none" || holder == "any" {
-                    return Err(Error::InvalidArgument {
-                        name: "content".to_string(),
-                        detail: format!(
-                            "`{holder}` is reserved: `holder=none` and `holder=any` are the \
-                             items filter's keywords, so work held by `{holder}` could never be \
-                             listed by holder"
-                        ),
-                    });
-                }
-                if holder.is_empty() {
-                    return Err(Error::InvalidArgument {
-                        name: "content".to_string(),
-                        detail: "a claim needs a holder: an unattributed claim is \
-                                 indistinguishable from no claim"
-                            .to_string(),
-                    });
-                }
+                let holder = claim_wait::holder(inv)?;
                 // Every argument is checked before anything is read or written.
                 let lease = inv
                     .inline_str("lease")
                     .ok()
                     .map(crate::claim::parse_lease)
                     .transpose()?;
-                let takeover = parse_flag(inv, "takeover")?;
+                let takeover = waiting_from.is_some() || parse_flag(inv, "takeover")?;
                 let renew = parse_flag(inv, "renew")?;
                 if renew && takeover {
                     return Err(Error::InvalidArgument {
@@ -5409,7 +5396,7 @@ impl Endpoint for ClaimEndpoint {
                             .to_string(),
                     });
                 }
-                let from = inv.inline_str("from").ok().map(str::trim);
+                let from = waiting_from.or_else(|| inv.inline_str("from").ok().map(str::trim));
                 match (takeover, from) {
                     (true, None) | (true, Some("")) => {
                         return Err(Error::InvalidArgument {
@@ -5804,6 +5791,22 @@ impl Endpoint for ClaimEndpoint {
             other => Err(unsupported("ledger-claim", other)),
         }
     }
+}
+
+#[async_trait]
+impl Endpoint for ClaimEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let wait = if inv.request.verb == Verb::Sink {
+            claim_wait::seconds(inv)?
+        } else {
+            0
+        };
+        if wait == 0 {
+            self.invoke_once(inv, None).await
+        } else {
+            self.wait_for_claim(inv, wait).await
+        }
+    }
 
     fn name(&self) -> &str {
         "ledger-claim"
@@ -5816,7 +5819,8 @@ impl Endpoint for ClaimEndpoint {
                 "Take an item, or hand it back. The ready set never offers a claimed item, \
                  which is most of what \"what should I do next\" means once more than one \
                  worker shares a ledger. A claim may carry a lease; an expired lease is never \
-                 silently free, and `takeover=true from=<holder>` is the only way to take it. \
+                 silently free: taking it needs `takeover=true from=<holder>` or an explicit \
+                 positive `wait`. A wait is bounded by the caller's deadline. \
                  The holder's kind (machine, agent or person) is stamped by the host, never \
                  taken from the caller.",
             )
@@ -5835,6 +5839,20 @@ impl Endpoint for ClaimEndpoint {
                          event stay the same, but the lease is renewed from the new request time.",
                     )
                     .input(item_arg("The item to claim."))
+                    .input(
+                        ArgSpec::new("wait")
+                            .summary(
+                                "Wait up to this many whole seconds (0 to 3600), bounded by \
+                                 the caller's deadline. Positive waits queue in registration \
+                                 order within this ledger space, wake on claim changes, and \
+                                 may take an expired lease with a guarded takeover. Omit it \
+                                 or use 0 to refuse immediately. Cannot combine a positive \
+                                 wait with renew=true, takeover=true, from, or epoch.",
+                            )
+                            .class(v::ext::XSD_INTEGER)
+                            .default_value("0")
+                            .optional(),
+                    )
                     .input(
                         ArgSpec::new("content")
                             .summary(

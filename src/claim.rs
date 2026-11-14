@@ -25,8 +25,11 @@
 //! `lease=30m` records `ledger:leaseExpires` from the KERNEL clock (so a test pins expiry
 //! without sleeping, and an as-of corridor can ask who held what when). An expired lease does
 //! **not** free the item: `next` excludes it with `why: "lease-expired"`, naming the holder
-//! and the expiry, and the only way to take it is `claim takeover=true from=<holder>` — a
-//! compare-and-set against that holder.
+//! and the expiry. Taking it requires `claim takeover=true from=<holder>` or an explicit
+//! positive `wait=<seconds>`; both use a compare-and-set against the observed holder.
+//! A waiting claim wakes on release or expiry, in FIFO order within one bound ledger
+//! space, and is bounded by its wait and the caller's deadline. See the README's
+//! “Waiting for a shared item” section for the notification and ordering boundaries.
 
 use std::sync::Arc;
 
