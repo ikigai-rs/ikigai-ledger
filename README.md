@@ -1216,11 +1216,11 @@ invalid argument `drain`: `triag` is not a drain of the lifecycle `kata-flight` 
 ## Lifecycle state: one value, moved by one update
 
 kata-flight keeps an item's place in its shipping loop in `lifecycle:*` labels, "at most one" by
-convention, and moves it by removing one label and adding the next. That is two writes, so a
-crash or a race between them leaves two labels, which its reaper then hunts for. This ledger
-has label add and label remove too, and **composing a transition out of them would reproduce
-that defect exactly** (`tests/lifecycle_state.rs` reproduces it, as a record). So the state is
-its own resource:
+convention, and moves it by removing one label and adding the next. This ledger has label add
+and label remove too. Since ledger #3672, only one of two concurrent removals of the same
+label succeeds; the other caller must stop on `NotFound` (`tests/lifecycle_state.rs`). The
+two writes still leave a gap with no lifecycle label, and a crash in that gap leaves the
+item unrouted. An atomic transition needs its own state resource:
 
 ```text
 $ source urn:iki:ledger:item:12:state
@@ -2135,9 +2135,10 @@ The `unlabeled` success line is printed only when the label was removed.
 Remove first, so the item is never offered to two workers. Each write stamps `modified`, and
 `next`, `count`, `items` and the item see it on the very next read, cached or not
 (`tests/label_edit.rs`). The worker grant can do neither half, so a worker cannot route work to
-itself. This is two writes, which is safe with one dispatcher; two dispatchers racing would be
-the double-label defect of "Lifecycle state" above, and the answer then is a single-valued
-compare-and-set like `state`, not a label "replace".
+itself. A second dispatcher racing to remove the same label gets `NotFound` and must stop
+before adding its destination label. This is still two writes: an interruption between them
+leaves the item unrouted. For an atomic lifecycle transition, use the single-valued
+compare-and-set `state` resource.
 
 ⚠ **What `claim`, `comment`, `close` and `reopen` DECLARE is `urn:cap:ledger:*`**, "holds some
 ledger grant", not their own family. They must admit both their own grant and `write:{ledger}`,
