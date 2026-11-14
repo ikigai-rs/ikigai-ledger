@@ -372,3 +372,20 @@ fn bulk_backfill_skips_concurrently_changed_items() {
         );
     }
 }
+
+/// Two removals that both read the held label must not both report success.
+#[test]
+fn a_label_removal_that_loses_to_another_removal_is_not_found() {
+    let (cell, armed) = interleaved();
+    let kernel = cell.get().unwrap();
+    append(kernel, "Routed", &[("labels", "worker:pool")]);
+    let args = [("item", "1"), ("content", "worker:pool")];
+    *armed.lock().unwrap() = Some(request(Verb::Delete, "urn:iki:ledger:label", &args));
+    let result = try_verb(kernel, Verb::Delete, "urn:iki:ledger:label", &args);
+    assert!(
+        matches!(result, Err(ikigai_core::Error::NotFound(ref why)) if why == "#1 has no label worker:pool"),
+        "{result:?}"
+    );
+    let history = source(kernel, "urn:iki:ledger:item:1:history", &[]);
+    assert_eq!(history.matches("unlabel").count(), 1, "{history}");
+}

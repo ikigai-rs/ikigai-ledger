@@ -6,8 +6,9 @@
 //! `lifecycle:*` labels and moves an item with a label remove followed by a label add; this
 //! ledger has `label` Sink and Delete as well, and composing a transition out of them is the
 //! same two writes with the same gap between them. Two writers moving one item both read the
-//! old label, both remove it, both add their own: two lifecycle labels, which is the defect
-//! kata's reaper hunts for.
+//! old label. Since ledger #3672 only one removal succeeds; a caller that respects the
+//! refusal adds no second lifecycle label. The two writes still leave a gap where the item
+//! has no lifecycle label, unlike the atomic state transition.
 
 mod common;
 
@@ -57,16 +58,10 @@ fn state_of(kernel: &Kernel, n: i64) -> String {
 
 // --------------------------------------------------------------------- the race
 
-/// ★ The defect, reproduced with this ledger's own resources: a transition composed of a
-/// label remove and a label add, with both writers' reads landing before either write. The
-/// item ends with TWO lifecycle labels.
-///
-/// A property of the PATTERN, so it stays true; it is kept as the record of why the state is
-/// a resource of its own, and so nobody builds a transition out of labels thinking the
-/// store's serialized writes make it safe. They serialize each write, not the gap between a
-/// read and the write after it.
+/// Two writers read the same label before either removes it. Only one removal succeeds,
+/// so only that caller may add its destination label (ledger #3672).
 #[test]
-fn a_transition_composed_of_label_writes_double_labels_when_two_writers_race() {
+fn a_transition_composed_of_label_writes_refuses_the_second_removal() {
     let kernel = kernel();
     append(&kernel, "In a wave", &[("labels", "lifecycle-queued")]);
     let barrier = Barrier::new(2);
@@ -78,11 +73,16 @@ fn a_transition_composed_of_label_writes_double_labels_when_two_writers_race() {
                 let queued = item.contains("lifecycle-queued");
                 barrier.wait(); // both have read the label; neither has written
                 if queued {
-                    delete(
+                    let removed = try_verb(
                         kernel,
+                        Verb::Delete,
                         "urn:iki:ledger:label",
                         &[("item", "1"), ("content", "lifecycle-queued")],
                     );
+                    if let Err(error) = removed {
+                        assert!(matches!(error, Error::NotFound(ref why) if why == "#1 has no label lifecycle-queued"), "{error:?}");
+                        return;
+                    }
                     sink(
                         kernel,
                         "urn:iki:ledger:label",
@@ -94,12 +94,13 @@ fn a_transition_composed_of_label_writes_double_labels_when_two_writers_race() {
     });
     let line = source(&kernel, "urn:iki:ledger:items", &[]);
     assert!(
-        line.contains("lifecycle-reviewed") && line.contains("lifecycle-resolving"),
-        "the race did not reproduce: {line}"
+        line.contains("lifecycle-reviewed") ^ line.contains("lifecycle-resolving"),
+        "exactly one destination label should be added: {line}"
     );
+    assert!(!line.contains("lifecycle-queued"), "{line}");
 }
 
-/// ★ The fix, under the same concurrency: two transitions out of ONE state, released
+/// ★ The atomic state transition, under the same concurrency: two transitions out of ONE state, released
 /// together. Exactly one succeeds, the other is a typed `Conflict` naming the state the item
 /// is in, and the store holds exactly one state — twenty rounds, because a race that holds
 /// once is luck. Run both ways: to two different states, and to the SAME state, which is

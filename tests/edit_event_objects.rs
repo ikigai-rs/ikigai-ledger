@@ -370,16 +370,18 @@ fn an_edit_names_only_the_fields_it_changed() {
     );
 }
 
-/// ★ A write that changed nothing keeps its event (every write has a who) and names no object,
-/// so "when was this label removed" is not answered by the removal of a label never there.
+/// ★ An accepted write that changed nothing keeps its event and names no object.
+/// A missing-label removal is refused and records no event.
 #[test]
 fn a_write_that_changed_nothing_names_no_object() {
     let kernel = kernel();
     let item = at("item:1");
     let label = [("item", "1"), ("content", "bug")];
-    try_verb(&kernel, Verb::Delete, &at("label"), &label).unwrap();
-    assert_eq!(last(&kernel, 1).kind, "unlabel");
-    assert_eq!(last(&kernel, 1).object, object(&[]));
+    assert!(matches!(
+        try_verb(&kernel, Verb::Delete, &at("label"), &label),
+        Err(Error::NotFound(_))
+    ));
+    assert!(edits(&kernel, 1).is_empty());
 
     sink(&kernel, &at("label"), &label);
     sink(&kernel, &at("label"), &label);
@@ -692,7 +694,10 @@ fn the_readme_says_when_an_item_left_a_state() {
 fn the_readme_says_when_a_label_was_removed() {
     let kernel = kernel();
     let label = [("item", "1"), ("content", "wip")];
-    try_verb(&kernel, Verb::Delete, &at("label"), &label).unwrap();
+    assert!(matches!(
+        try_verb(&kernel, Verb::Delete, &at("label"), &label),
+        Err(Error::NotFound(_))
+    ));
     assert!(
         rows(
             &kernel,
@@ -863,13 +868,17 @@ fn the_history_tells_the_claim_the_close_and_the_reopen_too() {
 #[test]
 fn an_event_with_no_object_says_so() {
     let kernel = kernel();
-    try_verb(
+    // A legacy event written before edit objects were recorded.
+    let iri = item_iri(&kernel, 1);
+    sink(
         &kernel,
-        Verb::Delete,
-        &at("label"),
-        &[("item", "1"), ("content", "absent")],
-    )
-    .unwrap();
+        "urn:iki:store:update",
+        &[("content", &format!(
+            "INSERT DATA {{ GRAPH <{LIVE}> {{ <{iri}:edit:legacy> a <{NS}EditEvent> ; \
+             <{NS}onItem> <{iri}> ; <{NS}editKind> \"unlabel\" ; \
+             <{CREATED}> \"2026-09-15T00:00:01Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> . }} }}"
+        ))],
+    );
     let plain = source(&kernel, &at("item:1:history"), &[]);
     assert!(
         plain.contains("unlabel (no object recorded: nothing changed, or written before 0.18.0)"),
