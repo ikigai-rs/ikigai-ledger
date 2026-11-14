@@ -2341,6 +2341,10 @@ one graph.
   filed before keys existed cannot gain one through a resource here — that is one SPARQL
   UPDATE over the graph, and a migration's job rather than an endpoint's.
 - **No comment editing.** Comments are append-only by design.
+- **No dispatch note yet.** A dispatcher can only `comment` on a claimed item, and a worker
+  cannot tell that comment from anyone else's (`tests/dispatch_note_gap.rs`). The proposed
+  design, a note addressed to the current claim's holder and epoch, is in
+  [docs/dispatch-notes.md](docs/dispatch-notes.md) (ledger #3710).
 - **No `deferred-until` date.** Readiness that turns on the wall clock would go stale in the
   cache with no golden thread to cut it, so resuming is an act rather than the passage of
   time.
