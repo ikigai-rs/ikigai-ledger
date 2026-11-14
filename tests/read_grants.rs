@@ -44,10 +44,15 @@ use common::*;
 /// have to name this graph.
 const LEDGER: &str = "library";
 
-/// The read row of `README.md`'s grant table for one ledger, literally: the module's read
-/// grant and the store's read grant for that ledger's graph. **Two tokens, nothing else.**
+/// The read rows of `README.md`'s grant table for one ledger, literally: the module's read
+/// grant, the store's read grant for that ledger's graph, and, to read its sessions, the
+/// store's read grant for its session graph (ledger #3661). **Three tokens, nothing else.**
 fn read_row(ledger: &str) -> Capability {
-    Capability::scoped([format!("urn:cap:ledger:read:{ledger}"), graph_read(ledger)])
+    Capability::scoped([
+        format!("urn:cap:ledger:read:{ledger}"),
+        graph_read(ledger),
+        session_read(ledger),
+    ])
 }
 
 fn is_read(verb: Verb) -> bool {

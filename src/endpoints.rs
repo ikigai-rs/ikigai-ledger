@@ -2303,6 +2303,11 @@ impl Endpoint for ItemEndpoint {
                 Ok(plain(format!("updated {} {}\n", item.short(), item.iri)))
             }
             Verb::Delete => {
+                session::require_session_graph(
+                    inv,
+                    true,
+                    "deleting an item, which moves its summaries there,",
+                )?;
                 let now = now_ms(inv)?;
                 let item = require_item(&client, id).await?;
                 across::refuse_delete_with_links(&client, &item).await?;
@@ -3207,7 +3212,16 @@ async fn delete_item(
     // recoverable delete looks for that mark AFTER it archived. One of the two always comes
     // second: an archive that lands after a purge's last clear also lands after its mark, and
     // then this read sees the mark and takes back exactly the quads it wrote.
-    if let Some(data) = &archive {
+    //
+    // The item's session summaries are in a graph of their own (ledger #3661), so they move
+    // now that the item is no longer live, and the same handshake covers what they archived.
+    let summaries = move_summaries(client, &item.iri, destroy).await?;
+    let archived_here: String = archive
+        .iter()
+        .map(String::as_str)
+        .chain([summaries.as_str()])
+        .collect();
+    if !archived_here.is_empty() {
         let purged = client
             .ask(&format!(
                 "ASK {{ {} }}",
@@ -3218,7 +3232,7 @@ async fn delete_item(
             client
                 .update_deleted(&format!(
                     "DELETE DATA {{ {} }}",
-                    client.in_deleted_graph(data)
+                    client.in_deleted_graph(&archived_here)
                 ))
                 .await?;
         }
@@ -3277,6 +3291,9 @@ async fn purge_archived(
     who: &Attribution,
     now: u64,
 ) -> Result<usize> {
+    // A summary the item's delete did not move (one recorded in that delete's window, which
+    // its own request takes back, or one left by an interrupted delete) is destroyed too.
+    move_summaries(client, &found.item, true).await?;
     let archived = clear_archive(client, &found.item).await?;
     let mut operations = vec![
         replace_one_of(
@@ -3319,6 +3336,44 @@ async fn purge_archived(
     // delete sees the mark and removes it itself (see `delete_item`).
     clear_archive(client, &found.item).await?;
     Ok(archived)
+}
+
+/// Take `item`'s session summaries out of the ledger's session graph (ledger #3661): into the
+/// graveyard for a recoverable delete, nowhere for a purge. Answers the triples it archived, as
+/// `INSERT DATA` lines, so a delete can take them back if a purge marked the item meanwhile.
+///
+/// ★ Called only once the item is no longer live. The summaries are read, archived and then
+/// removed as exactly the triples read, so a summary recorded after the read is left alone: its
+/// own request checks the item after writing, finds it gone and takes it back (see
+/// `session::SessionsEndpoint::sink`). The summaries are not in the tombstone's quad count or
+/// hash, which describe the ledger graph.
+async fn move_summaries(client: &StoreClient<'_, '_>, item: &str, destroy: bool) -> Result<String> {
+    let item = sparql::iri(item, "item")?;
+    let rows = client
+        .select_session(&format!(
+            "SELECT DISTINCT ?s ?p ?o WHERE {{ {} }} ORDER BY ?s ?p ?o",
+            client.in_session_graph(&format!("?s <{}> {item} . ?s ?p ?o", v::SESSION_ITEM))
+        ))
+        .await?;
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
+    let data = rows_as_data(&rows)?;
+    if !destroy {
+        client
+            .update_deleted(&format!(
+                "INSERT DATA {{ {} }}",
+                client.in_deleted_graph(&data)
+            ))
+            .await?;
+    }
+    client
+        .update_session(&format!(
+            "DELETE DATA {{ {} }}",
+            client.in_session_graph(&data)
+        ))
+        .await?;
+    Ok(if destroy { String::new() } else { data })
 }
 
 /// Destroy what the graveyard holds of `item` (its [`Selector`] there), and answer how many
@@ -6662,6 +6717,7 @@ impl Endpoint for PurgeEndpoint {
                     .join(" or ")
             )));
         }
+        session::require_session_graph(inv, true, "a purge, which destroys its summaries there,")?;
         let reference = inv.inline_str("content")?;
         let reason = inv.inline_str("reason").unwrap_or("");
         let who =

@@ -19,6 +19,8 @@
 //! | write this ledger | `urn:iki:store:graph-update` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{name}` |
 //! | archive / destroy | `urn:iki:store:graph-update` | `urn:cap:store:write:graph:urn:iki:ledger:graph:{name}:deleted` |
 //! | find what a delete archived (purge only) | `urn:iki:store:graph-select` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}:deleted` |
+//! | read the session summaries | `urn:iki:store:graph-select` | `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}:session` |
+//! | record, move or destroy a summary | `urn:iki:store:graph-update` | that read grant and `urn:cap:store:write:graph:urn:iki:ledger:graph:{name}:session` |
 //!
 //! `urn:iki:ledger:ledgers`, the one question that is inherently cross-graph, asks the store
 //! *which graphs exist* through `urn:iki:store:graphs` (see `graph_names`) and then reads
@@ -257,6 +259,11 @@ impl<'a, 'i> StoreClient<'a, 'i> {
         format!("GRAPH <{}> {{ {body} }}", self.ledger.deleted_graph())
     }
 
+    /// The same wrapper over this ledger's session summaries graph (ledger #3661).
+    pub fn in_session_graph(&self, body: &str) -> String {
+        format!("GRAPH <{}> {{ {body} }}", self.ledger.session_graph())
+    }
+
     /// Evaluate a SPARQL SELECT over this ledger's graph and return its rows.
     pub async fn select(&self, query: &str) -> Result<Vec<Row>> {
         let bytes = self
@@ -274,6 +281,16 @@ impl<'a, 'i> StoreClient<'a, 'i> {
     pub async fn select_deleted(&self, query: &str) -> Result<Vec<Row>> {
         let bytes = self
             .query(STORE_GRAPH_SELECT, &self.ledger.deleted_graph(), query)
+            .await?;
+        parse_results(&bytes)
+    }
+
+    /// Evaluate a SPARQL SELECT over this ledger's **session summaries** graph, which holds
+    /// no item text (ledger #3661). Under its own store grant,
+    /// `urn:cap:store:read:graph:urn:iki:ledger:graph:{name}:session`.
+    pub async fn select_session(&self, query: &str) -> Result<Vec<Row>> {
+        let bytes = self
+            .query(STORE_GRAPH_SELECT, &self.ledger.session_graph(), query)
             .await?;
         parse_results(&bytes)
     }
@@ -320,6 +337,12 @@ impl<'a, 'i> StoreClient<'a, 'i> {
     /// [`in_graph`]: StoreClient::in_graph
     pub async fn update_deleted(&self, update: &str) -> Result<()> {
         self.update_graph(&self.ledger.deleted_graph(), update)
+            .await
+    }
+
+    /// Apply a SPARQL UPDATE to this ledger's **session summaries** graph (ledger #3661).
+    pub async fn update_session(&self, update: &str) -> Result<()> {
+        self.update_graph(&self.ledger.session_graph(), update)
             .await
     }
 

@@ -23,8 +23,9 @@ fn at(resource: &str) -> String {
     format!("urn:iki:ledger:{LEDGER}:{resource}")
 }
 
-/// The worker grant `README.md` publishes, line for line: read, claim, comment, session, and
-/// the two store grants. No write, no close, no about.
+/// The worker grant `README.md` publishes, line for line: read, claim, comment, session, the
+/// ledger graph's two store grants and, since ledger #3661, the session graph's two. No write,
+/// no close, no about.
 fn worker() -> Capability {
     Capability::scoped(vec![
         format!("urn:cap:ledger:read:{LEDGER}"),
@@ -33,6 +34,8 @@ fn worker() -> Capability {
         format!("urn:cap:ledger:session:{LEDGER}"),
         graph_read(LEDGER),
         graph_write(LEDGER),
+        session_read(LEDGER),
+        session_write(LEDGER),
     ])
 }
 
@@ -265,6 +268,8 @@ fn the_session_grant_is_narrow() {
         format!("urn:cap:ledger:session:{LEDGER}"),
         graph_read(LEDGER),
         graph_write(LEDGER),
+        session_read(LEDGER),
+        session_write(LEDGER),
     ]);
     match try_as(
         &kernel,
@@ -329,6 +334,8 @@ fn check_session_removal(kernel: Kernel, archive_first: bool) {
         graph_write(LEDGER),
         graveyard_read(LEDGER),
         graveyard_write(LEDGER),
+        session_read(LEDGER),
+        session_write(LEDGER),
     ]);
     let rows = |graph: &str| -> serde_json::Value {
         let query = format!("SELECT ?p ?o WHERE {{ GRAPH <{graph}> {{ <urn:agent:session:id:0b5e-41aa_7.c> ?p ?o }} }} ORDER BY ?p ?o");
@@ -344,8 +351,17 @@ fn check_session_removal(kernel: Kernel, archive_first: bool) {
         )
         .unwrap()
     };
-    let live = "urn:iki:ledger:graph:acme";
+    // The summary is in the session graph (ledger #3661), never the ledger graph.
+    let live = "urn:iki:ledger:graph:acme:session";
     let graveyard = "urn:iki:ledger:graph:acme:deleted";
+    assert_eq!(
+        rows("urn:iki:ledger:graph:acme")["results"]["bindings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "nothing of a summary is in the ledger graph"
+    );
     let before = rows(live)["results"]["bindings"].clone();
     assert!(before.as_array().unwrap().len() > 10);
     if archive_first {
@@ -400,6 +416,7 @@ fn session_removal_does_not_copy_the_whole_ledger() {
         for graph in [
             "urn:iki:ledger:graph:acme",
             "urn:iki:ledger:graph:acme:deleted",
+            "urn:iki:ledger:graph:acme:session",
         ] {
             let data: String = (0..600)
                 .map(|n| format!("<urn:filler:{n}> <urn:field> {n} . "))

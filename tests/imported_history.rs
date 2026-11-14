@@ -1379,6 +1379,8 @@ fn a_batch_that_loses_the_race_to_a_delete_is_told_so() {
 fn root_importer() -> Capability {
     let mut scopes = grants(&["read", "write", "delete"]);
     scopes.push(graveyard_write(LEDGER));
+    scopes.push(session_read(LEDGER));
+    scopes.push(session_write(LEDGER));
     Capability::scoped(scopes).with_principal(IMPORTER).unwrap()
 }
 
@@ -1473,6 +1475,8 @@ fn an_item_with_hundreds_of_events_is_deleted_and_purged_in_a_graph_past_the_bou
     let grant = Capability::scoped({
         let mut scopes = grants(&["read", "write", "delete", "purge"]);
         scopes.push(graveyard_write(LEDGER));
+        scopes.push(session_read(LEDGER));
+        scopes.push(session_write(LEDGER));
         scopes.push(graveyard_read(LEDGER));
         scopes
     })
@@ -1532,6 +1536,8 @@ fn measure_an_import_of_tens_of_thousands_of_events() {
         let grant = Capability::scoped({
             let mut scopes = grants(&["read", "write", "delete", "purge"]);
             scopes.push(graveyard_write(LEDGER));
+            scopes.push(session_read(LEDGER));
+            scopes.push(session_write(LEDGER));
             scopes.push(graveyard_read(LEDGER));
             scopes
         })
@@ -1716,6 +1722,8 @@ fn measure_an_import_at_the_profile_of_ledger_2922() {
     let grant = Capability::scoped({
         let mut scopes = grants(&["read", "write", "delete", "purge"]);
         scopes.push(graveyard_write(LEDGER));
+        scopes.push(session_read(LEDGER));
+        scopes.push(session_write(LEDGER));
         scopes.push(graveyard_read(LEDGER));
         scopes
     })

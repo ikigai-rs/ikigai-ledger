@@ -210,6 +210,8 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         // `item:{id}:sessions` (ledger #3022) points at #5, the handed-back fixture. A second
         // firing of the Sink is a resend of the same session, which writes nothing.
         .fixture(Fixture::new("ledger-item-sessions", Verb::Source).binding("id", "5"))
+        // The migration of ledger #3661: a plan writes nothing, so a walk may fire it freely.
+        .fixture(Fixture::new("ledger-sessions", Verb::Sink).arg("content", "plan"))
         .fixture(
             Fixture::new("ledger-item-sessions", Verb::Sink)
                 .binding("id", "5")
