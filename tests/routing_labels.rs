@@ -38,8 +38,16 @@ fn repeated_label_adds_and_removals_leave_one_value_then_none() {
     append(&kernel, "Route it", &[]);
     let args = [("item", "1"), ("content", "worker:pool._-9")];
     for (verb, expected) in [(Verb::Sink, 1), (Verb::Delete, 0)] {
-        for _ in 0..2 {
-            ok(&kernel, verb, "urn:iki:ledger:label", &args);
+        for attempt in 0..2 {
+            let result = try_verb(&kernel, verb, "urn:iki:ledger:label", &args);
+            if verb == Verb::Delete && attempt == 1 {
+                assert!(
+                    matches!(result, Err(ikigai_core::Error::NotFound(ref why)) if why == "#1 has no label worker:pool._-9"),
+                    "{result:?}"
+                );
+            } else {
+                result.unwrap();
+            }
             let item: serde_json::Value = serde_json::from_str(&source(
                 &kernel,
                 "urn:iki:ledger:item:1",

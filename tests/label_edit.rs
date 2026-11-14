@@ -168,3 +168,75 @@ fn a_worker_can_neither_add_nor_remove_a_label() {
         serde_json::json!(["worker:lawnboy"])
     );
 }
+
+#[test]
+fn deleting_a_missing_label_is_not_found_and_changes_nothing() {
+    let kernel = kernel();
+    append(&kernel, "Routed", &[("labels", "worker:pool")]);
+    let before = source(&kernel, "urn:iki:ledger:item:1", &[]);
+    let history = source(&kernel, "urn:iki:ledger:item:1:history", &[]);
+    let result = try_verb(
+        &kernel,
+        Verb::Delete,
+        "urn:iki:ledger:label",
+        &[("item", "1"), ("content", "nonexistent-label-x")],
+    );
+    assert!(
+        matches!(result, Err(Error::NotFound(ref why)) if why == "#1 has no label nonexistent-label-x"),
+        "{result:?}"
+    );
+    assert_eq!(source(&kernel, "urn:iki:ledger:item:1", &[]), before);
+    assert_eq!(
+        source(&kernel, "urn:iki:ledger:item:1:history", &[]),
+        history
+    );
+}
+
+#[test]
+fn deleting_a_held_label_succeeds_once() {
+    let kernel = kernel();
+    append(&kernel, "Routed", &[("labels", "worker:pool")]);
+    let args = [("item", "1"), ("content", "worker:pool")];
+    assert_eq!(
+        delete(&kernel, "urn:iki:ledger:label", &args),
+        "unlabeled #1 worker:pool\n"
+    );
+    assert_eq!(
+        json(&kernel, "urn:iki:ledger:item:1", &[])["item"]["labels"],
+        serde_json::json!([])
+    );
+    let result = try_verb(&kernel, Verb::Delete, "urn:iki:ledger:label", &args);
+    assert!(
+        matches!(result, Err(Error::NotFound(ref why)) if why == "#1 has no label worker:pool"),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn deleting_with_label_equals_is_refused_by_name() {
+    let kernel = kernel();
+    append(&kernel, "Routed", &[("labels", "worker:pool")]);
+    let before = source(&kernel, "urn:iki:ledger:item:1", &[]);
+    let history = source(&kernel, "urn:iki:ledger:item:1:history", &[]);
+    // Delete routes its trailing value to content, even when it looks like an argument.
+    for args in [
+        vec![("item", "1"), ("content", "label=worker:pool")],
+        vec![("item", "1"), ("label", "worker:pool")],
+        vec![
+            ("item", "1"),
+            ("content", "worker:pool"),
+            ("label", "worker:pool"),
+        ],
+    ] {
+        let result = try_verb(&kernel, Verb::Delete, "urn:iki:ledger:label", &args);
+        assert!(
+            matches!(result, Err(Error::InvalidArgument { ref name, ref detail }) if name == "label" && detail == "label= is not accepted; pipe the label text or send it as content"),
+            "{result:?}"
+        );
+        assert_eq!(source(&kernel, "urn:iki:ledger:item:1", &[]), before);
+        assert_eq!(
+            source(&kernel, "urn:iki:ledger:item:1:history", &[]),
+            history
+        );
+    }
+}

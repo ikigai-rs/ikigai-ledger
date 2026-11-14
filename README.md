@@ -1682,9 +1682,10 @@ replaced in place and nothing else remembers them:
 - ★ **Decided inside the update, never read and then written.** A transition's `stateFrom` is what
   its compare-and-set's `WHERE` bound, so the events of an item's transitions form one unbroken
   chain whatever races (`tests/edit_event_objects.rs` forces two).
-- **An object means something changed.** Each is guarded by the change it records, so removing a
-  label the item does not have, or sending a title it already has, still writes its event (every
-  write has a who) and names no object. A query over objects counts only real changes.
+- **An object means something changed.** Each is guarded by the change it records. Sending a
+  title it already has still writes its event (every accepted write has a who) and names no
+  object. Removing a label the item does not have is refused and records no event. A query
+  over objects counts only real changes.
 - **An event written before 0.18.0 has no object** and cannot be given one: nothing kept it.
 - **`editTarget` is history, not an edge.** A delete takes the edges pointing at its item, but an
   event on another item keeps naming the deleted item's IRI, as a tombstone does. An item's own
@@ -2124,6 +2125,12 @@ unlabeled acme#12 worker:lawnboy
 $ sink urn:iki:ledger:acme:label item=12 worker:bug
 labeled acme#12 worker:bug
 ```
+
+Delete accepts the label as piped text or `content`, and refuses `label=` by name
+(`InvalidArgument`); a trailing `label=worker:lawnboy` is not treated as a label value.
+Removing a label the item does not hold answers `NotFound`, for example
+`acme#12 has no label worker:lawnboy`, without changing the item or its history.
+The `unlabeled` success line is printed only when the label was removed.
 
 Remove first, so the item is never offered to two workers. Each write stamps `modified`, and
 `next`, `count`, `items` and the item see it on the very next read, cached or not

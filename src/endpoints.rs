@@ -4915,9 +4915,9 @@ fn absent(triple: &str) -> String {
 /// ★ **Whether this write changes anything is decided inside the update, never read and then
 /// written** (the 0.14.x races, ledger #2764, #2766): each object is its own operation, whose
 /// `WHERE` is evaluated under the store's write lock. So this goes AHEAD of the change in the
-/// batch: its guards read the graph as the change finds it. A write that changes nothing still
-/// has its event, since every write has a who, and names no object, so "when was this label
-/// removed" is not answered by the removal of a label the item never had.
+/// batch: its guards read the graph as the change finds it. An accepted write that changes
+/// nothing still has its event, since every write has a who, and names no object. Label
+/// removal uses its own conditional update and refuses a missing label without an event.
 fn edit_event_naming(
     client: &StoreClient<'_, '_>,
     item: &str,
@@ -6370,6 +6370,18 @@ impl Endpoint for LabelEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
+        if inv.request.verb == Verb::Delete
+            && (inv.request.args.contains_key("label")
+                || inv
+                    .inline_str("content")
+                    .is_ok_and(|content| content.trim().starts_with("label=")))
+        {
+            return Err(Error::InvalidArgument {
+                name: "label".to_string(),
+                detail: "label= is not accepted; pipe the label text or send it as content"
+                    .to_string(),
+            });
+        }
         let label = inv.inline_str("content")?.trim();
         if label.is_empty() {
             return Err(Error::InvalidArgument {
@@ -6398,27 +6410,10 @@ impl Endpoint for LabelEndpoint {
             check_label("content", label)?;
         }
         let triple = format!("<{}> <{}> {} .", item.iri, v::LABEL, literal(label));
-        let (update, said, edit) = match inv.request.verb {
-            Verb::Sink => (
-                insert_on_live(&client, &[&item.iri], &triple),
-                "labeled",
-                "label",
-            ),
-            Verb::Delete => (
-                format!("DELETE DATA {{ {} }}", client.in_graph(&triple)),
-                "unlabeled",
-                "unlabel",
-            ),
+        let (said, edit) = match inv.request.verb {
+            Verb::Sink => ("labeled", "label"),
+            Verb::Delete => ("unlabeled", "unlabel"),
             other => return Err(unsupported("ledger-label", other)),
-        };
-        let object = EditObject {
-            predicate: v::EDIT_LABEL,
-            value: literal(label),
-            changes: if inv.request.verb == Verb::Sink {
-                absent(&triple)
-            } else {
-                triple.clone()
-            },
         };
         // A label an import principal dated at its source (ledger #2939).
         let (claimed, who) = importer_dated(
@@ -6434,6 +6429,49 @@ impl Endpoint for LabelEndpoint {
             now,
         )
         .await?;
+        if inv.request.verb == Verb::Delete {
+            // The label and its event change together under the store's write lock.
+            // Reading the label first would let two removals both report success.
+            let event = event_iri(&item.iri, "edit", now)?;
+            let recorded = format!("<{event}> <{}> <{}> .", v::ON_ITEM, item.iri);
+            let triples = format!(
+                "{} <{event}> <{}> {} .",
+                edit_event_triples(&event, &item.iri, edit, &who, now),
+                v::EDIT_LABEL,
+                literal(label)
+            );
+            let removal = format!(
+                "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",
+                client.in_graph(&triple),
+                client.in_graph(&triples),
+                client.in_graph(&format!("{} {triple}", live(&item.iri)))
+            );
+            guarded_update(
+                &client,
+                &[&item.iri],
+                &batch(&[
+                    removal,
+                    touch_dated(&client, &item.iri, now, claimed, &recorded),
+                ]),
+            )
+            .await?;
+            if !client
+                .ask(&format!("ASK {{ {} }}", client.in_graph(&recorded)))
+                .await?
+            {
+                return Err(Error::NotFound(format!(
+                    "{} has no label {label}",
+                    item.short()
+                )));
+            }
+            return Ok(plain(format!("{said} {} {label}\n", item.short())));
+        }
+        let update = insert_on_live(&client, &[&item.iri], &triple);
+        let object = EditObject {
+            predicate: v::EDIT_LABEL,
+            value: literal(label),
+            changes: absent(&triple),
+        };
         let event =
             edit_event_naming(&client, &item.iri, &[&item.iri], edit, &who, now, &[object])?;
         guarded_update(
@@ -6483,11 +6521,11 @@ impl Endpoint for LabelEndpoint {
             .action(write_scopes(
                 ikigai_core::ActionSpec::new(Verb::Delete)
                     .input(ledger_arg("label"))
-                    .summary("Remove the label.")
+                    .summary("Remove a held label; NotFound if the item has no such label.")
                     .input(item_arg("The item to untag."))
                     .input(
                         ArgSpec::new("content")
-                            .summary("The label to remove.")
+                            .summary("The label to remove, as piped text or content. label= is not accepted.")
                             .class(v::ext::XSD_STRING),
                     )
                     .input(created_arg("an unlabel"))
