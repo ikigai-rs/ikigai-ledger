@@ -36,6 +36,7 @@
 //! | --- | --- |
 //! | the ledger's graph | `urn:iki:ledger:graph:{name}` |
 //! | its graveyard (recoverable deletes) | `urn:iki:ledger:graph:{name}:deleted` |
+//! | its agent session summaries | `urn:iki:ledger:graph:{name}:session` |
 //! | its counter | `urn:iki:ledger:{name}:counter` |
 //! | an item | `urn:iki:ledger:{name}:item:{id}` |
 //!
@@ -209,6 +210,19 @@ impl Ledger {
     /// module is built to keep closed.
     pub fn deleted_graph(&self) -> String {
         format!("{PREFIX}graph:{}:deleted", self.name)
+    }
+
+    /// Where this ledger's agent session summaries live (ledger #3661): a graph of their own,
+    /// so the store grant that reads them reads nothing else. A summary names its item by IRI
+    /// and number, and holds no title, body or comment.
+    ///
+    /// ★ **A graph of its own is what makes "summaries only" true at the store.** A
+    /// sub-request carries the caller's capability unchanged, so whoever reads the summaries
+    /// through this crate also holds the store grant for the graph they are in, and can
+    /// resolve `urn:iki:store:graph-select` over that graph directly. In the ledger's own
+    /// graph that grant read every title.
+    pub fn session_graph(&self) -> String {
+        format!("{PREFIX}graph:{}:session", self.name)
     }
 
     /// The short-id allocator, as a resource in the graph rather than as process state —
@@ -710,6 +724,7 @@ mod tests {
         let acme = Ledger::parse("acme").unwrap();
         assert_eq!(acme.graph(), "urn:iki:ledger:graph:acme");
         assert_eq!(acme.deleted_graph(), "urn:iki:ledger:graph:acme:deleted");
+        assert_eq!(acme.session_graph(), "urn:iki:ledger:graph:acme:session");
         assert_eq!(acme.counter(), "urn:iki:ledger:acme:counter");
         assert_eq!(acme.item("01abc"), "urn:iki:ledger:acme:item:01abc");
         assert_eq!(acme.cap_write(), "urn:cap:ledger:write:acme");

@@ -167,3 +167,14 @@ pub fn graveyard_write(ledger: &str) -> String {
 pub fn graveyard_read(ledger: &str) -> String {
     format!("urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}:deleted")
 }
+
+/// The store grant that reads one ledger's SESSION SUMMARIES, and nothing else (ledger #3661).
+pub fn session_read(ledger: &str) -> String {
+    format!("urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}:session")
+}
+
+/// The store grant that writes one ledger's session summaries: a worker records into it, and a
+/// delete or purge moves an item's summaries out of it.
+pub fn session_write(ledger: &str) -> String {
+    format!("urn:cap:store:write:graph:urn:iki:ledger:graph:{ledger}:session")
+}

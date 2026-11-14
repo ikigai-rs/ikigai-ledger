@@ -252,6 +252,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}:closed` | Exists | is it closed? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:about` | Sink · Delete | add / remove what it is about, title and body untouched | `about:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:sessions` | Source | every session summary in the ledger, newest first, paged; item ids only | `summaries:{ledger}` or `read:{ledger}` |
+| `…:{ledger}:sessions` | Sink | `plan` or `move` the summaries an earlier version left in the ledger graph into the session graph | `write:{ledger}` |
 | `…:{ledger}:item:{id}:history` | Source | every event on the item, oldest first, with what each edit changed | `read:{ledger}` |
 | `…:{ledger}:history` | Sink | an import principal's past claim, release, edit and status events for one item; history only | `write:{ledger}`, and enrolled as `ledger:Importer` |
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
@@ -597,6 +598,36 @@ recorded session 0b5e41aa on acme#12's hand-back
   family `urn:cap:ledger:session:*`: a worker's session grant does not read the set, and this
   grant records nothing. `read:{ledger}` covers it too. ⚠ `sessions` is now a reserved ledger
   name. `tests/session_set.rs` runs under exactly the summaries grant and the store grant below.
+- **In a graph of their own** (ledger #3661): `urn:iki:ledger:graph:{ledger}:session` holds a
+  ledger's summaries and nothing else, so "reads nothing else" holds at the store too. The
+  summaries grant pairs with that graph's store read grant,
+  `urn:cap:store:read:graph:urn:iki:ledger:graph:{ledger}:session`, and NOT with the ledger
+  graph's, which reads every title. Under exactly those two lines the set reads, the store's
+  `urn:iki:store:graph-select` over the ledger graph is `Denied`, and no door, the ledger's or the
+  store's, answers an item's title (`tests/session_set.rs`). A summary names its item by IRI and
+  by number (`ledger:sessionItemNumber`, which the ledger writes), never by title, so the set
+  needs no read of the ledger graph. Reading an item's sessions, recording one, deleting and
+  purging each need the new graph's store grants as well; see "What is enforced, and where".
+- **Moving what 0.22.0 recorded** is an explicit, one-time step, never run at startup.
+  Summaries recorded before ledger #3661 are in the ledger graph, where the summaries grant no
+  longer looks. Read the plan first; it writes nothing:
+
+  ```text
+  $ sink urn:iki:ledger:acme:sessions <<< plan
+  acme: 2 session summaries (22 triples) would move from urn:iki:ledger:graph:acme to urn:iki:ledger:graph:acme:session. This is a plan: nothing was written
+    session 0b5e41aa on acme#12, 11 triples
+    session 4f2a9c01 on acme#7, 11 triples
+  To move them, send `move` to this resource
+  $ sink urn:iki:ledger:acme:sessions <<< move
+  acme: moved 2 session summaries (22 triples) from urn:iki:ledger:graph:acme to urn:iki:ledger:graph:acme:session
+  ```
+
+  It takes `urn:cap:ledger:write:{ledger}` and the store read and write grants of both graphs.
+  Each batch of 100 is written to the session graph first and removed from the ledger graph
+  second, as exactly the triples read, adding each item's number, so an interrupted `move`
+  leaves a summary in both graphs and running it again finishes; a second run says
+  `no session summaries … to move; nothing written`. Summaries a delete already archived stay
+  in the graveyard, which no summaries grant reads.
 
 ## Aliases: an external id, in a scheme one principal owns
 
@@ -968,7 +999,7 @@ are three different resources, because they are three different authorities:
 | act | resource | what survives |
 | --- | --- | --- |
 | **close** | `…:{ledger}:close` | everything. The item is still in the graph, still queryable, and stops blocking what it blocked. This is the normal end of work. |
-| **delete** | `Delete …:{ledger}:item:{id}` (`urn:cap:ledger:delete:{ledger}`) | the item's quads, its comments, events, links, session summaries and the edges pointing at it MOVE to that ledger's own `urn:iki:ledger:graph:{ledger}:deleted`. Out of every ledger read; still there; recoverable. A **tombstone** stays in the live graph. |
+| **delete** | `Delete …:{ledger}:item:{id}` (`urn:cap:ledger:delete:{ledger}`) | the item's quads, its comments, events, links and the edges pointing at it MOVE to that ledger's own `urn:iki:ledger:graph:{ledger}:deleted`, and so do its session summaries, from the session graph, once the item is gone (they are not in the tombstone's count or hash). Out of every ledger read; still there; recoverable. A **tombstone** stays in the live graph. |
 | **purge** | `…:{ledger}:purge` (`urn:cap:ledger:purge:{ledger}`) | only the tombstone. The content is destroyed in both graphs — and an item that was already deleted is purged the same way, found by its tombstone, so a secret deleted first and purged second is really gone. |
 
 The tombstone carries the number, the time, the actor, the reason, the quad count and the
@@ -2033,7 +2064,7 @@ worker can be handed the work without the verdict on it:
 | `urn:cap:ledger:close:{ledger}` | `close` and `reopen` | |
 | `urn:cap:ledger:about:{ledger}` (0.10.0) | `item:{id}:about` Sink (add) and Delete (remove) | not the item Sink's own `about=`, which is the edit door |
 | `urn:cap:ledger:alias:{ledger}` (0.15.0) | giving one of this ledger's items an alias, in a scheme the caller owns | see "Aliases" |
-| `urn:cap:ledger:session:{ledger}` (0.22.0) | `item:{id}:sessions` Sink: recording an agent session's summary on the item's newest hand-back | see "Agent sessions"; in the worker grant |
+| `urn:cap:ledger:session:{ledger}` (0.22.0) | `item:{id}:sessions` Sink: recording an agent session's summary on the item's newest hand-back | see "Agent sessions"; in the worker grant, with the session graph's store read and write grants since ledger #3661 |
 | `urn:cap:ledger:summaries:{ledger}` (0.22.0) | `…:{ledger}:sessions` Source: reading every session summary in the ledger | a READ grant, covered by `read:{ledger}` rather than `write`; no item, title or comment; outside the `session:*` family; see "Agent sessions" |
 | `urn:cap:ledger:link-in:{ledger}` (0.17.0) | linking an item of ANOTHER ledger to one of this ledger's items, and unlinking it | **not** covered by `write:{ledger}`; see "Links across ledgers" |
 | `urn:cap:ledger:write:{ledger}` | **all four of the above**, and filing, linking, labeling, deferring, editing, `about=` on the item, state | unchanged: no grant issued before 0.7.0 or 0.10.0 changed meaning |
@@ -2061,7 +2092,18 @@ urn:cap:ledger:comment:acme
 urn:cap:ledger:session:acme
 urn:cap:store:read:graph:urn:iki:ledger:graph:acme
 urn:cap:store:write:graph:urn:iki:ledger:graph:acme
+urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session
+urn:cap:store:write:graph:urn:iki:ledger:graph:acme:session
 ```
+
+⚠ **The last two lines are new with ledger #3661**: a worker records its session's summary into
+the ledger's session graph, `urn:iki:ledger:graph:acme:session`. A worker holding the grant as
+published in 0.22.0, without them, keeps claiming, commenting and handing back as before, and its
+summary is refused by name: `Denied`, naming both missing tokens and saying that a worker grant
+written before ledger #3661 lacks them, with nothing written. Nothing is written to the ledger
+graph in its place, so a summary is never where the summaries grant cannot read it. Add the two
+lines to every worker grant when deploying this version; until then a worker's summaries are lost
+and its hand-backs are not.
 
 The dispatcher who checks the evidence and closes adds `urn:cap:ledger:close:acme` (or holds
 `write:acme`). The worker hands an item back with `comment handback=true` under its comment
@@ -2130,9 +2172,12 @@ are these — **per ledger, and a grant for `acme` is worth nothing at `bosatsu`
 | read (`items`, `count`, `counts`, `item`, `next`, `ledgers`) | `urn:cap:ledger:read:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L` |
 | write (`append`, `backfill-closed-at`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, editing an item) | `urn:cap:ledger:write:L` | the read grant above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L` |
 | claim, comment, or close and reopen, alone | `urn:cap:ledger:claim:L`, `…:comment:L` or `…:close:L` | the same two as write |
-| read the ledger's session summaries, alone (`sessions`) | `urn:cap:ledger:summaries:L` | the read grant above |
-| delete (`Delete` on an item) | `urn:cap:ledger:delete:L` | both of the above **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` |
-| purge | `urn:cap:ledger:purge:L` | the same three as delete **and** `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` |
+| read the ledger's session summaries, alone (`sessions`) | `urn:cap:ledger:summaries:L` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L:session` and **not** the ledger graph's read grant |
+| read an item's or the ledger's sessions under `read:L` | `urn:cap:ledger:read:L` | the read grant above **and** `urn:cap:store:read:graph:urn:iki:ledger:graph:L:session` |
+| record a session summary (`item:{id}:sessions`) | `urn:cap:ledger:session:L` | the read and write grants above **and** the session graph's: `urn:cap:store:read:graph:urn:iki:ledger:graph:L:session`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L:session` |
+| move 0.22.0's summaries (`sessions` Sink) | `urn:cap:ledger:write:L` | the ledger graph's read and write grants and the session graph's |
+| delete (`Delete` on an item) | `urn:cap:ledger:delete:L` | the ledger graph's read and write grants, the session graph's read and write grants (ledger #3661) **and** `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` |
+| purge | `urn:cap:ledger:purge:L` | the same five as delete **and** `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` |
 
 ⚠ **Delete and purge need a write grant for TWO graphs**, because the graveyard is a
 second graph and a scoped write cannot reach across. That is the one line of this table an
@@ -2141,13 +2186,18 @@ graveyard's READ grant as well** (0.3): it looks there for what an earlier delet
 and the store refuses a `DELETE … WHERE` over a graph without the read grant for it. Without
 it, purge refuses before touching anything and names the token.
 
-⚠ **The summaries grant is narrow at this module's doors, not at the store's.** Reading the set
-is a sub-request under the caller's own capability, so the caller also holds the ledger graph's
-read grant, and that grant reads the whole graph, titles included, at the store's own
-`urn:iki:store:graph-select`. This is how every narrow grant here works (a worker's claim grant
-sits beside the graph's write grant), but for a read grant it is the half that matters: a caller
-who can resolve the store's doors directly can read item text with the same lines. Closing that
-needs the summaries in a graph of their own, with its own store grant.
+★ **The summaries grant is narrow at the store too** (ledger #3661). A sub-request carries the
+caller's capability unchanged, so whoever reads the set also holds the store grant for the graph
+the set is in, and can resolve the store's own doors with it. Until ledger #3661 that was the
+ledger graph's read grant, which reads every title; now the summaries are in
+`urn:iki:ledger:graph:L:session`, which holds nothing else, and that graph's read grant is the
+only store line the summaries grant needs. Every other narrow grant here still works the old way
+(a worker's claim grant sits beside the ledger graph's write grant), because claiming and
+commenting really do read and write the item.
+
+⚠ **Delete and purge need the session graph's read and write grants too**, since ledger #3661:
+a delete moves the item's summaries from that graph to the graveyard, and a purge destroys them.
+Without them either is refused by name before anything moves.
 
 ⚠ **The two halves are separate grants and neither implies the other.**
 `urn:cap:ledger:read:acme` without the store's graph-read token is a ledger you may address

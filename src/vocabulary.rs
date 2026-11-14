@@ -336,6 +336,8 @@ term! {
     SESSION_ID => "sessionId";
     /// `ledger:sessionItem` — the item a session summary is about.
     SESSION_ITEM => "sessionItem";
+    /// `ledger:sessionItemNumber` — the item's number, so the summaries graph names it (#3661).
+    SESSION_ITEM_NUMBER => "sessionItemNumber";
     /// `ledger:handBackEvent` — the hand-back comment a session summary is recorded on.
     HAND_BACK_EVENT => "handBackEvent";
     /// `ledger:machineName` — the machine the session ran on.

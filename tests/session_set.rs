@@ -4,10 +4,13 @@
 //! no totals and no cost, and each summary names its item by id alone. It is readable under
 //! `urn:cap:ledger:summaries:{ledger}`, a grant that admits this set and no item text, and is
 //! named outside the session WRITE family `urn:cap:ledger:session:*`. These tests run under
-//! exactly that grant and the ledger graph's store read grant:
+//! exactly that grant and the store read grant of the ledger's SESSION graph, which holds the
+//! summaries and nothing else (ledger #3661):
 //!
 //! - the set reads, newest first, in text, Turtle and JSON, and pages with `limit` and `offset`;
 //! - an item's title is refused at `item:{id}`, and so is every other read of item text;
+//! - and at the store too: `urn:iki:store:graph-select` over the ledger graph is `Denied`, and no
+//!   store door answers a title;
 //! - the grant records nothing, and the session grant does not read the set.
 
 mod common;
@@ -21,11 +24,12 @@ fn at(resource: &str) -> String {
     format!("urn:iki:ledger:{LEDGER}:{resource}")
 }
 
-/// The new grant, and the one store grant every ledger read takes. Nothing else.
+/// The summaries grant, and the store read grant of the session graph. Nothing else: not the
+/// ledger graph's store read grant, which reads every title (ledger #3661).
 fn summaries_only() -> Capability {
     Capability::scoped(vec![
         format!("urn:cap:ledger:summaries:{LEDGER}"),
-        graph_read(LEDGER),
+        session_read(LEDGER),
     ])
 }
 
@@ -38,6 +42,8 @@ fn worker() -> Capability {
         format!("urn:cap:ledger:session:{LEDGER}"),
         graph_read(LEDGER),
         graph_write(LEDGER),
+        session_read(LEDGER),
+        session_write(LEDGER),
     ])
 }
 
@@ -306,10 +312,11 @@ fn each_grant_reaches_only_its_own_door() {
         other => panic!("the session write grant reading the set: expected Denied, got {other:?}"),
     }
 
-    // The ledger read grant covers it.
+    // The ledger read grant covers it, with the session graph's store read grant.
     let reader = Capability::scoped(vec![
         format!("urn:cap:ledger:read:{LEDGER}"),
         graph_read(LEDGER),
+        session_read(LEDGER),
     ]);
     try_as(&kernel, &reader, Verb::Source, &at("sessions"), &[])
         .expect("the read grant reads the set");
@@ -323,4 +330,162 @@ fn each_grant_reaches_only_its_own_door() {
         try_as(&kernel, &elsewhere, Verb::Source, &at("sessions"), &[]),
         "another ledger's summaries grant",
     );
+}
+
+/// Resolve a store door under exactly the summaries grant.
+fn store(kernel: &Kernel, door: &str, args: &[(&str, &str)]) -> Result<String, Error> {
+    try_as(
+        kernel,
+        &summaries_only(),
+        Verb::Source,
+        &format!("urn:iki:store:{door}"),
+        args,
+    )
+}
+
+const LEDGER_GRAPH: &str = "urn:iki:ledger:graph:acme";
+const SESSION_GRAPH: &str = "urn:iki:ledger:graph:acme:session";
+const TITLES: &str = "SELECT ?t WHERE { ?s <http://purl.org/dc/terms/title> ?t }";
+
+/// ★ Ledger #3661: under exactly the summaries grant and the session graph's store grant, the set
+/// reads, the store's `graph-select` over the LEDGER graph is `Denied`, and an item's title is
+/// unreachable by any door, the ledger's or the store's.
+#[test]
+fn the_summaries_grant_reads_no_title_at_the_store_either() {
+    let kernel = seeded();
+    let text = set(&kernel, &[]).expect("the set reads");
+    assert!(text.contains("session s-three"), "{text}");
+    assert!(
+        text.contains("  item: acme#1 urn:iki:ledger:acme:item:"),
+        "{text}"
+    );
+
+    // The ledger graph, through the narrow doors: Denied.
+    denied(
+        store(
+            &kernel,
+            "graph-select",
+            &[("graph", LEDGER_GRAPH), ("query", TITLES)],
+        ),
+        "graph-select over the ledger graph",
+    );
+    denied(
+        store(
+            &kernel,
+            "graph-ask",
+            &[("graph", LEDGER_GRAPH), ("query", "ASK { ?s ?p ?o }")],
+        ),
+        "graph-ask over the ledger graph",
+    );
+    denied(
+        store(
+            &kernel,
+            "graph-construct",
+            &[
+                ("graph", LEDGER_GRAPH),
+                ("query", "CONSTRUCT WHERE { ?s ?p ?o }"),
+            ],
+        ),
+        "graph-construct over the ledger graph",
+    );
+    denied(
+        store(
+            &kernel,
+            "graph-select",
+            &[
+                ("graph", "urn:iki:ledger:graph:acme:deleted"),
+                ("query", TITLES),
+            ],
+        ),
+        "graph-select over the graveyard",
+    );
+
+    // The session graph reads, and holds summaries and no item text.
+    let all = store(
+        &kernel,
+        "graph-select",
+        &[
+            ("graph", SESSION_GRAPH),
+            ("query", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"),
+        ],
+    )
+    .expect("the session graph's store grant reads the session graph");
+    assert!(all.contains("urn:agent:session:id:s-one"), "{all}");
+    assert!(!all.contains("Secret"), "{all}");
+    assert!(
+        !all.contains("http://purl.org/dc/terms/title"),
+        "no title triple in the session graph: {all}"
+    );
+
+    // Every other door, the store's broad ones and the ledger's own: none answers a title.
+    let doors: Vec<(String, Vec<(&str, &str)>)> = vec![
+        ("urn:iki:store:select".into(), vec![("query", TITLES)]),
+        (
+            "urn:iki:store:ask".into(),
+            vec![("query", "ASK { ?s ?p ?o }")],
+        ),
+        (
+            "urn:iki:store:construct".into(),
+            vec![("query", "CONSTRUCT WHERE { ?s ?p ?o }")],
+        ),
+        (
+            "urn:iki:store:describe".into(),
+            vec![("query", "DESCRIBE ?s WHERE { ?s ?p ?o }")],
+        ),
+        ("urn:iki:store:dump".into(), vec![]),
+        ("urn:iki:store:info".into(), vec![]),
+        ("urn:iki:store:graphs".into(), vec![]),
+        (
+            "urn:iki:store:graph-info".into(),
+            vec![("graph", LEDGER_GRAPH)],
+        ),
+        (
+            "urn:iki:store:graph-select".into(),
+            vec![
+                ("graph", SESSION_GRAPH),
+                (
+                    "query",
+                    "SELECT ?t WHERE { GRAPH <urn:iki:ledger:graph:acme> { ?s ?p ?t } }",
+                ),
+            ],
+        ),
+        (at("item:1"), vec![]),
+        (at("items"), vec![]),
+        (at("next"), vec![]),
+        (at("count"), vec![]),
+        (at("counts"), vec![]),
+        (at("doctor"), vec![]),
+        (at("item:1:history"), vec![]),
+        (at("item:1:sessions"), vec![]),
+        ("urn:iki:ledger:ledgers".into(), vec![]),
+    ];
+    for (door, args) in &doors {
+        for face in ["text/plain", "text/turtle", "application/json"] {
+            let mut with = args.clone();
+            if door.starts_with("urn:iki:ledger:") {
+                with.push(("as", face));
+            }
+            if let Ok(text) = try_as(&kernel, &summaries_only(), Verb::Source, door, &with) {
+                assert!(!text.contains("Secret"), "{door} answered a title: {text}");
+            }
+        }
+    }
+}
+
+/// The ledger graph's store read grant alone, beside the summaries grant, no longer reads the
+/// set: the summaries are not in that graph, and the refusal names the line to add.
+#[test]
+fn the_ledger_graphs_store_grant_does_not_read_the_set() {
+    let kernel = seeded();
+    let old_pair = Capability::scoped(vec![
+        format!("urn:cap:ledger:summaries:{LEDGER}"),
+        graph_read(LEDGER),
+    ]);
+    match try_as(&kernel, &old_pair, Verb::Source, &at("sessions"), &[]) {
+        Err(Error::Denied(why)) => assert!(
+            why.contains("`urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session`"),
+            "{why}"
+        ),
+        other => panic!("expected Denied naming the session graph's grant, got {other:?}"),
+    }
 }

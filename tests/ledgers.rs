@@ -33,15 +33,17 @@ mod common;
 use common::*;
 use ikigai_core::{Capability, Error, Verb};
 
-/// Every grant a caller working in ONE ledger needs — all eight, and every one of them
+/// Every grant a caller working in ONE ledger needs — all ten, and every one of them
 /// names that ledger.
 ///
 /// ★ Read it as the operator's config line, because that is what it is. Four tokens at
 /// this module's doors and four at the store's: the ledger's graph must be readable (to
 /// resolve `#12`, to check an item exists, to list) and writable, and its **graveyard**
 /// must be writable, because a delete archives into a second graph and a scoped write
-/// cannot reach across — and readable, for purge, which finds what a delete archived. A
-/// caller that only reads needs the first and the fifth.
+/// cannot reach across — and readable, for purge, which finds what a delete archived. The
+/// session graph is the last two (ledger #3661): summaries are recorded there and a delete
+/// moves them out. A caller that only reads needs the first and the fifth, and the ninth to
+/// read sessions.
 fn grants_for(ledger: &str) -> Capability {
     Capability::scoped([
         format!("urn:cap:ledger:read:{ledger}"),
@@ -52,6 +54,8 @@ fn grants_for(ledger: &str) -> Capability {
         graph_write(ledger),
         graveyard_write(ledger),
         graveyard_read(ledger),
+        session_read(ledger),
+        session_write(ledger),
     ])
 }
 

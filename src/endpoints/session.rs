@@ -42,6 +42,41 @@ pub(crate) const SESSION_PREFIX: &str = "urn:agent:session:id:";
 /// The older convention an `about` edge may carry, aliased and never rewritten.
 pub(crate) const LEGACY_SESSION_PREFIX: &str = "urn:agents:session:";
 
+/// The session graph's store grants this caller lacks, of its read grant and, when `write`, its
+/// write grant, refused by name before anything is read or written (ledger #3661).
+///
+/// ★ **This is how a worker grant from before ledger #3661 is answered.** Its lines name the
+/// ledger's own graph and not the summaries graph, so recording a summary under it is `Denied`
+/// here, with the two lines to add, rather than written where the summaries grant cannot read
+/// it or refused halfway by the store.
+pub(crate) fn require_session_graph(inv: &Invocation<'_>, write: bool, doing: &str) -> Result<()> {
+    let ledger = Ledger::from_bindings(inv.bindings)?;
+    let graph = ledger.session_graph();
+    let mut scopes = vec![ikigai_store::cap_read_graph(&graph)];
+    if write {
+        scopes.push(ikigai_store::cap_write_graph(&graph));
+    }
+    let missing: Vec<String> = scopes
+        .into_iter()
+        .filter(|scope| !inv.capability.allows(scope))
+        .map(|scope| format!("`{scope}`"))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Denied(format!(
+        "this capability does not hold {}. Since ledger #3661 a ledger's session summaries are in \
+         a graph of their own, `{graph}`, so {doing} needs that graph's store {} beside the \
+         ledger grant. A grant written before then, a worker's among them, lacks these lines: add them",
+        missing.join(" or "),
+        if write {
+            "read and write grants"
+        } else {
+            "read grant"
+        },
+    )))
+}
+
 const SH: &str = "http://www.w3.org/ns/shacl#";
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
@@ -278,7 +313,12 @@ pub(crate) fn check(shape: &Shape, triples: &[(String, Term)]) -> Result<()> {
 }
 
 /// The shape's properties the ledger writes itself; a caller's key naming one is refused.
-const WRITTEN_HERE: [&str; 3] = ["sessionItem", "handBackEvent", "sessionId"];
+const WRITTEN_HERE: [&str; 4] = [
+    "sessionItem",
+    "sessionItemNumber",
+    "handBackEvent",
+    "sessionId",
+];
 
 /// A session id: letters, digits, `-`, `_` and `.`, at most [`MAX_ID`] long. Kept to what is
 /// safe in an IRI's last segment without escaping, which is all a harness's ids use.
@@ -421,12 +461,13 @@ fn term_of(binding: &sparql::Binding, arg: &str) -> Result<Term> {
     })
 }
 
-/// Every summary on `item`, newest first; one millisecond's in session order.
+/// Every summary on `item`, newest first; one millisecond's in session order. Read from the
+/// session graph alone.
 async fn read(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Summary>> {
     let rows = client
-        .select(&format!(
+        .select_session(&format!(
             "SELECT ?s ?p ?o WHERE {{ {} }}",
-            client.in_graph(&format!(
+            client.in_session_graph(&format!(
                 "?s <{type_}> <{class}> ; <{on}> <{item}> ; ?p ?o .",
                 type_ = v::ext::TYPE,
                 class = v::SESSION_SUMMARY_CLASS,
@@ -463,28 +504,28 @@ async fn read(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Summary>> 
     Ok(all)
 }
 
-/// One page of the ledger's summaries, newest first, each with its item's number when the item
-/// has one, and whether a later page has more. One query, so the page and its items' numbers are
-/// one snapshot; one more row than the page is asked for, to answer "more" without a total.
+/// One page of the ledger's summaries, newest first, each with its item's number when the summary
+/// carries one, and whether a later page has more. One query over the session graph alone, so the
+/// page reads nothing of any item but the IRI and number each summary names (ledger #3661); one
+/// more row than the page is asked for, to answer "more" without a total.
 async fn read_page(
     client: &StoreClient<'_, '_>,
     limit: usize,
     offset: usize,
 ) -> Result<(Vec<(Summary, Option<i64>)>, bool)> {
     let rows = client
-        .select(&format!(
+        .select_session(&format!(
             "SELECT ?s ?p ?o ?n WHERE {{ {} }}",
-            client.in_graph(&format!(
+            client.in_session_graph(&format!(
                 "{{ SELECT ?s (MAX(?at) AS ?latest) WHERE {{ ?s <{type_}> <{class}> ; \
                  <{created}> ?at }} GROUP BY ?s ORDER BY DESC(?latest) ASC(STR(?s)) \
                  LIMIT {fetch} OFFSET {offset} }} \
                  ?s ?p ?o . \
-                 OPTIONAL {{ ?s <{on}> ?item . ?item <{number}> ?n }}",
+                 OPTIONAL {{ ?s <{number}> ?n }}",
                 type_ = v::ext::TYPE,
                 class = v::SESSION_SUMMARY_CLASS,
                 created = v::ext::CREATED,
-                on = v::SESSION_ITEM,
-                number = v::NUMBER,
+                number = v::SESSION_ITEM_NUMBER,
                 fetch = limit.saturating_add(1),
             ))
         ))
@@ -571,7 +612,7 @@ fn json_of(summary: &Summary) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("iri".into(), Value::String(summary.iri.clone()));
     for (predicate, values) in &summary.values {
-        if predicate == v::ext::TYPE {
+        if predicate == v::ext::TYPE || predicate == v::SESSION_ITEM_NUMBER {
             continue;
         }
         let key = predicate
@@ -680,6 +721,7 @@ impl Endpoint for SessionsEndpoint {
 impl SessionsEndpoint {
     async fn source(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
+        require_session_graph(inv, false, "reading an item's sessions")?;
         let want = wanted_face(inv, &SESSION_FACES)?;
         let item = require_item(&client, flight::part_id(inv)?).await?;
         let summaries = read(&client, &item.iri).await?;
@@ -730,8 +772,17 @@ impl SessionsEndpoint {
         }
     }
 
+    /// ★ **Two graphs, so two steps** (ledger #3661). The summary goes into the session graph,
+    /// and the item and its hand-back are in the ledger's own graph, which no scoped update can
+    /// read from inside the session graph's scope. So the summary is written guarded only by
+    /// "this session is not recorded yet", and the item is checked again AFTER it lands: a
+    /// delete, or a hand-back removed, in between makes this request take its own summary back
+    /// and answer `Conflict`. A delete that commits after that check moves the summary to the
+    /// graveyard itself (see `endpoints::move_summaries`), so a summary is never left in the
+    /// session graph for an item that is gone.
     async fn sink(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Session)?);
+        require_session_graph(inv, true, "recording a session summary")?;
         let now = now_ms(inv)?;
         let item = require_item(&client, flight::part_id(inv)?).await?;
         let (id, mut triples) = parse(inv.inline_str("content")?)?;
@@ -746,6 +797,10 @@ impl SessionsEndpoint {
             Literal::new_typed_literal(&id, named(v::ext::XSD_STRING)).into(),
         ));
         triples.push((v::SESSION_ITEM.to_string(), named(&item.iri).into()));
+        triples.push((
+            v::SESSION_ITEM_NUMBER.to_string(),
+            Literal::new_typed_literal(item.number.to_string(), named(v::ext::XSD_INTEGER)).into(),
+        ));
         triples.push((v::HAND_BACK_EVENT.to_string(), named(&handback).into()));
         triples.push((
             v::ext::CREATED.to_string(),
@@ -766,7 +821,7 @@ impl SessionsEndpoint {
         };
         let lookup = format!(
             "SELECT ?on WHERE {{ {} }} LIMIT 1",
-            client.in_graph(&format!("<{session}> <{}> ?on", v::HAND_BACK_EVENT))
+            client.in_session_graph(&format!("<{session}> <{}> ?on", v::HAND_BACK_EVENT))
         );
         let answer = |on: String| -> Result<Representation> {
             if on == handback {
@@ -781,37 +836,59 @@ impl SessionsEndpoint {
                 )))
             }
         };
-        if let Some(on) = recorded(&client.select(&lookup).await?) {
+        if let Some(on) = recorded(&client.select_session(&lookup).await?) {
             return answer(on);
         }
         let body: String = triples
             .iter()
             .map(|(p, o)| format!("<{session}> <{p}> {o} .\n"))
             .collect();
-        let update = format!(
-            "INSERT {{ {} }} WHERE {{ {} FILTER NOT EXISTS {{ {} }} }}",
-            client.in_graph(&body),
-            client.in_graph(&format!(
-                "{} <{handback}> <{}> <{}>",
-                live(&item.iri),
-                v::ON_ITEM,
-                item.iri
-            )),
-            client.in_graph(&format!("<{session}> <{}> ?any", v::HAND_BACK_EVENT)),
-        );
-        client.update(&update).await?;
-        match recorded(&client.select(&lookup).await?) {
-            Some(on) if on == handback => Ok(plain(format!(
-                "recorded session {id} on {}'s hand-back\n",
-                item.short()
-            ))),
-            Some(on) => answer(on),
-            None => Err(Error::Conflict(format!(
-                "{} changed while the summary was written (deleted, or its hand-back removed); \
-                 nothing was written",
-                item.short()
-            ))),
+        client
+            .update_session(&format!(
+                "INSERT {{ {} }} WHERE {{ FILTER NOT EXISTS {{ {} }} }}",
+                client.in_session_graph(&body),
+                client.in_session_graph(&format!("<{session}> <{}> ?any", v::HAND_BACK_EVENT)),
+            ))
+            .await?;
+        match recorded(&client.select_session(&lookup).await?) {
+            Some(on) if on == handback => {}
+            Some(on) => return answer(on),
+            None => {
+                return Err(Error::Conflict(format!(
+                    "{} changed while the summary was written; nothing was written",
+                    item.short()
+                )))
+            }
         }
+        // The item and its hand-back, read again now that the summary is in.
+        let standing = client
+            .ask(&format!(
+                "ASK {{ {} }}",
+                client.in_graph(&format!(
+                    "{} <{handback}> <{}> <{}>",
+                    live(&item.iri),
+                    v::ON_ITEM,
+                    item.iri
+                ))
+            ))
+            .await?;
+        if !standing {
+            client
+                .update_session(&format!(
+                    "DELETE DATA {{ {} }}",
+                    client.in_session_graph(&body)
+                ))
+                .await?;
+            return Err(Error::Conflict(format!(
+                "{} changed while the summary was written (deleted, or its hand-back removed); \
+                 the summary was taken back",
+                item.short()
+            )));
+        }
+        Ok(plain(format!(
+            "recorded session {id} on {}'s hand-back\n",
+            item.short()
+        )))
     }
 }
 
@@ -824,6 +901,7 @@ impl Endpoint for SessionSetEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         match inv.request.verb {
             Verb::Source => self.source(inv).await,
+            Verb::Sink => self.migrate(inv).await,
             other => Err(unsupported("ledger-sessions", other)),
         }
     }
@@ -881,12 +959,202 @@ impl Endpoint for SessionSetEndpoint {
                     .output(TURTLE)
                     .output(JSON),
             )
+            .action(write_scopes(
+                ikigai_core::ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg("sessions"))
+                    .summary(
+                        "Move the session summaries an earlier version recorded in the \
+                             ledger's own graph into its session graph (ledger #3661). `plan` \
+                             writes nothing and lists what `move` would move; `move` moves them \
+                             and says how many. Takes `urn:cap:ledger:write:{ledger}` and the \
+                             store read and write grants of both graphs. A second `move` moves \
+                             nothing.",
+                    )
+                    .input(
+                        ArgSpec::new("content")
+                            .summary(
+                                "`plan` (a dry run: nothing is written) or `move` (the \
+                                     migration). Read the plan first.",
+                            )
+                            .class(v::ext::XSD_STRING),
+                    )
+                    .output(PLAIN),
+                CAP_ANY,
+            ))
+    }
+}
+
+/// How many summaries one `move` batch writes: bounded, so no update nears the store's SPARQL
+/// size limit, as `backfill-closed-at` does.
+const MOVE_BATCH: usize = 100;
+
+/// `1 session summary`, `2 session summaries`: a count in words, never `summary(ies)`.
+fn summaries_counted(n: usize) -> String {
+    if n == 1 {
+        "1 session summary".to_string()
+    } else {
+        format!("{n} session summaries")
+    }
+}
+
+/// `1 triple`, `11 triples`.
+fn triples_counted(n: usize) -> String {
+    if n == 1 {
+        "1 triple".to_string()
+    } else {
+        format!("{n} triples")
     }
 }
 
 impl SessionSetEndpoint {
+    /// ★ **The migration** (ledger #3661): summaries recorded before their own graph existed are
+    /// in the ledger's graph, where the summaries grant's store line cannot read them and the
+    /// ledger graph's store line reads everything else too. Nothing moves until an operator sends
+    /// `move`; `plan` lists each summary and writes nothing. Each batch is written to the
+    /// session graph first and removed from the ledger graph second, as exactly the triples read,
+    /// so an interrupted `move` leaves a summary in both graphs (readers see the session graph's
+    /// copy) and running it again finishes. The item number each summary needs is added from the
+    /// item, when the item has one.
+    async fn migrate(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        let apply = match inv.inline_str("content")?.trim() {
+            "plan" => false,
+            "move" => true,
+            other => {
+                return Err(Error::InvalidArgument {
+                    name: "content".to_string(),
+                    detail: format!(
+                        "`{other}` is neither `plan` (a dry run that writes nothing) nor `move`"
+                    ),
+                })
+            }
+        };
+        require_session_graph(inv, true, "moving the ledger's summaries")?;
+        let ledger = client.ledger().clone();
+        let rows = client
+            .select(&format!(
+                "SELECT ?s ?p ?o ?n WHERE {{ {} }} ORDER BY ?s ?p ?o",
+                client.in_graph(&format!(
+                    "?s <{type_}> <{class}> ; ?p ?o . \
+                     OPTIONAL {{ ?s <{on}> ?item . ?item <{number}> ?n }}",
+                    type_ = v::ext::TYPE,
+                    class = v::SESSION_SUMMARY_CLASS,
+                    on = v::SESSION_ITEM,
+                    number = v::NUMBER,
+                ))
+            ))
+            .await?;
+        // Each summary: its own triples as read, the triple to add for its number, and its
+        // session id and number for the plan.
+        struct Found {
+            triples: Vec<String>,
+            add: Option<String>,
+            id: String,
+            number: Option<i64>,
+        }
+        let mut found: BTreeMap<String, Found> = BTreeMap::new();
+        for row in &rows {
+            let (Some(s), Some(p), Some(o)) = (row.get("s"), row.get("p"), row.get("o")) else {
+                continue;
+            };
+            let entry = found.entry(s.value.clone()).or_insert_with(|| Found {
+                triples: Vec::new(),
+                add: None,
+                id: s
+                    .value
+                    .strip_prefix(SESSION_PREFIX)
+                    .unwrap_or(&s.value)
+                    .to_string(),
+                number: None,
+            });
+            let triple = format!(
+                "{} {} {} .",
+                sparql::term(&s.term("s")?),
+                sparql::term(&p.term("p")?),
+                sparql::term(&o.term("o")?)
+            );
+            if !entry.triples.contains(&triple) {
+                entry.triples.push(triple);
+            }
+            if p.value == v::SESSION_ITEM_NUMBER {
+                entry.number = o.value.parse().ok();
+                entry.add = None;
+            } else if entry.number.is_none() {
+                if let Some(n) = row.get("n").and_then(|n| n.value.parse::<i64>().ok()) {
+                    entry.number = Some(n);
+                    entry.add = Some(format!(
+                        "{} <{}> \"{n}\"^^<{}> .",
+                        sparql::term(&s.term("s")?),
+                        v::SESSION_ITEM_NUMBER,
+                        v::ext::XSD_INTEGER
+                    ));
+                }
+            }
+        }
+        let from = ledger.graph();
+        let to = ledger.session_graph();
+        if found.is_empty() {
+            return Ok(plain(format!(
+                "{}: no session summaries in {from} to move; nothing written\n",
+                ledger.name()
+            )));
+        }
+        let quads: usize = found.values().map(|f| f.triples.len()).sum();
+        if !apply {
+            let mut text = format!(
+                "{}: {} ({}) would move from {from} to {to}. This is a plan: nothing was \
+                 written\n",
+                ledger.name(),
+                summaries_counted(found.len()),
+                triples_counted(quads)
+            );
+            for summary in found.values() {
+                let item = summary
+                    .number
+                    .map(|n| ledger.number(n))
+                    .unwrap_or_else(|| "an item with no number".to_string());
+                text.push_str(&format!(
+                    "  session {} on {item}, {}\n",
+                    summary.id,
+                    triples_counted(summary.triples.len())
+                ));
+            }
+            text.push_str("To move them, send `move` to this resource\n");
+            return Ok(plain(text));
+        }
+        let all: Vec<&Found> = found.values().collect();
+        for chunk in all.chunks(MOVE_BATCH) {
+            let read: String = chunk
+                .iter()
+                .flat_map(|f| f.triples.iter())
+                .map(|t| format!("{t}\n"))
+                .collect();
+            let added: String = chunk
+                .iter()
+                .filter_map(|f| f.add.as_ref())
+                .map(|t| format!("{t}\n"))
+                .collect();
+            client
+                .update_session(&format!(
+                    "INSERT DATA {{ {} }}",
+                    client.in_session_graph(&format!("{read}{added}"))
+                ))
+                .await?;
+            client
+                .update(&format!("DELETE DATA {{ {} }}", client.in_graph(&read)))
+                .await?;
+        }
+        Ok(plain(format!(
+            "{}: moved {} ({}) from {from} to {to}\n",
+            ledger.name(),
+            summaries_counted(found.len()),
+            triples_counted(quads)
+        )))
+    }
+
     async fn source(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Summaries)?);
+        require_session_graph(inv, false, "reading the ledger's sessions")?;
         let want = wanted_face(inv, &SESSION_FACES)?;
         let limit = match parse_limit(inv, 50)? {
             0 => 500,
