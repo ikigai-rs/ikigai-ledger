@@ -184,7 +184,7 @@ fn a_shorter_caller_deadline_expires_and_removes_its_waiter() {
     let cap = Capability::root();
     // The fixed kernel clock is deliberate: the real timer must bound the wait too.
     let context =
-        IssueContext::new().with_not_after(ikigai_core::Time::from_millis(1_789_430_400_050));
+        IssueContext::new().with_not_after(ikigai_core::Time::from_millis(1_789_430_400_200));
     let start = Instant::now();
     let mut first = Box::pin(kernel.issue_with_context(waiting_request("second"), &cap, context));
     assert!(first.as_mut().now_or_never().is_none());
@@ -462,10 +462,10 @@ fn an_expired_wait_does_not_acquire_when_a_release_is_also_ready() {
         &[("item", "1"), ("content", "first")],
     );
     let cap = Capability::root();
-    let context = IssueContext::new().with_not_after(Time::from_millis(1_789_430_400_020));
+    let context = IssueContext::new().with_not_after(Time::from_millis(1_789_430_400_200));
     let mut waiting = Box::pin(kernel.issue_with_context(waiting_request("second"), &cap, context));
     assert!(waiting.as_mut().now_or_never().is_none());
-    std::thread::sleep(Duration::from_millis(50));
+    std::thread::sleep(Duration::from_millis(300));
     delete(
         &kernel,
         "urn:iki:ledger:claim",

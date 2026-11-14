@@ -272,7 +272,9 @@ impl ClaimEndpoint {
                     }
                     expires_in = item
                         .lease_expires
-                        .map(|ends| Duration::from_millis(ends.saturating_sub(now)));
+                        // Browser timers have a limited millisecond range. A lease
+                        // beyond this request's budget needs no earlier wakeup.
+                        .map(|ends| Duration::from_millis(ends.saturating_sub(now)).min(duration));
                 }
                 let expiry = async {
                     match expires_in {
