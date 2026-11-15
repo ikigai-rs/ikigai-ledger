@@ -494,8 +494,9 @@ impl SpaceConfig {
     ///
     /// # Panics
     ///
-    /// On a ledger name the ledger grammar refuses, a shape that is not an IRI, or no kinds:
-    /// a shape that could never be checked should fail where the manifest is.
+    /// On a ledger name the ledger grammar refuses, a shape that is not an IRI, no kinds, or a
+    /// kind that is not checked yet (`claim`, `label`): a shape that could never be checked
+    /// should fail where the manifest is, not look enforced and do nothing.
     pub fn write_shape(
         mut self,
         ledger: &str,
@@ -510,6 +511,14 @@ impl SpaceConfig {
         }
         if kinds.is_empty() {
             panic!("a write shape `{shape}` governs no kind of write");
+        }
+        if let Some(kind) = kinds.iter().find(|k| !k.is_checked()) {
+            panic!(
+                "a write shape `{shape}` governs `{}`, and the ledger does not check a {} \
+                 against a shape yet. Only report, close and comment can be governed today",
+                kind.name(),
+                kind.name(),
+            );
         }
         self.write_shapes.push(crate::shapes::WriteShape {
             ledger: ledger.name().to_string(),

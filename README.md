@@ -2134,7 +2134,9 @@ let config = SpaceConfig::default()
 - ⚠ **A shape that fails to load refuses nothing**: an unreadable shape, or no validator bound,
   lets the write through and records `ledger-shape-unloaded` on the trace, naming the shape and
   the error.
-- `claim` and `label` are named kinds a configuration may list, and are **not checked yet**.
+- ⚠ **Only `report`, `close` and `comment` can be governed today.** `claim` and `label` are
+  not checked yet, so a shape that lists either one is refused when the manifest is built (a
+  panic in `write_shape`), rather than looking enforced and doing nothing.
 
 `tests/write_shapes.rs` holds all of this.
 

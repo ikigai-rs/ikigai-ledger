@@ -1,9 +1,10 @@
 //! **Write shapes** (ledger #3724): a pre-write check, so a SHACL shape can refuse or warn on a
-//! claim, a hand-back, a comment, a label or a close before it lands.
+//! hand-back, a comment or a close before it lands.
 //!
 //! A host lists shapes per ledger with [`crate::SpaceConfig::write_shape`]. Each one names a
 //! shapes graph by IRI (a resource, read through the kernel when the write is made), the
-//! [`WriteKind`]s it governs and its [`Outcome`]. **Off by default**: with no shape configured a
+//! [`WriteKind`]s it governs and its [`Outcome`]. Today a shape can govern `report`, `close` and
+//! `comment`; `claim` and `label` are refused when the manifest is built (see below). **Off by default**: with no shape configured a
 //! write does exactly what it did before, and issues nothing more.
 //!
 //! # What is validated: the write's would-be graph
@@ -18,8 +19,14 @@
 //! | `comment`, `report` | `<{item}:comment:pending> a ledger:Comment ; ledger:onItem <item> ; ledger:body "…"` (`report` is a comment with `handback=true`) |
 //!
 //! So "a close carries evidence" is a shape on `ledger:StatusEvent` with `sh:minCount 1` on
-//! `ledger:evidence`. The `claim` and `label` kinds are named so a configuration can list them,
-//! and are not checked yet: a shape configured only for them refuses nothing.
+//! `ledger:evidence`.
+//!
+//! # `claim` and `label` are not checked yet, so they are refused at the manifest
+//!
+//! [`WriteKind::Claim`] and [`WriteKind::Label`] exist so the words are reserved, but no would-be
+//! graph is built for those writes yet. A shape that listed them would look enforced and not be,
+//! so [`crate::SpaceConfig::write_shape`] panics when the manifest is built if a shape lists
+//! either one, the same way it refuses a shape that is not an IRI.
 //!
 //! # Outcomes
 //!
@@ -56,13 +63,15 @@ pub const VALIDATE: &str = "urn:shacl:validate";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum WriteKind {
-    /// Taking a claim. Named, not yet checked.
+    /// Taking a claim. **Not checked yet**: a shape that lists it is refused when the manifest
+    /// is built.
     Claim,
     /// A hand-back: a comment with `handback=true`.
     Report,
     /// A close.
     Close,
-    /// Adding a label. Named, not yet checked.
+    /// Adding a label. **Not checked yet**: a shape that lists it is refused when the manifest
+    /// is built.
     Label,
     /// Any comment, a hand-back included.
     Comment,
@@ -78,6 +87,15 @@ impl WriteKind {
             WriteKind::Close => "close",
             WriteKind::Label => "label",
             WriteKind::Comment => "comment",
+        }
+    }
+
+    /// Whether the ledger builds a would-be graph for this kind of write and checks it: `true`
+    /// for `report`, `close` and `comment`, `false` for `claim` and `label`.
+    pub fn is_checked(self) -> bool {
+        match self {
+            WriteKind::Report | WriteKind::Close | WriteKind::Comment => true,
+            WriteKind::Claim | WriteKind::Label => false,
         }
     }
 }

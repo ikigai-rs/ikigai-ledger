@@ -278,3 +278,47 @@ fn a_ledger_without_shapes_behaves_as_today() {
 fn a_shape_with_no_kinds_fails_at_the_manifest() {
     let _ = SpaceConfig::default().write_shape("default", SHAPE, &[], ShapeOutcome::Warn);
 }
+
+// `claim` and `label` are not checked yet, so a shape that lists them would look enforced and do
+// nothing. It is refused where the manifest is built instead.
+#[test]
+#[should_panic(
+    expected = "governs `claim`, and the ledger does not check a claim against a shape yet"
+)]
+fn a_shape_governing_claims_is_refused_at_the_manifest() {
+    let _ = SpaceConfig::default().write_shape(
+        "default",
+        SHAPE,
+        &[WriteKind::Close, WriteKind::Claim],
+        ShapeOutcome::Refuse,
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "governs `label`, and the ledger does not check a label against a shape yet"
+)]
+fn a_shape_governing_labels_is_refused_at_the_manifest() {
+    let _ = SpaceConfig::default().write_shape(
+        "default",
+        SHAPE,
+        &[WriteKind::Label],
+        ShapeOutcome::Warn,
+    );
+}
+
+#[test]
+fn only_report_close_and_comment_are_checked() {
+    let checked: Vec<_> = [
+        WriteKind::Claim,
+        WriteKind::Report,
+        WriteKind::Close,
+        WriteKind::Label,
+        WriteKind::Comment,
+    ]
+    .into_iter()
+    .filter(|k| k.is_checked())
+    .map(WriteKind::name)
+    .collect();
+    assert_eq!(checked, ["report", "close", "comment"]);
+}
