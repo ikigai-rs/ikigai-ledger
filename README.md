@@ -23,7 +23,7 @@ $ sink urn:iki:ledger:link item=#2 type=blocks <<< "#1"
 linked #2 blocks #1
 
 $ source urn:iki:ledger:next
- 1.    #2  open    p0  Publish ikigai-store 0.2.1  [core]
+ 1.    #2  open    priority 0  Publish ikigai-store 0.2.1  [core]
     p0 — priority 0; last updated 2026-09-15T00:00:04.000Z
 
 policy: priority-recency (weighs priority, recency, number)
@@ -736,13 +736,13 @@ SPARQL (ledger #1454). Now both ends do:
 
 ```text
 $ source urn:iki:ledger:items parent=12 status=all
-#14  open    p-  Arc one
-#15  closed  p-  Arc two
+#14  open    no priority set  Arc one
+#15  closed  no priority set  Arc two
 …
 $ source urn:iki:ledger:count parent=12
 1
 $ source urn:iki:ledger:item:12
-#12  open    p1  The goal
+#12  open    priority 1  The goal
   …
   child:    urn:iki:ledger:default:item:01m7…
   child:    urn:iki:ledger:default:item:01m8…
@@ -769,9 +769,9 @@ the subject's IRI and whether it is open, nothing else:
 $ sink urn:iki:ledger:cli:link item=4 content=acme#7 type=blocks      # or content=<acme#7's IRI>
 linked cli#4 blocks acme#7
 $ source urn:iki:ledger:acme:next
-nothing is ready (1 open item(s) excluded: acme#7 blocked by urn:iki:ledger:cli:item:01m6… in the ledger cli)
+nothing is ready (1 open item excluded: acme#7 blocked by urn:iki:ledger:cli:item:01m6… in the ledger cli)
 $ source urn:iki:ledger:acme:item:7                                    # under acme's grants only
- acme#7  open    p-  Document the flag
+ acme#7  open    no priority set  Document the flag
   …
   blocked-by: urn:iki:ledger:cli:item:01m6… (open; in the ledger cli, not readable under your grants)
 ```
@@ -1234,7 +1234,7 @@ can ask what is waiting for it without labeling anything:
 
 ```text
 $ source urn:iki:ledger:next drain=review-gate
- 1.    #1  open    p1  Review the schema change
+ 1.    #1  open    priority 1  Review the schema change
     p1 — priority 1; last updated 2026-09-15T00:00:43.000Z
 
 policy: priority-recency (weighs priority, recency, number)

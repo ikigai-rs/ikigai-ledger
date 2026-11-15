@@ -1178,8 +1178,12 @@ impl Endpoint for DoctorEndpoint {
             );
             for problem in &problems {
                 text.push_str(&format!(
-                    "\n  {:<14} {}\n  {:<14} remedy: {}\n",
-                    problem.check, problem.detail, "", problem.remedy
+                    "\n  {:<14} {}\n  remedy for {} on {}: {}\n",
+                    problem.check,
+                    problem.detail,
+                    problem.check,
+                    problem.item.display.as_deref().unwrap_or(&problem.item.iri),
+                    problem.remedy
                 ));
             }
             text.push_str(&format!(

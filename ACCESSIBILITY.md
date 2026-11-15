@@ -10,7 +10,7 @@ and how to report a barrier. It is not a conformance claim. Adapted from the
 | Status | Evaluation in progress. No conformance claim. |
 | Owner | the maintainers of this repository |
 | Report a barrier | [a GitHub issue](https://github.com/ikigai-rs/ikigai-ledger/issues/new?labels=accessibility) with the `accessibility` label; anything security-sensitive through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-ledger/security/advisories/new) |
-| Last reviewed | 2026-11-12 |
+| Last reviewed | 2026-11-15 |
 
 ## What it emits that people read
 
@@ -18,10 +18,11 @@ This is a library: the ledger's endpoints, which a host binds. Its default face 
 that people read in a terminal, and it also answers JSON (`as=application/json`) and Turtle.
 
 - **An item's line and detail** (`Item::line` and `Item::detail` in `src/model.rs`): one fixed
-  line per item, `#12  open    p1  Title  [labels]  claimed:holder`, and under it, in the
+  line per item, `#12  open    priority 1  Title  [labels]  claimed:holder`, and under it, in the
   detail, labeled lines (`iri:`, `filed:`, `updated:`, `author:`, `committer:`, `about:`,
   `blocks:`, `child:`, `blocked-by:` …), the body, and the comments, each stamped with its time and author
-  (`Comment::render`); a comment that rejected a hand-back has a `rejects:` line per hand-back
+  (`comment by … at …:`, `Comment::render`); a comment that rejected a hand-back has a
+  `rejects:` line per hand-back
   under its stamp, naming that comment. A dispatch note (ledger #3718) has the line `note to
   worker-1 at epoch 2, sent under the dispatcher grant` under its stamp, saying in words what
   kind of comment it is, who it is for and under which grant; a comment that acknowledges a
@@ -87,7 +88,8 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   recorded 1 lapse(s)` and the same sentence per lapse, indented, ending `; labeled needs-person`
   when the ledger's route added a label; a sweep that wrote nothing says so and why. An item's
   history names a lapse in words: `lapse worker-1 at epoch 1, whose lease ran out at …`.
-- **The doctor and lifecycles**: the doctor's findings, each with a `remedy:` line; a
+- **The doctor and lifecycles**: the doctor's findings, each with a
+  `remedy for <check> on <item>:` line; a
   lifecycle's states, one per line (`Lifecycle::plain` in `src/lifecycle.rs`), each saying in
   words where it may go when the lifecycle declares moves (`moves to: queued`, `moves to: nowhere`).
 - **Refusals**: `InvalidArgument` naming the argument with a sentence that says what is
@@ -134,10 +136,10 @@ It does not evaluate user-authored content or a host's presentation:
 ## How it is tested
 
 Every named check has a result: Pass, Fail or Blocked. Pass covers only the stated check,
-not overall accessibility. Executed checks below were run on 2026-11-12 against main commit
-[`521956a`](https://github.com/ikigai-rs/ikigai-ledger/commit/521956a7b46e13f324739e208810a35501dbd211),
-before this documentation update. The test command is `cargo test`, using Cargo 1.99.0
-(5f94df478 2026-08-27) and rustc 1.99.0 (b940084d7 2026-09-28).
+not overall accessibility. The Rust checks below were rerun on 2026-11-15 for ledger #3625,
+using `cargo test`, Cargo 1.99.1 (5f94df478 2026-08-27) and rustc 1.99.1
+(58cf8f9c3 2026-10-13). The new readability checks also ran separately with
+`cargo test --test faces`. The source-review rows say what was inspected and when.
 Pass applies to executed tests only; ignored performance measurements were not run.
 These are correctness and stability tests, not an automated accessibility checker. CI
 repeats the Rust tests through `.github/workflows/ci.yml`; it does not repeat the manual
@@ -146,13 +148,13 @@ source review or run assistive technology. The result format follows the
 
 | Check | Result | Evidence |
 |---|---|---|
-| Plain item detail, listing, write answers, next, count and keyed detail | Pass | `cargo test`: `tests/faces.rs` pins the plain faces byte for byte, including `the_plain_item_detail_is_unchanged`, `the_plain_listing_is_unchanged`, `the_plain_write_answers_are_unchanged`, `the_plain_next_is_unchanged`, `the_plain_count_is_the_bare_number` and `a_keyed_items_plain_detail_gains_one_line`. Does not test how a terminal or assistive technology presents them. |
+| Plain item detail, listing, write answers, next, count and keyed detail | Pass | `cargo test`: `tests/faces.rs` pins the plain faces byte for byte, including `the_plain_item_detail_uses_readable_priority_and_comment_groups`, `the_plain_listing_uses_readable_priority`, `the_plain_write_answers_are_unchanged`, `the_plain_next_uses_real_plurals`, `the_plain_count_is_the_bare_number` and `a_keyed_items_plain_detail_gains_one_line`. Does not test how a terminal or assistive technology presents them. |
 | Epoch check and fenced refusals | Pass | `cargo test`: `tests/claim_epoch.rs`, including `the_check_answers_each_state`, `each_write_with_a_stale_epoch_is_refused_and_writes_nothing` and `each_write_with_the_epoch_of_a_released_claim_is_refused`. Checks wording and write safety; no usability evaluation. |
 | Empty selection, cycle and policy refusals | Pass | `cargo test`: `tests/selection.rs`, including `an_empty_ledger_says_nothing_is_ready_rather_than_failing`, `a_block_cycle_is_refused_with_the_cycle_named` and `an_unknown_policy_is_refused_and_the_known_ones_are_named`. Checks explanations for these cases, not all possible refusals. |
 | Lease faces, doctor remedies, children and missing-resource errors | Pass | `cargo test`: `tests/leases_doctor.rs` (including `a_claim_without_a_lease_renders_as_it_always_did` and doctor tests), `tests/children.rs` (`every_face_of_an_item_names_its_children`) and `tests/endpoints.rs` (`a_ledger_without_a_store_says_what_is_missing`, `an_unknown_item_is_not_found_rather_than_silently_ignored`). Assertions cover specific output and behavior, not comprehension. |
 | Additional output and refusal regressions named in change history | Pass | `cargo test`: `src/lifecycle.rs` unit tests and `tests/cross_ledger_links.rs`, `tests/imported_history.rs`, `tests/lifecycle_moves.rs`, `tests/lifecycle_version.rs`, `tests/next_state_filter.rs`, `tests/listing_union.rs`, `tests/priority_filter.rs`, `tests/listing_sort.rs`, `tests/dated_replay.rs` and `tests/audit_minors.rs`. Current rerun of those tests; historical observations below are not separate current checks. |
-| Source review of plain output rules | Pass | Read `Item::line`, `Item::detail` and `Comment::render` in `src/model.rs`, `Selection::plain` in `src/select.rs`, `Lifecycle::plain` in `src/lifecycle.rs` and doctor rendering in `src/endpoints/flight.rs`, at the commit above. Supports the scoped rules above; does not establish every endpoint's wording or accessibility. |
-| Priority abbreviations, parenthesized plurals and indentation-only grouping | Fail | Source review on 2026-11-12: `src/model.rs` emits `p-` and `p0`–`p4` without expansion on the item line and indents comment bodies; `src/select.rs` emits `open item(s)`; `src/endpoints/flight.rs` indents remedies. Readability barriers remain; no assistive technology behavior was measured. |
+| Source review of plain output rules | Pass | Read `Item::line`, `Item::detail` and `Comment::render` in `src/model.rs`, `Selection::plain` in `src/select.rs`, `Lifecycle::plain` in `src/lifecycle.rs` and doctor rendering in `src/endpoints/flight.rs`, on 2026-11-15. Supports the scoped rules above; does not establish every endpoint's wording or accessibility. |
+| Item-line priorities, empty-selection plurals and comment/doctor grouping | Pass | Reproduced as failing tests before the fix on 2026-11-15. `cargo test --test faces`: `plain_readability_priority_words_cover_every_value_and_unset`, `plain_readability_empty_selection_uses_the_counts_plural`, `plain_readability_groups_name_their_relationships_without_indentation` and `plain_readability_doctor_remedies_name_the_finding_without_indentation`. Item lines say `priority 0`–`priority 4` or `no priority set`; empty `next` says `1 open item` or `0/2/3 open items`; comment stamps say `comment by … at …:` and doctor remedies name their check and item. Reviewed the three renderers on 2026-11-15; consumer inventory: [plain-face-consumers.md](docs/plain-face-consumers.md). Cargo/rustc 1.99.1. This scoped check does not cover other parenthesized plurals or measure assistive technology behavior. |
 | Browser presentation, zoom, reflow, contrast and themes | Blocked | No browser evaluation run. This library emits text, JSON and Turtle rather than a page; evaluation requires a host's rendered interface. No browser or version to report. |
 | Manual keyboard | Blocked | No person performed a keyboard pass in a host or terminal for this review. Library tests do not establish keyboard usability. |
 | Automated accessibility checker | Blocked | No axe or other accessibility checker run; no rendered host interface was evaluated. Rust tests are not an accessibility checker. |
@@ -164,16 +166,12 @@ source review or run assistive technology. The result format follows the
 
 ## Known limitations
 
-Identified by source review on 2026-10-31; the abbreviation, plural and indentation
-patterns were rechecked on 2026-11-12. Assistive technology effects below are potential
-barriers, not observed results:
+Identified by source review on 2026-10-31 and rechecked on 2026-11-15.
+Assistive technology effects below are potential barriers, not observed results:
 
-- **Abbreviations on the item line.** Priority is `p0` to `p4`, and `p-` means none; nothing on
-  the line says so, which may make the priority unclear when read aloud.
-- **Parenthesized plurals**: `3 item(s)`, `1 comment(s)`, `2 open item(s) excluded`, whose
-  punctuation may interrupt reading aloud.
-- **Grouping by indentation.** A comment's body belongs to its stamp, and a `remedy:` to its
-  finding, by indentation only, which may not convey those relationships when read aloud.
+- **Other parenthesized plurals** remain, including listing totals (`3 item(s)`), comment
+  counts (`1 comment(s)`) and doctor totals (`1 problem(s)`); punctuation may interrupt
+  reading aloud. The empty-selection count now uses a real singular or plural.
 - **Long identifiers**: write answers and the `iri:` line carry the item's full IRI, whose
   opaque id can be cumbersome to hear or navigate; the short
   `#12` beside it is the readable handle.
@@ -207,6 +205,7 @@ accessibility run is promoted to Pass.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 | Ledger #3625 expands item-line priorities, uses real plurals in empty `next`, labels comment stamps and names each doctor remedy's check and item. Updated `tests/faces.rs` golden strings deliberately after auditing gonk, starter and watch consumers; JSON, Turtle and machine-read write answers stay stable. New regression tests failed before the fix and pass afterward. No assistive technology was used. |
 | 2026-11-12 | Converted the evaluation record to explicit Pass, Fail and Blocked results, reran the named Rust tests on main, and recorded source-review limits and unrun assistive technology checks. |
 | 2026-11-11 | Lifecycle loading refuses multiple values or a nonliteral value for a state's name, order, flight flag or drain. Each refusal names the state and field and says to keep or give it one literal value. The unit tests in `src/lifecycle.rs` reproduce the previously accepted documents and pin both new refusal sentences. A recoverable delete racing a cross-ledger link now gives the existing link refusal; `tests/cross_ledger_links.rs` forces the race for blocks and parent links. Existing plain faces are covered by `tests/faces.rs`; no browser, automated accessibility checker or assistive technology was used. |
 | 2026-11-14 | Dispatch notes (ledger #3718) add a write answer, a read face, a renewal suffix and refusals, each saying in words the kind of comment, its recipient, its epoch and its grant; no sign alone marks a note. `tests/dispatch_note_gap.rs` pins the text. Existing plain faces are unchanged except that a renewal with unread notes gains its suffix. An acknowledgment (`acks=`) is the holder's; anyone else's is refused in one sentence naming the holder and its principal, saying that acknowledgments are the holder's and that nothing was written. No browser, automated accessibility checker or assistive technology was used. |

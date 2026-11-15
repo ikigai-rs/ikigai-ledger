@@ -515,8 +515,13 @@ impl Selection {
     pub fn plain(&self) -> String {
         if self.ranked.is_empty() {
             return format!(
-                "nothing is ready ({} open item(s) excluded: {})\npolicy: {}\n",
+                "nothing is ready ({} open {} excluded: {})\npolicy: {}\n",
                 self.excluded.len(),
+                if self.excluded.len() == 1 {
+                    "item"
+                } else {
+                    "items"
+                },
                 if self.excluded.is_empty() {
                     "the ledger has no open items matching the filter".to_string()
                 } else {

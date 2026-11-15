@@ -125,7 +125,7 @@ Following `ACCESSIBILITY.md`: the kind and recipient are said in words, never by
 
 ```text
 2 comment(s):
-  2026-11-14T22:40:00.000Z urn:iki:gonk:passkey:dddd (verified)
+  comment by urn:iki:gonk:passkey:dddd (verified) at 2026-11-14T22:40:00.000Z:
     note to worker-1 at epoch 2, sent under the dispatcher grant
     Stop and rebase on main first
 ```
