@@ -1,7 +1,9 @@
 # Design: a dispatch note, from the dispatcher to the claim's holder
 
-Status: **proposed, not built** (ledger #3710). This document is the design the item asks for
-before any code. Nothing in it is a resource, grant or vocabulary term today. Related: the
+Status: **built** (ledger #3718), from this design (ledger #3710), with its two open
+questions decided: `note` has no grant of its own, and notes accept `key=`. Built as written
+except where noted: the renew answer is plain text only (`claim` has no JSON answer), and its
+count is of notes not yet acknowledged (`, 1 unread note`). Related: the
 stalled-claim item, which is the main case where a dispatcher needs to say something to a
 running worker.
 

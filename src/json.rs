@@ -181,6 +181,37 @@ pub struct Comment {
     /// other comment. Added for ledger #3071.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejects: Vec<String>,
+    /// `note` for a dispatch note, `comment` for any other comment. Added for ledger #3718.
+    #[serde(default = "comment_kind")]
+    pub kind: String,
+    /// Who a dispatch note is for: the holder label and, when the claim had one, its
+    /// principal. Missing on any other comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<NoteTo>,
+    /// The claim epoch a dispatch note was sent at. Missing on any other comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
+    /// The grant a dispatch note was admitted under. Missing on any other comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
+    /// The dispatch notes this comment acknowledges, sorted. Missing when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acks: Vec<String>,
+}
+
+fn comment_kind() -> String {
+    "comment".to_string()
+}
+
+/// Who a dispatch note is for (ledger #3718).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct NoteTo {
+    /// The holder label of the claim it was sent to.
+    pub holder: String,
+    /// The claim's principal, when it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
 }
 
 /// One item, the same object wherever it appears — `item:{id}`, each row of `items`, each
@@ -855,6 +886,19 @@ pub(crate) fn comment(comment: &model::Comment) -> Comment {
             &[("created", comment.created_claimed)],
         ),
         rejects: comment.rejects.clone(),
+        kind: if comment.note.is_some() {
+            "note"
+        } else {
+            "comment"
+        }
+        .to_string(),
+        to: comment.note.as_ref().map(|note| NoteTo {
+            holder: note.holder.clone(),
+            principal: note.principal.clone(),
+        }),
+        epoch: comment.note.as_ref().map(|note| note.epoch),
+        grant: comment.note.as_ref().map(|note| note.grant.clone()),
+        acks: comment.acks.clone(),
     }
 }
 

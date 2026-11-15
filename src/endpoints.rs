@@ -7,6 +7,7 @@
 //! urn:iki:ledger:{ledger}:item:{id}      Source Sink Delete  one item, edit it, delete it
 //! urn:iki:ledger:{ledger}:append         Sink                file a new item
 //! urn:iki:ledger:{ledger}:comment        Sink                append a comment
+//! urn:iki:ledger:{ledger}:note           Sink                a dispatcher's note to the holder
 //! urn:iki:ledger:{ledger}:close          Sink                close with a reason
 //! urn:iki:ledger:{ledger}:reopen         Sink                undo a close
 //! urn:iki:ledger:{ledger}:claim          Source Sink Delete  is an epoch current / take it / hand it back
@@ -24,6 +25,7 @@
 //! urn:iki:ledger:{ledger}:item:{id}:holder:{holder}  Exists       is it held by them?
 //! urn:iki:ledger:{ledger}:item:{id}:closed           Exists       is it closed?
 //! urn:iki:ledger:{ledger}:item:{id}:history          Source       every event, oldest first
+//! urn:iki:ledger:{ledger}:item:{id}:notes            Source       the notes to my claim
 //! urn:iki:ledger:{ledger}:history                    Sink         an importer's past events
 //! ```
 //!
@@ -378,6 +380,7 @@ mod flight;
 mod history;
 mod import;
 mod lapse;
+mod note;
 mod session;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
@@ -570,6 +573,13 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             },
         )
         .bind(ItemPartGrammar::part("history"), history::HistoryEndpoint)
+        .bind(ItemPartGrammar::part("notes"), note::NotesEndpoint)
+        .bind(
+            LedgerGrammar::action("note"),
+            note::NoteEndpoint {
+                participants: participants.clone(),
+            },
+        )
         .bind(ItemPartGrammar::part("sessions"), session::SessionsEndpoint)
         .bind(
             LedgerGrammar::action("sessions"),
@@ -1189,7 +1199,18 @@ async fn write_comment(
     who: &Attribution,
     now: u64,
 ) -> Result<String> {
-    write_keyed_comment(client, item, text, who, now, None, Handback::Unchanged, "").await
+    write_keyed_comment(
+        client,
+        item,
+        text,
+        who,
+        now,
+        None,
+        Handback::Unchanged,
+        "",
+        &CommentExtra::default(),
+    )
+    .await
 }
 
 /// What a comment does to its item's hand-back state (`ledger:awaiting`, ledger #1199).
@@ -1274,6 +1295,18 @@ fn handback_update(
     }
 }
 
+/// What a comment carries beyond the common write (ledger #3718): a dispatch note's epoch
+/// and grant, or the notes an acknowledgment names at its epoch.
+#[derive(Default)]
+pub(crate) struct CommentExtra<'a> {
+    /// `(epoch, grant)` when the comment is a dispatch note.
+    note: Option<(u64, &'a str)>,
+    /// The notes this comment acknowledges, each checked at [`acks_epoch`](Self::acks_epoch).
+    acks: &'a [String],
+    /// The epoch the acknowledged notes must have been sent at.
+    acks_epoch: u64,
+}
+
 /// [`write_comment`] with an optional key (ledger #1178): with one, the comment is written
 /// only while no comment in this ledger carries that key, and the modified stamp only with
 /// it.
@@ -1296,6 +1329,7 @@ async fn write_keyed_comment(
     key: Option<&str>,
     handback: Handback,
     fence: &str,
+    extra: &CommentExtra<'_>,
 ) -> Result<String> {
     let id = mint_id(now)?;
     let comment = client.ledger().comment(&id);
@@ -1311,6 +1345,40 @@ async fn write_keyed_comment(
     );
     triples.push_str(&who.triples(&comment, now));
     triples.push_str(&who.date_sources(&comment));
+    // ★ A dispatch note's recipient is the claim the fence found (ledger #3718), bound in the
+    // same update: `?fenceHolder` is the holder at exactly the epoch named, and the principal
+    // beside it, so no argument can address one.
+    let mut note_where = String::new();
+    if let Some((epoch, grant)) = extra.note {
+        triples.push_str(&format!(
+            "\n<{comment}> <{type_}> <{class}> ; <{holder}> ?fenceHolder ; <{to}> ?noteTo ; \
+             <{epoch_p}> {epoch} ; <{grant_p}> <{grant}> .",
+            type_ = v::ext::TYPE,
+            class = v::DISPATCH_NOTE_CLASS,
+            holder = v::NOTE_HOLDER,
+            to = v::NOTE_TO,
+            epoch_p = v::NOTE_EPOCH,
+            grant_p = v::NOTE_GRANT,
+        ));
+        note_where = client.in_graph(&format!(
+            "OPTIONAL {{ <{item}> <{}> ?notePrincipal }} BIND(COALESCE(?notePrincipal, \
+             ?fenceHolder) AS ?noteTo)",
+            v::CLAIM_PRINCIPAL
+        ));
+    }
+    // ★ An acknowledgment names only notes on this item addressed to the claim at the
+    // comment's own epoch, checked in the update (ledger #3718).
+    let mut acks_guard = String::new();
+    for (epoch, note) in extra.acks.iter().map(|note| (extra.acks_epoch, note)) {
+        triples.push_str(&format!("\n<{comment}> <{}> <{note}> .", v::ACKS));
+        acks_guard.push_str(&client.in_graph(&format!(
+            "<{note}> <{}> <{}> ; <{}> <{item}> ; <{}> {epoch} .",
+            v::ext::TYPE,
+            v::DISPATCH_NOTE_CLASS,
+            v::ON_ITEM,
+            v::NOTE_EPOCH
+        )));
+    }
     // ★ The hand-back is in the SAME update as the comment (ledger #1199), so the evidence
     // and the state it puts the item in land together or not at all.
     if key.is_none() && handback != Handback::Set && fence.is_empty() {
@@ -1354,7 +1422,10 @@ async fn write_keyed_comment(
     } else {
         client.in_graph(fence)
     };
-    let free = format!("{} {open} {free}{fence}", client.in_graph(&live(item)));
+    let free = format!(
+        "{} {open} {free}{fence}{acks_guard}",
+        client.in_graph(&live(item))
+    );
     // ★ A hand-back names the holder label of the claim it finds (ledger #2819), read in the
     // update that writes it: the principal is the comment's committer, and two workers can
     // share one, so the label is what tells them apart. Nobody holding it names nobody, so the
@@ -1398,7 +1469,7 @@ async fn write_keyed_comment(
             ),
             handback_update(client, item, &comment, handback, &free, now),
             format!(
-                "INSERT {{ {} }} WHERE {{ {free} {holder} }}",
+                "INSERT {{ {} }} WHERE {{ {free} {holder} {note_where} }}",
                 client.in_graph(&triples)
             ),
         ]))
@@ -1421,6 +1492,8 @@ fn written(iri: &str, item: &str, text: &str, who: &Attribution, now: u64) -> js
         created_claimed: who.created.is_some(),
         created: who.created_or(now),
         rejects: Vec::new(),
+        note: None,
+        acks: Vec::new(),
     })
 }
 
@@ -3914,6 +3987,7 @@ impl Endpoint for CommentEndpoint {
             .map(model::parse_key)
             .transpose()?;
         let epoch = parse_epoch(inv)?;
+        let acks = note::parse_acks(inv, epoch)?;
         let now = now_ms(inv)?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let text = inv.inline_str("content")?;
@@ -3922,6 +3996,9 @@ impl Endpoint for CommentEndpoint {
                 name: "content".to_string(),
                 detail: "an empty comment says nothing and cannot be edited afterwards".to_string(),
             });
+        }
+        if let Some(epoch) = epoch {
+            note::check_acks(&client, &item, epoch, &acks).await?;
         }
         let who = attribution::resolve(
             inv,
@@ -3973,6 +4050,11 @@ impl Endpoint for CommentEndpoint {
             key.as_deref(),
             change,
             &fence_clause(&item.iri, epoch),
+            &CommentExtra {
+                note: None,
+                acks: &acks,
+                acks_epoch: epoch.unwrap_or_default(),
+            },
         )
         .await?;
         // A hand-back the write's guard refused: the item closed between the read above and the
@@ -4148,6 +4230,20 @@ impl Endpoint for CommentEndpoint {
                     .input(epoch_arg(
                         "the comment, and the hand-back it carries, is written",
                     ))
+                    .input(
+                        ArgSpec::new("acks")
+                            .summary(
+                                "The dispatch notes this comment acknowledges, by their IRIs, \
+                                 separated by commas (ledger #3718): each is recorded as \
+                                 `ledger:acks`, so the dispatcher can see the note was read. \
+                                 Needs `epoch=`, and each note must be on this item and \
+                                 addressed to the claim at that epoch; otherwise refused and \
+                                 nothing is written. Says `acknowledges note:` in text and \
+                                 `\"acks\"` in JSON.",
+                            )
+                            .class(v::ext::XSD_STRING)
+                            .optional(),
+                    )
                     .input(as_arg(&WRITE_FACES))
                     .output(PLAIN)
                     .output(JSON),
@@ -5683,7 +5779,18 @@ impl Endpoint for ClaimEndpoint {
                         previous.unwrap_or_default()
                     )
                 } else if renew {
-                    format!("{} renewed by {holder}{at}{until}\n", item.short())
+                    // ★ The heartbeat says when to look (ledger #3718): the notes to this
+                    // claim nobody has acknowledged yet, in words, only when there are some.
+                    let unread = match after.claim_epoch {
+                        Some(epoch) => note::unread(&client, &item.iri, epoch).await?,
+                        None => 0,
+                    };
+                    let notes = match unread {
+                        0 => String::new(),
+                        1 => ", 1 unread note".to_string(),
+                        n => format!(", {n} unread notes"),
+                    };
+                    format!("{} renewed by {holder}{at}{until}{notes}\n", item.short())
                 } else {
                     format!("{} claimed by {holder}{at}{until}\n", item.short())
                 }))

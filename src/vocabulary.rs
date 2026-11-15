@@ -133,6 +133,16 @@ term! {
     HAND_BACK => "handBack";
     /// `ledger:rejects` — on a comment that answered a hand-back, the hand-back (ledger #3071).
     REJECTS => "rejects";
+    /// `ledger:noteTo` — on a dispatch note, the claim's principal, or its holder label.
+    NOTE_TO => "noteTo";
+    /// `ledger:noteHolder` — on a dispatch note, the holder label of the claim it was sent to.
+    NOTE_HOLDER => "noteHolder";
+    /// `ledger:noteEpoch` — on a dispatch note, the claim epoch it was sent at.
+    NOTE_EPOCH => "noteEpoch";
+    /// `ledger:noteGrant` — on a dispatch note, the grant IRI the write was admitted under.
+    NOTE_GRANT => "noteGrant";
+    /// `ledger:acks` — on a worker's comment, a dispatch note it acknowledges (ledger #3718).
+    ACKS => "acks";
     /// `ledger:editKind` — which edit an edit event records.
     EDIT_KIND => "editKind";
     /// `ledger:stateFrom` — the state a `state` edit left, as the update found it.
@@ -160,6 +170,8 @@ term! {
     ITEM_CLASS => "Item";
     /// `ledger:Comment`
     COMMENT_CLASS => "Comment";
+    /// `ledger:DispatchNote` — a comment from the dispatcher to a claim's holder (ledger #3718).
+    DISPATCH_NOTE_CLASS => "DispatchNote";
     /// `ledger:Tombstone`
     TOMBSTONE_CLASS => "Tombstone";
     /// `ledger:Counter`
@@ -411,8 +423,9 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 23] = [
+pub const STRUCTURAL_CLASSES: [&str; 24] = [
     COMMENT_CLASS,
+    DISPATCH_NOTE_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
     LEDGER_CLASS,

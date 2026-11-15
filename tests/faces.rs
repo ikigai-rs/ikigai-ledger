@@ -310,7 +310,8 @@ fn the_json_item_document_is_schema_1() {
           "committer": null,
           "committed": "2026-09-15T00:00:00.000Z",
           "claimed_dates": []
-        }
+        },
+        "kind": "comment"
       }
     ],
     "defects": [],
@@ -400,7 +401,8 @@ fn the_json_items_document_is_schema_1() {
           "id": "urn:iki:ledger:default:comment:{c}",
           "author": null,
           "time": "2026-09-15T00:00:00.000Z",
-          "text": "not worth it"
+          "text": "not worth it",
+          "kind": "comment"
         }
       ],
       "defects": [],
@@ -595,7 +597,8 @@ fn the_json_next_document_is_schema_1() {
               "committer": null,
               "committed": "2026-09-15T00:00:00.000Z",
               "claimed_dates": []
-            }
+            },
+            "kind": "comment"
           }
         ],
         "defects": [],
@@ -682,7 +685,8 @@ fn the_json_write_answers_are_schema_1() {
       "committer": null,
       "committed": "2026-09-15T00:00:00.000Z",
       "claimed_dates": []
-    }
+    },
+    "kind": "comment"
   }
 }"##
     );
@@ -709,7 +713,8 @@ fn the_json_write_answers_are_schema_1() {
     "id": "urn:iki:ledger:default:comment:{b}",
     "author": null,
     "time": "2026-09-15T00:00:00.000Z",
-    "text": "see #1"
+    "text": "see #1",
+    "kind": "comment"
   }
 }"##
     );

@@ -22,8 +22,18 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   detail, labeled lines (`iri:`, `filed:`, `updated:`, `author:`, `committer:`, `about:`,
   `blocks:`, `child:`, `blocked-by:` …), the body, and the comments, each stamped with its time and author
   (`Comment::render`); a comment that rejected a hand-back has a `rejects:` line per hand-back
-  under its stamp, naming that comment. Whether an author or a date is verified or claimed is said in words in
+  under its stamp, naming that comment. A dispatch note (ledger #3718) has the line `note to
+  worker-1 at epoch 2, sent under the dispatcher grant` under its stamp, saying in words what
+  kind of comment it is, who it is for and under which grant; a comment that acknowledges a
+  note has an `acknowledges note:` line naming it. Whether an author or a date is verified or claimed is said in words in
   parentheses (`(verified)`, `(claimed by a delegate)`, `(claimed)`), never by a sign alone.
+- **Dispatch notes** (`src/endpoints/note.rs`): sending one answers `note to worker-1 at epoch 2,
+  sent under the dispatcher grant on acme#12 (<iri>)`. A refused note names the item, the epoch
+  asked for and the current claim, and says that the note was not sent (`acme#12 is held by
+  worker-2 at epoch 3, not epoch 2, so the note was not sent`). The worker's read,
+  `item:{id}:notes`, starts with a count line in words (`acme#12: 1 note to worker-1 at epoch
+  2:`, or `acme#12: no notes to worker-1 at epoch 2`), then each note's block as in the item's
+  detail. A renewal with notes nobody acknowledged ends `, 1 unread note` (`, 2 unread notes`).
 - **Listings** (`items`, `ledgers`, `count`): item lines and a total (`3 item(s)`); `count`
   answers a bare number. `items ledgers=alpha,beta` combines readable selected ledgers
   into one filtered page, keeping each row's existing `alpha#12` display (`#12` for
@@ -195,6 +205,7 @@ accessibility run is promoted to Pass.
 |---|---|
 | 2026-11-12 | Converted the evaluation record to explicit Pass, Fail and Blocked results, reran the named Rust tests on main, and recorded source-review limits and unrun assistive technology checks. |
 | 2026-11-11 | Lifecycle loading refuses multiple values or a nonliteral value for a state's name, order, flight flag or drain. Each refusal names the state and field and says to keep or give it one literal value. The unit tests in `src/lifecycle.rs` reproduce the previously accepted documents and pin both new refusal sentences. A recoverable delete racing a cross-ledger link now gives the existing link refusal; `tests/cross_ledger_links.rs` forces the race for blocks and parent links. Existing plain faces are covered by `tests/faces.rs`; no browser, automated accessibility checker or assistive technology was used. |
+| 2026-11-14 | Dispatch notes (ledger #3718) add a write answer, a read face, a renewal suffix and refusals, each saying in words the kind of comment, its recipient, its epoch and its grant; no sign alone marks a note. `tests/dispatch_note_gap.rs` pins the text. Existing plain faces are unchanged except that a renewal with unread notes gains its suffix. No browser, automated accessibility checker or assistive technology was used. |
 | 2026-10-31 | First version. |
 | 2026-11-01 | `close closed-at=` (ledger #2819) adds refusals; each names the argument, the reason and the remedy in words. No plain face changed: `tests/faces.rs` passes unchanged. |
 | 2026-11-01 | Aliases (ledger #2828) add write answers (`scheme gh owned by …`, `gh:acme/web#12 names acme#12 …`, `… no longer names …`) and refusals, each naming in words the alias, the scheme, its owner or the item that already holds it, and the grant that would do. An alias value appears percent-encoded in an IRI (`acme%2Fweb%2312`), which may be cumbersome when read aloud; the decoded value is what every answer shows. No existing plain face changed: `tests/faces.rs` passes unchanged. |

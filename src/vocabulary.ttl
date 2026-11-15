@@ -71,6 +71,11 @@ ledger:Comment a rdfs:Class ;
     rdfs:label "Comment" ;
     rdfs:comment "A note appended to an item, stamped and attributed, never edited in place. Skolemized as urn:iki:ledger:{ledger}:comment:{id}." .
 
+ledger:DispatchNote a rdfs:Class ;
+    rdfs:subClassOf ledger:Comment ;
+    rdfs:label "Dispatch note" ;
+    rdfs:comment "A comment from the ledger's dispatcher (a caller holding the close or write grant, with a verified principal) to the holder of an item's current claim, written through `urn:iki:ledger:{ledger}:note item= epoch=` (ledger #3718). The ledger records who it is for (ledger:noteTo, ledger:noteHolder), which claim (ledger:noteEpoch) and the grant that admitted it (ledger:noteGrant), all read by the write itself, never from the caller's text: the recipient is the claim at that epoch, and a note to an epoch that is not current is refused and nothing is written. A note carries no capability and changes no claim, lease, label, state or grant. Append-only like every comment." .
+
 ledger:Tombstone a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
     rdfs:label "Tombstone" ;
@@ -631,6 +636,34 @@ ledger:rejects a rdf:Property ;
     rdfs:range ledger:Comment ;
     rdfs:label "rejects" ;
     rdfs:comment "From a comment that took its item off ledger:awaiting (comment rejects=true, or any comment from a caller holding the close grant) to each hand-back on the item that nothing had yet rejected, written in the same update as the clearing. A hand-back written with neither ledger:handBack nor ledger:handedBackBy cannot be named. A close or a reopen also clears ledger:awaiting and writes none: neither says the evidence did not hold." .
+
+ledger:noteTo a rdf:Property ;
+    rdfs:domain ledger:DispatchNote ;
+    rdfs:label "note to" ;
+    rdfs:comment "Who a dispatch note is for: the principal of the claim it was sent to, or the claim's holder label when the claim has no principal. Read from the claim in the update that writes the note." .
+
+ledger:noteHolder a rdf:Property ;
+    rdfs:domain ledger:DispatchNote ;
+    rdfs:range xsd:string ;
+    rdfs:label "note holder" ;
+    rdfs:comment "The holder label of the claim a dispatch note was sent to, read from the claim in the update that writes the note." .
+
+ledger:noteEpoch a rdf:Property ;
+    rdfs:domain ledger:DispatchNote ;
+    rdfs:range xsd:integer ;
+    rdfs:label "note epoch" ;
+    rdfs:comment "The claim epoch a dispatch note was sent at. The note was written only while the item was claimed at exactly this epoch, and it is addressed to that claim alone: a later claim, even by the same worker, is not its recipient." .
+
+ledger:noteGrant a rdf:Property ;
+    rdfs:domain ledger:DispatchNote ;
+    rdfs:label "note grant" ;
+    rdfs:comment "The grant a dispatch note was admitted under: the ledger's close grant (urn:cap:ledger:close:{ledger}) or its write grant (urn:cap:ledger:write:{ledger}). A record of authority, never a capability: holding a note grants nothing." .
+
+ledger:acks a rdf:Property ;
+    rdfs:domain ledger:Comment ;
+    rdfs:range ledger:DispatchNote ;
+    rdfs:label "acknowledges" ;
+    rdfs:comment "From a worker's comment to a dispatch note it acknowledges (`comment acks=`, under the comment grant, fenced by the note's epoch): the record that the note was read. Only a note on the same item, addressed to the claim at the comment's epoch, can be acknowledged." .
 
 ledger:editKind a rdf:Property ;
     rdfs:range xsd:string ;

@@ -129,6 +129,7 @@ fn read_script() -> Vec<(&'static str, Verb, String)> {
         ("ledger-item-closed", Verb::Exists, at("item:1:closed")),
         ("ledger-item-history", Verb::Source, at("item:1:history")),
         ("ledger-item-sessions", Verb::Source, at("item:1:sessions")),
+        ("ledger-item-notes", Verb::Source, at("item:2:notes")),
         ("ledger-sessions", Verb::Source, at("sessions")),
         ("ledger-doctor", Verb::Source, at("doctor")),
         ("ledger-stalled", Verb::Source, at("stalled")),
@@ -171,6 +172,8 @@ fn seeded() -> ikigai_core::Kernel {
     let claim = format!("urn:iki:ledger:{LEDGER}:claim");
     sink(&kernel, &claim, &[("item", "1"), ("content", "worker-1")]);
     delete(&kernel, &claim, &[("item", "1")]);
+    // #2 held, with no principal on the claim, so its notes (ledger #3718) are any reader's.
+    sink(&kernel, &claim, &[("item", "2"), ("content", "worker-2")]);
     kernel
 }
 
