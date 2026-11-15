@@ -105,7 +105,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
+    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, Iri,
     ListSeparator, ReprType, Representation, Result, UriTemplate, Verb,
 };
 use oxrdf::Graph;
@@ -414,6 +414,7 @@ pub struct SpaceConfig {
     claim_kind: crate::claim::ClaimKindStamper,
     participants: Option<String>,
     lapse_routes: std::collections::BTreeMap<String, String>,
+    write_shapes: Vec<crate::shapes::WriteShape>,
 }
 
 impl Default for SpaceConfig {
@@ -424,6 +425,7 @@ impl Default for SpaceConfig {
             claim_kind: crate::claim::machine_by_default(),
             participants: None,
             lapse_routes: std::collections::BTreeMap::new(),
+            write_shapes: Vec::new(),
         }
     }
 }
@@ -484,6 +486,39 @@ impl SpaceConfig {
             .insert(ledger.name().to_string(), label.to_string());
         self
     }
+
+    /// Check `kinds` of write on `ledger` against the SHACL shapes graph at `shape`, a resource
+    /// read through the kernel, before they land (ledger #3724). A write that does not conform
+    /// is refused or lets through with a warning recorded, as `outcome` says. **Off by
+    /// default**; call once per shape. See [`crate::shapes`].
+    ///
+    /// # Panics
+    ///
+    /// On a ledger name the ledger grammar refuses, a shape that is not an IRI, or no kinds:
+    /// a shape that could never be checked should fail where the manifest is.
+    pub fn write_shape(
+        mut self,
+        ledger: &str,
+        shape: &str,
+        kinds: &[crate::shapes::WriteKind],
+        outcome: crate::shapes::Outcome,
+    ) -> Self {
+        let ledger = Ledger::parse(ledger)
+            .unwrap_or_else(|error| panic!("a write shape names no ledger: {error}"));
+        if let Err(error) = Iri::parse(shape) {
+            panic!("a write shape `{shape}` is not an IRI: {error}");
+        }
+        if kinds.is_empty() {
+            panic!("a write shape `{shape}` governs no kind of write");
+        }
+        self.write_shapes.push(crate::shapes::WriteShape {
+            ledger: ledger.name().to_string(),
+            shape: shape.to_string(),
+            kinds: kinds.iter().copied().collect(),
+            outcome,
+        });
+        self
+    }
 }
 
 /// Bind the ledger with a host's own ordering policies. **The first is the default.**
@@ -510,6 +545,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
     let participants: Participants = config.participants.map(Arc::from);
     let lifecycles = Arc::new(config.lifecycles);
     let lapse_routes: lapse::Routes = Arc::new(config.lapse_routes);
+    let shapes: crate::shapes::WriteShapes = Arc::new(config.write_shapes);
     // ⚠ **Bind order is resolution order** (`EndpointSpace` takes the first grammar that
     // matches), and the two ledger-less resources go FIRST. `urn:iki:ledger:policy:next`
     // would otherwise be read as the `next` resource of a ledger called `policy` — which
@@ -601,12 +637,14 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             LedgerGrammar::action("comment"),
             CommentEndpoint {
                 participants: participants.clone(),
+                shapes: Arc::clone(&shapes),
             },
         )
         .bind(
             LedgerGrammar::action("close"),
             CloseEndpoint {
                 participants: participants.clone(),
+                shapes: Arc::clone(&shapes),
             },
         )
         .bind(
@@ -3967,6 +4005,7 @@ async fn comment_written(client: &StoreClient<'_, '_>, comment: &str) -> Result<
 #[derive(Clone)]
 struct CommentEndpoint {
     participants: Participants,
+    shapes: crate::shapes::WriteShapes,
 }
 
 #[async_trait]
@@ -4042,6 +4081,39 @@ impl Endpoint for CommentEndpoint {
         }
         // A fenced comment or hand-back (ledger #3205) lands only under the claim it names.
         check_fence(&item, epoch)?;
+        // The configured write shapes (ledger #3724), on the would-be comment.
+        let kinds: &[crate::shapes::WriteKind] = if handback {
+            &[
+                crate::shapes::WriteKind::Report,
+                crate::shapes::WriteKind::Comment,
+            ]
+        } else {
+            &[crate::shapes::WriteKind::Comment]
+        };
+        crate::shapes::check(
+            inv,
+            &self.shapes,
+            client.ledger(),
+            kinds,
+            &item.short(),
+            || {
+                let comment = named(&format!("{}:comment:pending", item.iri));
+                crate::shapes::ntriples(&[
+                    oxrdf::Triple::new(
+                        comment.clone(),
+                        named(v::ext::TYPE),
+                        named(v::COMMENT_CLASS),
+                    ),
+                    oxrdf::Triple::new(comment.clone(), named(v::ON_ITEM), named(&item.iri)),
+                    oxrdf::Triple::new(
+                        comment,
+                        named(v::BODY),
+                        oxrdf::Literal::new_simple_literal(text.trim()),
+                    ),
+                ])
+            },
+        )
+        .await?;
         // ★ The dispatcher (the close grant) speaking on a handed-back item is the answer to
         // it, whatever the words: any comment of theirs clears it. A worker clears it only by
         // saying so (`rejects=true`); its ordinary comment leaves the hand-back standing.
@@ -4309,6 +4381,7 @@ async fn existing_comment(
 #[derive(Clone)]
 struct CloseEndpoint {
     participants: Participants,
+    shapes: crate::shapes::WriteShapes,
 }
 
 #[async_trait]
@@ -4342,6 +4415,36 @@ impl Endpoint for CloseEndpoint {
         evidence::refuse_without_a_close_event(&client, &item, &evidence).await?;
         // A holder's fenced close (ledger #3205) closes only under the claim it names.
         check_fence(&item, epoch)?;
+        // The configured write shapes (ledger #3724), on the close's would-be status event.
+        crate::shapes::check(
+            inv,
+            &self.shapes,
+            client.ledger(),
+            &[crate::shapes::WriteKind::Close],
+            &item.short(),
+            || {
+                let event = named(&format!("{}:status:pending", item.iri));
+                let mut triples = vec![
+                    oxrdf::Triple::new(
+                        event.clone(),
+                        named(v::ext::TYPE),
+                        named(v::STATUS_EVENT_CLASS),
+                    ),
+                    oxrdf::Triple::new(event.clone(), named(v::ON_ITEM), named(&item.iri)),
+                    oxrdf::Triple::new(event.clone(), named(v::STATUS), named(v::CLOSED)),
+                    oxrdf::Triple::new(event.clone(), named(v::CLOSED_REASON), named(reason)),
+                ];
+                for one in &evidence {
+                    triples.push(oxrdf::Triple::new(
+                        event.clone(),
+                        named(v::EVIDENCE),
+                        named(&one.iri),
+                    ));
+                }
+                crate::shapes::ntriples(&triples)
+            },
+        )
+        .await?;
         // ★ A CLOSE RELEASES THE CLAIM (ledger #1147, decided 2026-10-10). Closed work is
         // held by nobody, and a claim left on a closed item was the doctor's orphaned
         // machine claim and a holder `items holder=` went on listing. The release is in the
@@ -7616,6 +7719,11 @@ fn granted_ledgers(inv: &Invocation<'_>) -> Vec<Ledger> {
 fn ledger_of_graph(graph: &str) -> Option<Ledger> {
     let name = graph.strip_prefix(&format!("{}graph:", crate::ledger::PREFIX))?;
     Ledger::parse(name).ok()
+}
+
+/// A named node from an IRI this crate built or already checked.
+fn named(iri: &str) -> oxrdf::NamedNode {
+    oxrdf::NamedNode::new_unchecked(iri)
 }
 
 #[cfg(test)]
