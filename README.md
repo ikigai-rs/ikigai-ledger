@@ -246,6 +246,8 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:purge` | Delete | destroy, leaving a tombstone | `purge:{ledger}` |
 | `…:{ledger}:next` | Source | the ready set, ranked | `read:{ledger}` |
 | `…:{ledger}:doctor` | Source | what is structurally wrong, every problem at once; repairs nothing | `read:{ledger}` |
+| `…:{ledger}:stalled` | Source | the open items held on a lease that has run out and not handed back, oldest lapse first | `read:{ledger}` |
+| `…:{ledger}:lapse` | Sink | the dispatcher's sweep: record each lapse once in its item's history, and add the ledger's route label if the host set one; releases nothing | `close:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:item:{id}:state` | Source · Sink | the one lifecycle state; a compare-and-set transition | `read` / `write` of `{ledger}` |
 | `…:{ledger}:item:{id}:state:{value}` | Exists | is it in that state? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:holder:{holder}` | Exists | is it held by that holder? | `read:{ledger}` |
@@ -314,7 +316,7 @@ because the data has to say which ledger it is in even when the request did not.
 
 ⚠ **The sugar costs a reserved-word list.** `urn:iki:ledger:items` has to mean *the
 default ledger's listing* rather than *a ledger called `items`*, and only one of those can
-be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and eighteen others are not
+be true — so `append`, `items`, `next`, `policy`, `ledgers`, `lifecycle` and twenty others are not
 available as ledger names, and a name that is refused says which word it must not use.
 Names are otherwise lowercase letters, digits, `-` and `_`; the shape is fixed because the
 name becomes a capability token that is matched **exactly**, and a token must not be
@@ -1626,6 +1628,59 @@ The JSON face carries the same as `attribution` on an item and on a comment (`au
 write without a principal still records `author=` as the free text it always was; every face
 reads that as claimed (`claimed, free text`). `tests/attribution.rs` has one test per path.
 
+### A lapsed lease is recorded once, listed, and can be routed to a person
+
+Since ledger #3709. A worker whose connection drops stops renewing, its lease runs out, and the
+claim stays: `next` excludes the item as `lease-expired` and the doctor reports it, but until now
+nothing RECORDED the lapse, so an item's history showed the claim and then nothing, "which items
+stalled, and how often" was not a query, and recovery happened outside the ledger. Now:
+
+```text
+$ source urn:iki:ledger:stalled
+default: 1 stalled item(s), the oldest lapse first
+#12 Ship it: held by kata-ship/0abc1234 at epoch 1, whose lease ran out at 2026-10-09T15:30:00.000Z; the lapse is not recorded yet
+remedy: the holder resumes (`sink urn:iki:ledger:claim item=<n> renew=true`), …
+$ sink urn:iki:ledger:lapse
+default: recorded 1 lapse(s)
+  #12 Ship it: held by kata-ship/0abc1234 at epoch 1, whose lease ran out at 2026-10-09T15:30:00.000Z; labeled needs-person
+$ source urn:iki:ledger:item:12:history
+…
+2026-10-09T15:31:00.000Z  lapse kata-ship/0abc1234 at epoch 1, whose lease ran out at 2026-10-09T15:30:00.000Z
+```
+
+- **`…:{ledger}:stalled`** (read) lists every open item still held on a lease that has run out
+  and not handed back to its dispatcher (`ledger:awaiting`), the lease that ran out first
+  leading, with the holder, its epoch, when the lease ended, and whether the lapse is recorded
+  yet. It is computed from the claims as they stand, so an item is listed from the moment its
+  lease ends, swept or not, and its cached answer holds only until the earliest running lease
+  ends, as the doctor's does. `as=application/json` gives `{schema, ledger, checked_at,
+  stalled: [{item, title, holder, principal, kind, epoch, lapsed, recorded}]}`.
+- **`…:{ledger}:lapse`** (Sink, the dispatcher's `close:{ledger}` or `write:{ledger}`) records
+  each lapse not recorded yet as a `ledger:LapseEvent` on its item (see the table below), and
+  answers one line per lapse it recorded. JSON: `{schema, ledger, checked_at, route_label,
+  recorded: […], already_recorded}`.
+- ★ **Who notices: the dispatcher's tick.** A lease runs out at an instant nobody asks about,
+  and the ledger acts only when asked. A sweep on read would make cached reads under the read
+  grant write; the next claim attempt comes only when someone already wants the item, which is
+  what a stalled item lacks, and its takeover already records a release. gonk's tick already runs
+  on a schedule under the dispatcher's grant, so it sends `sink …:lapse` each tick, and that is
+  the detector.
+- ★ **Written once.** Each lapse is one store update whose `WHERE` holds only while the item is
+  open, not handed back, still held on that same run-out lease, and has no lapse event for it
+  yet. Concurrent sweeps, or a sweep every minute, record each lapse once
+  (`tests/lapse.rs`). A lapse is its item and the lease end it records (`ledger:lapsedAt`), so a
+  holder that renews after a lapse and lapses again records a second.
+- **A route to a person, off by default.** `SpaceConfig::lapse_label("default", "needs-person")`
+  makes the sweep add that label to the item in the same update as the event, with its own label
+  edit event, so the recovery is queued where `items labels=needs-person` finds it and counted in
+  the history. Per ledger; a label the grammar refuses panics at
+  configuration. A ledger with no route records and lists, and changes nothing else.
+- **Nothing is released, and no resume verb is added.** The remedies are the ones that already
+  carry the epoch: the same holder resumes with `claim renew=true` (an expired lease still held
+  renews, at its epoch), or another takes it with `claim takeover=true from=<holder>`, which
+  raises the epoch so the stale holder's fenced writes are refused. Either ends the stall.
+- ⚠ **`lapse` and `stalled` are now reserved ledger names.**
+
 ## Who worked on it: claim, release, hand-back and edit events
 
 A claim is current state: a release or a close retracts `claimedBy` and the rest, so until
@@ -1637,6 +1692,7 @@ as a node of its own (ledger #2819), so "what did this agent do" is a query over
 |---|---|---|
 | `ledger:ClaimEvent` `{item}:claim:{id}` | a first claim, or a takeover (never a renewal) | `claimedBy` (the holder label), `claimPrincipal`, `claimKind`, and `takeoverFrom` on a takeover |
 | `ledger:ReleaseEvent` `{item}:release:{id}` | a release (by the holder or a dispatcher), a close, a takeover, when there was a claim | the released claim's `claimedBy`, `claimPrincipal`, `claimKind` and `claimedAt`, and `releaseReason` `released`, `closed` or `takeover` |
+| `ledger:LapseEvent` `{item}:lapse:{id}` (ledger #3709) | the dispatcher's sweep, `sink …:lapse`, once per lapse | the lapsed claim's `claimedBy`, `claimPrincipal` and `claimKind`, `lapsedEpoch`, and `lapsedAt`: when the lease ran out. The claim is not released |
 | `ledger:EditEvent` `{item}:edit:{id}` | `label`, `link`, `defer`, `item:{id}:about`, an item edit, a `state` transition | `editKind`: `label`, `unlabel`, `link`, `unlink`, `defer`, `resume`, `about`, `unabout`, `edit` or `state`, and what it changed (below) |
 | `ledger:StatusEvent` (since 0.14.0) | a close or a reopen | now also its committer |
 | `ledger:handedBackBy` on the hand-back comment | `comment handback=true` | the holder label of the claim the hand-back found |
@@ -2334,9 +2390,10 @@ one graph.
   this agent do"), so those events are in the ledger's graph. They record who and when, never
   a before and after. An import principal can record such events after the fact (ledger #2843),
   marked as imported.
-- **No reaper.** A lease that runs out is reported (by `next` and the doctor) and taken over
-  by an explicit act; nothing releases or reassigns a claim on its own, because "owned" has to
-  mean something a reader can check.
+- **No reaper.** A lease that runs out is reported (by `next`, the doctor and `stalled`),
+  recorded by the dispatcher's sweep (`lapse`), and taken over by an explicit act; nothing
+  releases or reassigns a claim on its own, because "owned" has to mean something a reader can
+  check.
 - **No key on an existing item.** A key is given at filing and never changed, so an item
   filed before keys existed cannot gain one through a resource here — that is one SPARQL
   UPDATE over the graph, and a migration's job rather than an endpoint's.
@@ -2353,7 +2410,7 @@ is, the rules it follows, what is not tested, and how to report a barrier.
 
 ## Status
 
-All twenty-eight resources are bound, tested, and walked clean by `ikigai-conformance`
+All thirty resources are bound, tested, and walked clean by `ikigai-conformance`
 (`AUTHORITY` included — every mutating action declares the scope it enforces). So are the two
 alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 

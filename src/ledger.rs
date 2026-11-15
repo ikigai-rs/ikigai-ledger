@@ -57,7 +57,7 @@ pub const DEFAULT: &str = "default";
 /// has to mean *the default ledger's listing* rather than *a ledger called `items`*, and
 /// only one of those can be true. Reserving is the cheaper half: a ledger can be called
 /// almost anything, and the refusal says which word it must not use.
-pub const RESERVED: [&str; 25] = [
+pub const RESERVED: [&str; 27] = [
     "append",
     "backfill-closed-at",
     "claim",
@@ -73,6 +73,7 @@ pub const RESERVED: [&str; 25] = [
     "item",
     "items",
     "label",
+    "lapse",
     "ledgers",
     "lifecycle",
     "link",
@@ -82,6 +83,7 @@ pub const RESERVED: [&str; 25] = [
     "reopen",
     "selection",
     "sessions",
+    "stalled",
     "tombstone",
 ];
 

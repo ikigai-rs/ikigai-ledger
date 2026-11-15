@@ -377,6 +377,7 @@ mod evidence;
 mod flight;
 mod history;
 mod import;
+mod lapse;
 mod session;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
@@ -409,6 +410,7 @@ pub struct SpaceConfig {
     lifecycles: Lifecycles,
     claim_kind: crate::claim::ClaimKindStamper,
     participants: Option<String>,
+    lapse_routes: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for SpaceConfig {
@@ -418,6 +420,7 @@ impl Default for SpaceConfig {
             lifecycles: Lifecycles::default(),
             claim_kind: crate::claim::machine_by_default(),
             participants: None,
+            lapse_routes: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -452,6 +455,32 @@ impl SpaceConfig {
         self.participants = Some(graph.into());
         self
     }
+
+    /// Route a ledger's lapsed leases to a person (ledger #3709): when the dispatcher's sweep
+    /// (`sink urn:iki:ledger:{ledger}:lapse`) records a lapse on one of `ledger`'s items, the
+    /// same update adds `label` to it (`needs-person`, say), so the recovery is queued where
+    /// `items labels=` and `next` find it. **Off by default**: with no route, a lapse is
+    /// recorded and listed, and nothing else changes. A second call for one ledger replaces
+    /// its label.
+    ///
+    /// # Panics
+    ///
+    /// On a ledger name the ledger grammar refuses, or a label outside `A-Z a-z 0-9 . _ : -`:
+    /// a route that could never be written should fail where the manifest is, not at the
+    /// first lapse.
+    pub fn lapse_label(mut self, ledger: &str, label: &str) -> Self {
+        let ledger = Ledger::parse(ledger)
+            .unwrap_or_else(|error| panic!("a lapse route names no ledger: {error}"));
+        if label.is_empty() {
+            panic!("a lapse route's label needs text");
+        }
+        if let Err(error) = check_label("label", label) {
+            panic!("a lapse route's label is not a label: {error}");
+        }
+        self.lapse_routes
+            .insert(ledger.name().to_string(), label.to_string());
+        self
+    }
 }
 
 /// Bind the ledger with a host's own ordering policies. **The first is the default.**
@@ -477,6 +506,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
     let policies = Arc::new(Policies::new(config.policies));
     let participants: Participants = config.participants.map(Arc::from);
     let lifecycles = Arc::new(config.lifecycles);
+    let lapse_routes: lapse::Routes = Arc::new(config.lapse_routes);
     // ⚠ **Bind order is resolution order** (`EndpointSpace` takes the first grammar that
     // matches), and the two ledger-less resources go FIRST. `urn:iki:ledger:policy:next`
     // would otherwise be read as the `next` resource of a ledger called `policy` — which
@@ -609,6 +639,13 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             LedgerGrammar::action("doctor"),
             flight::DoctorEndpoint {
                 lifecycles: Arc::clone(&lifecycles),
+            },
+        )
+        .bind(LedgerGrammar::action("stalled"), lapse::StalledEndpoint)
+        .bind(
+            LedgerGrammar::action("lapse"),
+            lapse::LapseEndpoint {
+                routes: lapse_routes,
             },
         )
         .bind(

@@ -286,10 +286,19 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-item-sessions")
         .cacheable("ledger-sessions")
         .cacheable("ledger-doctor")
+        .cacheable("ledger-stalled")
         .pure("ledger-policy")
         .pure("ledger-lifecycle")
         // RECOMPUTE (conformance 0.9, ledger #1567 — decided 2026-10-15): the doctor's text
         // face records when the check ran, so a forced recomputation differs by design.
+        // PIPELINE (ledger #3709): the lapse sweep is a Sink with no body. It records every
+        // lapse in its ledger, so there is nothing for a pipe to carry; its one by-value input
+        // is the face, `as`.
+        .opt_out_check(
+            "ledger-lapse",
+            Check::Pipeline,
+            "the sweep takes no body: it records every lapse in its ledger",
+        )
         .opt_out_check(
             "ledger-doctor",
             Check::Recompute,
@@ -331,7 +340,7 @@ fn conforms() {
 fn the_walk_reaches_every_resource_this_crate_binds() {
     let (kernel, a, b, c) = seeded();
     let report = suite(&a, &b, &c).run_blocking(&kernel);
-    // `Suite::own("ledger-*")` walks only the twenty-eight THIS crate binds, so the whole of
+    // `Suite::own("ledger-*")` walks only the thirty THIS crate binds, so the whole of
     // `walked` is the module; no filter stands between this list and what was checked.
     let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
     walked.sort_unstable();
@@ -358,6 +367,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-item-state-is",
             "ledger-items",
             "ledger-label",
+            "ledger-lapse",
             "ledger-ledgers",
             "ledger-lifecycle",
             "ledger-link",
@@ -366,6 +376,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-purge",
             "ledger-reopen",
             "ledger-sessions",
+            "ledger-stalled",
         ],
         "{report}"
     );

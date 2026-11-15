@@ -679,6 +679,14 @@ pub struct HistoryEvent {
     /// Added in 0.18.0 (ledger #2842).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
+    /// The epoch of the claim a `lapse` recorded; absent for a claim taken before epochs.
+    /// Added with lapse events (ledger #3709).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<i64>,
+    /// When the lease a `lapse` recorded ran out, which is at or before `at`, the time the
+    /// sweep noticed it (ledger #3709).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lapsed: Option<String>,
 }
 
 /// A field that is there is `Some`, even as `null`; `default` covers one that is not.
@@ -707,6 +715,61 @@ pub struct DoctorDocument {
     pub checks: Vec<String>,
     /// What they found, check by check; empty is a clean bill.
     pub problems: Vec<Problem>,
+}
+
+/// `…:{ledger}:stalled` (ledger #3709): the open items held on a lease that has run out and
+/// not handed back, oldest lapse first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StalledDocument {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// The kernel clock time leases were judged at.
+    pub checked_at: String,
+    /// The stalled items, the lease that ran out first leading.
+    pub stalled: Vec<Stalled>,
+}
+
+/// The answer of `sink …:{ledger}:lapse` (ledger #3709): the lapses this sweep recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LapseDocument {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// The kernel clock time leases were judged at.
+    pub checked_at: String,
+    /// The label the ledger's lapse route adds, `null` when the ledger has none.
+    pub route_label: Option<String>,
+    /// The lapses this sweep recorded, each once; an empty list wrote nothing.
+    pub recorded: Vec<Stalled>,
+    /// How many stalled items already had this lapse recorded, by an earlier sweep.
+    pub already_recorded: usize,
+}
+
+/// One stalled item: whose lease ran out, at which epoch, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Stalled {
+    /// The item.
+    pub item: ItemRef,
+    /// Its title.
+    pub title: String,
+    /// The holder whose lease ran out: the claim still holds the item.
+    pub holder: String,
+    /// The principal the claim was taken as, `null` when it carried none.
+    pub principal: Option<String>,
+    /// `machine`, `agent` or `person`; `null` for a claim from before kinds.
+    pub kind: Option<String>,
+    /// The claim's epoch, `null` for a claim taken before epochs.
+    pub epoch: Option<i64>,
+    /// When the lease ran out.
+    pub lapsed: String,
+    /// Whether a sweep has recorded this lapse as an event on the item.
+    pub recorded: bool,
 }
 
 /// One problem the doctor found. It never repairs one; `remedy` says what would.

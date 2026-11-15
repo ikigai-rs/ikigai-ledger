@@ -48,13 +48,14 @@ async fn read(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<json::Hist
             "SELECT ?event ?class ?p ?o WHERE {{ {} }}",
             client.in_graph(&format!(
                 "?event <{on}> <{item}> ; <{type_}> ?class ; ?p ?o . \
-                 FILTER(?class IN (<{claim}>, <{release}>, <{status}>, <{edit}>))",
+                 FILTER(?class IN (<{claim}>, <{release}>, <{status}>, <{edit}>, <{lapse}>))",
                 on = v::ON_ITEM,
                 type_ = v::ext::TYPE,
                 claim = v::CLAIM_EVENT_CLASS,
                 release = v::RELEASE_EVENT_CLASS,
                 status = v::STATUS_EVENT_CLASS,
                 edit = v::EDIT_EVENT_CLASS,
+                lapse = v::LAPSE_EVENT_CLASS,
             ))
         ))
         .await?;
@@ -94,6 +95,8 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
         "claim".to_string()
     } else if node.class == v::RELEASE_EVENT_CLASS {
         "release".to_string()
+    } else if node.class == v::LAPSE_EVENT_CLASS {
+        "lapse".to_string()
     } else if node.class == v::STATUS_EVENT_CLASS {
         if node.one(v::STATUS).as_deref() == Some(v::CLOSED) {
             "closed".to_string()
@@ -148,6 +151,13 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
             v::close_reason_name(&reason).map(str::to_string)
         }),
         evidence: node.all(v::EVIDENCE),
+        epoch: node
+            .one(v::LAPSED_EPOCH)
+            .and_then(|epoch| epoch.parse().ok()),
+        lapsed: node
+            .one(v::LAPSED_AT)
+            .and_then(|when| model::millis(&when))
+            .map(iso8601),
     }
 }
 
@@ -208,6 +218,17 @@ fn line(event: &json::HistoryEvent) -> String {
             None => holder.clone(),
         }),
         "closed" => Some(closed(event)),
+        // `lapse worker-1 at epoch 2, whose lease ran out at …`
+        "lapse" => event.holder.as_ref().map(|holder| {
+            let mut said = holder.clone();
+            if let Some(epoch) = event.epoch {
+                said.push_str(&format!(" at epoch {epoch}"));
+            }
+            if let Some(lapsed) = &event.lapsed {
+                said.push_str(&format!(", whose lease ran out at {lapsed}"));
+            }
+            said
+        }),
         // A defer, a resume and a reopen have nothing more to name.
         _ => Some(String::new()),
     };
@@ -284,7 +305,8 @@ impl Endpoint for HistoryEndpoint {
                  verdict and evidence, reopens, and its edits with what each changed (the label, \
                  the states before and after, the link and the other item, the about target, the \
                  names of the fields, never their values; a state change also names the version \
-                 of the lifecycle it was checked against). The other item of a link across \
+                 of the lifecycle it was checked against), and each lapsed lease a sweep \
+                 recorded, with its holder and epoch. The other item of a link across \
                  ledgers, and a close's evidence, are named by IRI and nothing else.",
             )
             .verb(Verb::Meta)
