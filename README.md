@@ -236,6 +236,8 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` of `{ledger}` |
 | `…:{ledger}:append` | Sink | file a new item | `write:{ledger}` |
 | `…:{ledger}:comment` | Sink | append a comment, optionally under your own key | `comment:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:note` | Sink | a dispatch note to the holder of the item's current claim, at exactly the epoch named | `close:{ledger}` or `write:{ledger}`, with a principal |
+| `…:{ledger}:item:{id}:notes` | Source | the dispatch notes to the caller's current claim, oldest first | `read:{ledger}`, acting as the claim's principal |
 | `…:{ledger}:close` | Sink | close with a reason and any evidence, releasing any claim | `close:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:reopen` | Sink | undo a close | `close:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:claim` | Source | whether a claim epoch is still current on an item | `read:{ledger}` |
@@ -558,6 +560,52 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) cleared-awaiting
 - ⚠ **A claim is untouched by either**: the worker releases its claim as before. An item
   awaiting its dispatcher can still be claimed (the dispatcher may, to review it); `next` simply
   does not offer it.
+
+## Dispatch notes: the dispatcher speaking to the holder, on the record
+
+A worker treats every comment as data, because anyone holding the comment grant can comment. A
+**dispatch note** (ledger #3718, designed in [`docs/dispatch-notes.md`](docs/dispatch-notes.md))
+is how the dispatcher corrects a running worker through the ledger instead:
+
+```text
+sink urn:iki:ledger:acme:note item=12 epoch=2 content="Stop and rebase on main first"
+note to worker-1 at epoch 2, sent under the dispatcher grant on acme#12 (urn:iki:ledger:acme:comment:…)
+```
+
+- **A comment kind with its own resource.** A note is a `ledger:Comment` that is also a
+  `ledger:DispatchNote`, so every reader that lists comments shows it. It is written through
+  `note`, not a flag on `comment`, so the comment grant's door is unchanged.
+- **The dispatcher's grant, and a principal.** `note` needs `close:{ledger}` or
+  `write:{ledger}`, the grants this ledger already treats as the dispatcher's; there is no grant
+  of its own. A capability with no principal, root's included, is refused (`Denied`).
+- **Addressed to the current claim, checked inside the write.** `epoch=` is required, and the
+  note lands only while the item is claimed at exactly that epoch, by the same clause in the
+  store update that fences a holder's writes. The recipient (`ledger:noteHolder`,
+  `ledger:noteTo`) is read from that claim in the same update, never from an argument. A note
+  to an epoch that is not current is refused and nothing is written:
+  `Conflict: acme#12 is held by worker-2 at epoch 3, not epoch 2, so the note was not sent`.
+- **Recorded facts.** `ledger:noteEpoch` and `ledger:noteGrant` (the grant IRI that admitted
+  it) beside the committer, the verified principal. In JSON a comment has `"kind": "note"` or
+  `"kind": "comment"`, and a note also has `"to": {"holder", "principal"}`, `"epoch"` and
+  `"grant"`; in text a note's stamp is followed by `note to worker-1 at epoch 2, sent under the
+  dispatcher grant`.
+- **Resend once.** `key=` works as `comment key=`: a dispatcher resending after a dropped
+  connection gets the note already recorded, marked `existing`.
+- **The worker's side.** `source …:item:12:notes` answers the notes to the caller's current
+  claim, oldest first (`after=<note iri>` for only later ones), in text, JSON and Turtle; a
+  capability that does not act as the claim's principal is refused. `claim renew=true` ends
+  `, 1 unread note` while a note to the claim is unacknowledged, and
+  `comment item=12 epoch=2 acks=<note iri>` records `ledger:acks` on the worker's comment
+  (`acknowledges note: …` in text, `"acks"` in JSON), which clears the count. An
+  acknowledgment is the holder's: like the notes read, `acks=` from a capability that does not
+  act as the claim's principal (the dispatcher acknowledging its own note, or another worker
+  that knows the epoch) is refused (`Denied`) and nothing is written, checked again inside the
+  write's update so a claim that changes hands in between is not acknowledged by its caller.
+- ⚠ **What a note never does**, each pinned in `tests/dispatch_note_gap.rs`: widen a grant (it
+  carries no capability, and no argument on `note` changes a claim, a lease, a label, a state
+  or a grant), act on the item (it never claims, releases, renews, closes, reopens or hands
+  back, and it does not clear a hand-back), reach a later epoch (even the same worker's next
+  claim), or be edited (comments are append-only). `note` is a reserved ledger name.
 
 ## Agent sessions: a summary on the hand-back
 

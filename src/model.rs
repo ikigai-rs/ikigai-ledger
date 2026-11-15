@@ -636,6 +636,80 @@ pub struct Comment {
     pub created: u64,
     /// The hand-backs this comment rejected (`ledger:rejects`, ledger #3071), sorted.
     pub rejects: Vec<String>,
+    /// What makes it a dispatch note, when it is one (ledger #3718): who it is for and at
+    /// which claim epoch, and the grant that admitted it, as the write recorded them.
+    pub note: Option<Note>,
+    /// The dispatch notes this comment acknowledges (`ledger:acks`, ledger #3718), sorted.
+    pub acks: Vec<String>,
+}
+
+/// The facts a dispatch note carries beyond a comment's (ledger #3718), each read by the
+/// write from the claim it was sent to, never from the caller's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    /// The holder label of the claim (`ledger:noteHolder`).
+    pub holder: String,
+    /// The claim's principal, when it had one (`ledger:noteTo` as an IRI).
+    pub principal: Option<String>,
+    /// The claim epoch it was sent at (`ledger:noteEpoch`).
+    pub epoch: u64,
+    /// The grant the write was admitted under (`ledger:noteGrant`).
+    pub grant: String,
+}
+
+impl Note {
+    /// `the dispatcher grant` for the close grant, `the write grant` for the write grant: the
+    /// words the plain face says, never the IRI alone.
+    pub fn grant_words(&self) -> &'static str {
+        if self.grant.starts_with("urn:cap:ledger:write:") {
+            "the write grant"
+        } else {
+            "the dispatcher grant"
+        }
+    }
+
+    /// `note to worker-1 at epoch 2, sent under the dispatcher grant`.
+    pub fn line(&self) -> String {
+        format!(
+            "note to {} at epoch {}, sent under {}",
+            self.holder,
+            self.epoch,
+            self.grant_words()
+        )
+    }
+}
+
+/// The OPTIONALs that read a comment's dispatch-note facts and the notes it acknowledges
+/// (ledger #3718), over the comment variable `var`.
+pub(crate) fn note_optional(var: &str) -> String {
+    format!(
+        "OPTIONAL {{ {var} <{epoch}> ?noteEpoch ; <{holder}> ?noteHolder ; <{to}> ?noteTo ; \
+         <{grant}> ?noteGrant }}\nOPTIONAL {{ {var} <{acks}> ?acks }}",
+        epoch = v::NOTE_EPOCH,
+        holder = v::NOTE_HOLDER,
+        to = v::NOTE_TO,
+        grant = v::NOTE_GRANT,
+        acks = v::ACKS,
+    )
+}
+
+/// The dispatch-note facts in a row [`note_optional`] read, when the comment is a note.
+pub(crate) fn note_of(row: &sparql::Row) -> Option<Note> {
+    let to = row.get("noteTo")?;
+    Some(Note {
+        holder: row.get("noteHolder")?.value.clone(),
+        principal: (to.kind == "uri").then(|| to.value.clone()),
+        epoch: row.get("noteEpoch")?.value.parse().ok()?,
+        grant: row.get("noteGrant")?.value.clone(),
+    })
+}
+
+/// The note a row [`note_optional`] read says the comment acknowledges, if any.
+pub(crate) fn acks_of(row: &sparql::Row) -> Vec<String> {
+    row.get("acks")
+        .map(|b| b.value.clone())
+        .into_iter()
+        .collect()
 }
 
 impl Comment {
@@ -659,8 +733,21 @@ impl Comment {
             .iter()
             .map(|handback| format!("  rejects: {handback}\n"))
             .collect();
+        // A note says so in words, at the header's indent (ledger #3718), and so does an
+        // acknowledgment: no sign alone marks either.
+        let note = self
+            .note
+            .as_ref()
+            .map(|note| format!("    {}\n", note.line()))
+            .unwrap_or_default();
+        let acks: String = self
+            .acks
+            .iter()
+            .map(|acked| format!("  acknowledges note: {acked}\n"))
+            .collect();
+        let rejects = format!("{rejects}{acks}");
         format!(
-            "  {}{} {author}{committer}\n{rejects}{}\n",
+            "  {}{} {author}{committer}\n{rejects}{note}{}\n",
             sparql::iso8601(self.created),
             claimed_date(self.created_claimed),
             self.body
@@ -702,6 +789,30 @@ impl Comment {
         for handback in &self.rejects {
             if let Ok(handback) = NamedNode::new(handback) {
                 push(v::REJECTS, handback.into());
+            }
+        }
+        if let Some(note) = &self.note {
+            push(v::ext::TYPE, named(v::DISPATCH_NOTE_CLASS));
+            push(v::NOTE_HOLDER, plain(&note.holder));
+            match note
+                .principal
+                .as_deref()
+                .and_then(|p| NamedNode::new(p).ok())
+            {
+                Some(principal) => push(v::NOTE_TO, principal.into()),
+                None => push(v::NOTE_TO, plain(&note.holder)),
+            }
+            push(
+                v::NOTE_EPOCH,
+                typed(&note.epoch.to_string(), v::ext::XSD_INTEGER),
+            );
+            if let Ok(grant) = NamedNode::new(&note.grant) {
+                push(v::NOTE_GRANT, grant.into());
+            }
+        }
+        for acked in &self.acks {
+            if let Ok(acked) = NamedNode::new(acked) {
+                push(v::ACKS, acked.into());
             }
         }
     }
@@ -1894,10 +2005,16 @@ pub async fn find_comment_by_key(
     key: &str,
 ) -> Result<Option<Comment>> {
     let query = format!(
-        "SELECT ?c ?item ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource WHERE {{ {} }} ORDER BY ?c LIMIT 1",
+        "SELECT ?c ?item ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?noteEpoch ?noteHolder ?noteTo ?noteGrant WHERE {{ {} }} ORDER BY ?c LIMIT 1",
         client.in_graph(&format!(
             "?c <{key_p}> {key} ; <{type_}> <{class}> ; <{on}> ?item ; <{body}> ?body ; \
-             <{created}> ?created .\nOPTIONAL {{ ?c <{author}> ?author }}\n{provenance}",
+             <{created}> ?created .\nOPTIONAL {{ ?c <{author}> ?author }}\n{provenance}\n\
+             OPTIONAL {{ ?c <{note_epoch}> ?noteEpoch ; <{note_holder}> ?noteHolder ; \
+             <{note_to}> ?noteTo ; <{note_grant}> ?noteGrant }}",
+            note_epoch = v::NOTE_EPOCH,
+            note_holder = v::NOTE_HOLDER,
+            note_to = v::NOTE_TO,
+            note_grant = v::NOTE_GRANT,
             provenance = comment_provenance("?c"),
             key_p = v::COMMENT_KEY,
             key = literal(key),
@@ -1921,6 +2038,8 @@ pub async fn find_comment_by_key(
             committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
             created_claimed: row.contains_key("createdSource"),
             rejects: Vec::new(),
+            note: note_of(row),
+            acks: Vec::new(),
         })
     });
     let Some(mut found) = found else {
@@ -1959,6 +2078,10 @@ fn gather_comment(comments: &mut Vec<Comment>, comment: Comment) {
         Some(last) if last.iri == comment.iri => {
             last.rejects.extend(comment.rejects);
             last.rejects.sort();
+            last.rejects.dedup();
+            last.acks.extend(comment.acks);
+            last.acks.sort();
+            last.acks.dedup();
         }
         _ => comments.push(comment),
     }
@@ -2011,12 +2134,13 @@ pub async fn load_comments_for(
     let mut rows = Vec::new();
     for values in values_lists(items)? {
         let query = format!(
-            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects WHERE {{ {} }} ORDER BY ?created ?comment",
+            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks WHERE {{ {} }} ORDER BY ?created ?comment",
             client.in_graph(&format!(
                 "VALUES ?item {{ {values} }}\n\
                  ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
                  OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
-                 OPTIONAL {{ ?comment <{rejects}> ?rejects }}",
+                 OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}",
+                note = note_optional("?comment"),
                 provenance = comment_provenance("?comment"),
                 rejects = v::REJECTS,
                 on_item = v::ON_ITEM,
@@ -2044,6 +2168,8 @@ pub async fn load_comments_for(
                     .map(|b| b.value.clone())
                     .into_iter()
                     .collect(),
+                note: note_of(&row),
+                acks: acks_of(&row),
             })
         })() else {
             continue;
@@ -2222,11 +2348,12 @@ pub async fn find_tombstone(
 /// `load_comments_for` breaks the tie the same way.
 pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Comment>> {
     let query = format!(
-        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects WHERE {{ {} }} ORDER BY ?created ?comment",
+        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks WHERE {{ {} }} ORDER BY ?created ?comment",
         client.in_graph(&format!(
             "?comment <{on_item}> {subject} ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
              OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
-             OPTIONAL {{ ?comment <{rejects}> ?rejects }}",
+             OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}",
+            note = note_optional("?comment"),
             provenance = comment_provenance("?comment"),
             rejects = v::REJECTS,
             on_item = v::ON_ITEM,
@@ -2253,6 +2380,8 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
                 .map(|b| b.value.clone())
                 .into_iter()
                 .collect(),
+            note: note_of(row),
+            acks: acks_of(row),
         })
     });
     let mut comments = Vec::new();

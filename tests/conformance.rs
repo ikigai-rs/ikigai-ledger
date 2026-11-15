@@ -97,6 +97,17 @@ fn seeded() -> (Kernel, String, String, String) {
             ("handback", "true"),
         ],
     );
+    // #6 is held by a principal at epoch 1 and nothing in the walk moves its claim: the
+    // dispatch note (ledger #3718) is sent to that claim, and its holder reads the notes.
+    append_iri(&kernel, "A dispatch note fixture", &[]);
+    try_as(
+        &kernel,
+        &note_holder(),
+        Verb::Sink,
+        "urn:iki:ledger:claim",
+        &[("item", "6"), ("content", "the conformance worker")],
+    )
+    .expect("the note fixture is claimed");
     let id = |iri: &str| {
         iri.rsplit(':')
             .next()
@@ -104,6 +115,30 @@ fn seeded() -> (Kernel, String, String, String) {
             .to_string()
     };
     (kernel, id(&a), id(&b), id(&c))
+}
+
+/// The holder of #6's claim, a principal, who reads the notes to it.
+fn note_holder() -> Capability {
+    Capability::scoped(vec![
+        "urn:cap:ledger:read:default".to_string(),
+        "urn:cap:ledger:claim:default".to_string(),
+        graph_read("default"),
+        graph_write("default"),
+    ])
+    .with_principal("urn:conformance:worker")
+    .unwrap()
+}
+
+/// The dispatcher who sends #6's holder a note: the close grant, with a principal.
+fn note_sender() -> Capability {
+    Capability::scoped(vec![
+        "urn:cap:ledger:read:default".to_string(),
+        "urn:cap:ledger:close:default".to_string(),
+        graph_read("default"),
+        graph_write("default"),
+    ])
+    .with_principal("urn:conformance:dispatcher")
+    .unwrap()
 }
 
 fn suite(a: &str, b: &str, c: &str) -> Suite {
@@ -226,6 +261,19 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         // `urn:iki:ledger:policy:{name}` — a policy this host really offers.
         .fixture(Fixture::new("ledger-policy", Verb::Source).binding("name", "leverage"))
         .fixture(Fixture::new("ledger-policy", Verb::Exists).binding("name", "leverage"))
+        // A dispatch note (ledger #3718) to #6's claim at epoch 1, and that holder's read.
+        .fixture(
+            Fixture::new("ledger-note", Verb::Sink)
+                .capability(note_sender())
+                .arg("item", "6")
+                .arg("epoch", "1")
+                .arg("content", "a note from the conformance walk"),
+        )
+        .fixture(
+            Fixture::new("ledger-item-notes", Verb::Source)
+                .capability(note_holder())
+                .binding("id", "6"),
+        )
         // The mutating actions, each pointed at an item that exists.
         .fixture(
             Fixture::new("ledger-comment", Verb::Sink)
@@ -362,6 +410,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-item-closed",
             "ledger-item-history",
             "ledger-item-holder-is",
+            "ledger-item-notes",
             "ledger-item-sessions",
             "ledger-item-state",
             "ledger-item-state-is",
@@ -372,6 +421,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-lifecycle",
             "ledger-link",
             "ledger-next",
+            "ledger-note",
             "ledger-policy",
             "ledger-purge",
             "ledger-reopen",

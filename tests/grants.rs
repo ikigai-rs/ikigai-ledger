@@ -308,6 +308,20 @@ fn script() -> Vec<Step> {
             at("claim"),
             &[("item", "#1"), ("epoch", "1")],
         ),
+        // A dispatch note to that claim (ledger #3718) needs a principal, so the script's one
+        // sends it under the write grant; the holder reads the notes under the published list.
+        importer_step(
+            "ledger-note",
+            Verb::Sink,
+            at("note"),
+            &[("item", "#1"), ("epoch", "1"), ("content", "Rebase first.")],
+        ),
+        step(
+            "ledger-item-notes",
+            Verb::Source,
+            at("item:1:notes"),
+            &[("epoch", "1")],
+        ),
         step("ledger-claim", Verb::Delete, at("claim"), &[("item", "#1")]),
         // The flight seams (ledger #775): a state read and a real transition, and the three
         // assertions a loop checks after a step — all under the same grant list.
