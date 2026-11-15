@@ -1501,6 +1501,71 @@ $ delete urn:iki:ledger:claim item=12 from=worker-1
 #12 released
 ```
 
+### Waiting for a held item without repeated claim refusals
+
+Ledger #3711 reported 19 refused claim attempts while another worker held a shared item.
+That behavior is reproducible, but a host can already wait for a release through the kernel's
+cut feed (`Kernel::listen`, `CutListener::wait`). The wait parks a future and the write wakes
+it; no repeated claim requests are needed. `tests/claim_feed_wait.rs` checks this with a real
+store, including a scoped reader. This crate binds no long-poll feed endpoint: a host exposes
+its feed transport. `wait=` is not a declared claim argument and does not make a claim wait.
+
+For an embedding host, these are the store threads to watch:
+
+```rust,ignore
+let spec = ikigai_core::ListenSpec::new()
+    .exact(ikigai_store::graph_thread("urn:iki:ledger:graph:default"))
+    .exact(ikigai_store::GRAPH_UPDATE_THREAD)
+    .exact(ikigai_store::UPDATE_THREAD)
+    .exact(ikigai_store::LOAD_THREAD);
+let listener = kernel.listen(spec, &feed_capability)?;
+```
+
+The graph thread covers scoped writes to this ledger. The other threads cover reads that
+also depend on the shared graph-update thread, broad store updates and loads. Watching only
+the item's IRI misses releases: the release writes the store and cuts its threads, rather
+than writing the item resource itself. Other writes can wake this listener too.
+
+Use this sequence in the host, or its equivalent snapshot-and-cursor feed protocol:
+
+1. Establish the listener before reading `source urn:iki:ledger:item:12 as=application/json`.
+   Read and claim under the caller's capability. A scoped listener needs
+   `urn:cap:kernel:listen` and hears invalidations only for cached reads under that **same
+   capability**, not another capability with the same principal. Its initial snapshot needs
+   the host feed's synchronization protocol: registering alone cannot guarantee notification
+   for a change during a first read that has not yet entered the cache. A host already
+   listening with root authority hears matching cuts even without cached reads; keep that
+   listener inside the host and expose only the caller's authorized item reads.
+2. If the item is open and `item.claim` is `null`, attempt the ordinary guarded claim once.
+   A concurrent claimant can still win; a `Conflict` means read again and resume waiting.
+   If the item is closed, stop: a close releases its claim but does not make it claimable.
+3. While another holder owns it, await the feed rather than sending another claim. Bound
+   every wait by the earlier of the requested wait deadline and the caller's remaining run
+   budget. Keep one absolute deadline across notifications and retries; an unrelated write
+   must not restart the timeout. The host races `listener.wait()` against its runtime timer
+   and cancellation, checks the deadline again before issuing a claim, and drops the listener
+   when the request ends. `CutListener::wait()` alone has no timeout.
+4. On a notification, read the item again before deciding to claim. Read again after a feed
+   reconnect or a batch with `dropped > 0` too. A notice is a hint to resynchronize, never
+   proof that the item is free. A release between a completed read and the call to `wait()`
+   is already queued; it does not require another release to wake the waiter.
+
+**Expiry needs a timer, and never authorizes takeover by itself.** The lease ending does not
+write anything or cut a thread. If the caller explicitly wants to consider an expired lease,
+wake at `item.claim.expires` as well as the overall deadline, re-read the holder and expiry,
+and send `takeover=true from=<holder>` only when explicitly requested. Otherwise keep waiting
+for release within the original deadline. The dispatcher's `lapse` sweep does write and wakes
+the feed, but records the lapse without releasing the claim. A plain claim after that wake
+still refuses; it must not silently become a takeover.
+
+**The feed does not provide FIFO acquisition.** All interested listeners can wake on the
+same release, and the first guarded claim to land wins, regardless of listener registration
+order. For FIFO, the host must serialize its waiters in a queue for that ledger and item,
+remove canceled or timed-out waiters, and let only the head attempt a claim. That queue's
+scope must cover every participating worker; separate client-side queues do not establish a
+shared order. The existing feed is enough to avoid repeated refused polls for a waiter; a
+server-side FIFO `claim wait=` operation would be additional behavior, not a feed guarantee.
+
 ### ★ A claim carries a fencing epoch, and a stale holder's writes are refused
 
 Since 0.20.0 (ledger #3205). A lane that stalls past its lease, is taken over, and then wakes
