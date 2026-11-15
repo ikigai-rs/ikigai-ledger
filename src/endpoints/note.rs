@@ -143,6 +143,7 @@ impl Endpoint for NoteEndpoint {
                 note: Some((epoch, &grant)),
                 acks: &[],
                 acks_epoch: 0,
+                acker: Acker::Anyone,
             },
         )
         .await?;
@@ -477,4 +478,67 @@ pub(super) async fn check_acks(
         }
     }
     Ok(())
+}
+
+/// Refuse an `acks=` from a capability that does not act as the claim's principal: an
+/// acknowledgment is the holder's (ledger #3718), as the notes read is. Without this any
+/// caller allowed to comment who knows the epoch, the dispatcher included, could clear the
+/// holder's unread count.
+pub(super) fn check_acker(inv: &Invocation<'_>, item: &Item, acks: &[String]) -> Result<()> {
+    if acks.is_empty() {
+        return Ok(());
+    }
+    match item.claim_principal.as_deref() {
+        Some(principal) if !inv.capability.acts_as(principal) => Err(Error::Denied(format!(
+            "{} is held by {} as {principal}, and this capability does not act as that \
+             principal: a claim's notes are acknowledged by its holder, so nothing was written",
+            item.short(),
+            item.claimed_by.as_deref().unwrap_or("nobody"),
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Who may acknowledge, as the write's own update checks it: the capability's identity,
+/// compared there with the claim's principal as [`Capability::acts_as`] compares it.
+#[derive(Clone, Copy, Default)]
+pub(crate) enum Acker<'a> {
+    /// Root acts as every principal: no clause.
+    #[default]
+    Anyone,
+    /// A capability carrying one principal: the claim's, if it has one, must be this.
+    Principal(&'a str),
+    /// A capability carrying no single principal: only a claim taken without one.
+    Nobody,
+}
+
+impl<'a> Acker<'a> {
+    pub(super) fn of(inv: &'a Invocation<'_>) -> Self {
+        if inv.capability.is_root() {
+            return Self::Anyone;
+        }
+        match inv.capability.principal() {
+            Some(principal) => Self::Principal(principal),
+            None => Self::Nobody,
+        }
+    }
+
+    /// The clause, inside the store's graph, that holds only while this acker acts as the
+    /// claim's principal on `item`: so a claim that changes hands between the endpoint's read
+    /// and its write is not acknowledged by the new caller.
+    pub(super) fn clause(self, item: &str) -> Result<String> {
+        Ok(match self {
+            Self::Anyone => String::new(),
+            Self::Principal(principal) => format!(
+                "FILTER NOT EXISTS {{ <{item}> <{p}> ?ackPrincipal \
+                 FILTER(?ackPrincipal != {me}) }}",
+                p = v::CLAIM_PRINCIPAL,
+                me = sparql::iri(principal, "principal")?,
+            ),
+            Self::Nobody => format!(
+                "FILTER NOT EXISTS {{ <{item}> <{}> ?ackPrincipal }}",
+                v::CLAIM_PRINCIPAL
+            ),
+        })
+    }
 }

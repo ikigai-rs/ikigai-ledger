@@ -596,7 +596,11 @@ note to worker-1 at epoch 2, sent under the dispatcher grant on acme#12 (urn:iki
   capability that does not act as the claim's principal is refused. `claim renew=true` ends
   `, 1 unread note` while a note to the claim is unacknowledged, and
   `comment item=12 epoch=2 acks=<note iri>` records `ledger:acks` on the worker's comment
-  (`acknowledges note: …` in text, `"acks"` in JSON), which clears the count.
+  (`acknowledges note: …` in text, `"acks"` in JSON), which clears the count. An
+  acknowledgment is the holder's: like the notes read, `acks=` from a capability that does not
+  act as the claim's principal (the dispatcher acknowledging its own note, or another worker
+  that knows the epoch) is refused (`Denied`) and nothing is written, checked again inside the
+  write's update so a claim that changes hands in between is not acknowledged by its caller.
 - ⚠ **What a note never does**, each pinned in `tests/dispatch_note_gap.rs`: widen a grant (it
   carries no capability, and no argument on `note` changes a claim, a lease, a label, a state
   or a grant), act on the item (it never claims, releases, renews, closes, reopens or hands

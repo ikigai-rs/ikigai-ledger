@@ -663,7 +663,7 @@ ledger:acks a rdf:Property ;
     rdfs:domain ledger:Comment ;
     rdfs:range ledger:DispatchNote ;
     rdfs:label "acknowledges" ;
-    rdfs:comment "From a worker's comment to a dispatch note it acknowledges (`comment acks=`, under the comment grant, fenced by the note's epoch): the record that the note was read. Only a note on the same item, addressed to the claim at the comment's epoch, can be acknowledged." .
+    rdfs:comment "From a worker's comment to a dispatch note it acknowledges (`comment acks=`, under the comment grant, fenced by the note's epoch): the record that the note was read. An acknowledgment is the holder's: only a capability acting as the claim's principal writes one. Only a note on the same item, addressed to the claim at the comment's epoch, can be acknowledged." .
 
 ledger:editKind a rdf:Property ;
     rdfs:range xsd:string ;

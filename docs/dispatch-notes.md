@@ -91,7 +91,8 @@ comments and history, moved with the item on a delete.
   the worker loop nothing new: `#12 renewed by worker-1 at epoch 2 until …, 1 note` in text and
   `"notes": 1` in JSON. The loop reads `notes` only when the count moved.
 - **Acknowledgment is recorded too**: `comment item=<id> epoch=<n> acks=<note iri>` writes
-  `ledger:acks` on the worker's comment, under the comment grant, fenced by the epoch. The
+  `ledger:acks` on the worker's comment, under the comment grant, fenced by the epoch, and
+  only by the holder: a capability that does not act as the claim's principal is refused. The
   dispatcher can then see that the note was read, and if it was not acknowledged by the next
   renewals, it knows the lane is stalled and takes over the expired lease as it does today. That
   is where this meets the stalled-claim item.

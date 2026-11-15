@@ -1305,6 +1305,8 @@ pub(crate) struct CommentExtra<'a> {
     acks: &'a [String],
     /// The epoch the acknowledged notes must have been sent at.
     acks_epoch: u64,
+    /// Who writes the acknowledgment, checked against the claim's principal in the update.
+    acker: note::Acker<'a>,
 }
 
 /// [`write_comment`] with an optional key (ledger #1178): with one, the comment is written
@@ -1378,6 +1380,12 @@ async fn write_keyed_comment(
             v::ON_ITEM,
             v::NOTE_EPOCH
         )));
+    }
+    // ★ And only by the holder (ledger #3718): the claim's principal, bound in this same
+    // update as the hand-back reads the holder label, must be one the writer acts as, so a
+    // claim that changes hands after the endpoint's check is not acknowledged by its caller.
+    if !extra.acks.is_empty() {
+        acks_guard.push_str(&client.in_graph(&extra.acker.clause(item)?));
     }
     // ★ The hand-back is in the SAME update as the comment (ledger #1199), so the evidence
     // and the state it puts the item in land together or not at all.
@@ -3997,6 +4005,9 @@ impl Endpoint for CommentEndpoint {
                 detail: "an empty comment says nothing and cannot be edited afterwards".to_string(),
             });
         }
+        // ★ An acknowledgment is the holder's (ledger #3718), refused before anything else
+        // is read about the notes it names.
+        note::check_acker(inv, &item, &acks)?;
         if let Some(epoch) = epoch {
             note::check_acks(&client, &item, epoch, &acks).await?;
         }
@@ -4054,6 +4065,7 @@ impl Endpoint for CommentEndpoint {
                 note: None,
                 acks: &acks,
                 acks_epoch: epoch.unwrap_or_default(),
+                acker: note::Acker::of(inv),
             },
         )
         .await?;
@@ -4070,6 +4082,9 @@ impl Endpoint for CommentEndpoint {
             };
             if keyed.is_none() {
                 let now = model::load_item(&client, &item.iri).await?.unwrap_or(item);
+                // The claim changed principals under the same epoch: not the caller's to
+                // acknowledge.
+                note::check_acker(inv, &now, &acks)?;
                 if let Some(epoch) = epoch {
                     if now.open || change != Handback::Set {
                         return Err(fence_refusal(&now, epoch));
@@ -4236,9 +4251,11 @@ impl Endpoint for CommentEndpoint {
                                 "The dispatch notes this comment acknowledges, by their IRIs, \
                                  separated by commas (ledger #3718): each is recorded as \
                                  `ledger:acks`, so the dispatcher can see the note was read. \
-                                 Needs `epoch=`, and each note must be on this item and \
-                                 addressed to the claim at that epoch; otherwise refused and \
-                                 nothing is written. Says `acknowledges note:` in text and \
+                                 An acknowledgment is the holder's: a capability that does \
+                                 not act as the claim's principal is refused (Denied). Needs \
+                                 `epoch=`, and each note must be on this item and addressed \
+                                 to the claim at that epoch; otherwise refused and nothing is \
+                                 written. Says `acknowledges note:` in text and \
                                  `\"acks\"` in JSON.",
                             )
                             .class(v::ext::XSD_STRING)

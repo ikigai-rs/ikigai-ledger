@@ -523,3 +523,77 @@ fn the_holder_reads_its_notes_counts_them_on_renew_and_acknowledges_them() {
     let answer = renew(&kernel);
     assert!(!answer.contains("note"), "nothing unread now: {answer}");
 }
+
+/// The unread count `claim renew=true` answers the worker with, as its trailing words.
+fn renew_answer(kernel: &Kernel) -> String {
+    try_as(
+        kernel,
+        &worker(),
+        Verb::Sink,
+        &at("claim"),
+        &[
+            ("item", "1"),
+            ("lease", "30m"),
+            ("content", "worker-1"),
+            ("renew", "true"),
+            ("epoch", "1"),
+        ],
+    )
+    .expect("renewed")
+}
+
+fn the_note(kernel: &Kernel) -> String {
+    item_json(kernel)["item"]["comments"][0]["id"]
+        .as_str()
+        .expect("id")
+        .to_string()
+}
+
+#[test]
+fn an_acknowledgment_is_the_holders_and_nobody_elses() {
+    let kernel = held_item_with_a_note_and_a_comment();
+    let iri = the_note(&kernel);
+    let before = item_json(&kernel)["item"]["comments"]
+        .as_array()
+        .expect("comments")
+        .len();
+    let ack = |who: &Capability| {
+        try_as(
+            &kernel,
+            who,
+            Verb::Sink,
+            &at("comment"),
+            &[
+                ("item", "1"),
+                ("content", "read it"),
+                ("epoch", "1"),
+                ("acks", &iri),
+            ],
+        )
+    };
+    // The dispatcher acknowledging its own note is refused, and writes nothing.
+    let by_dispatcher = ack(&dispatcher());
+    assert!(
+        matches!(&by_dispatcher, Err(Error::Denied(why))
+            if why.contains("does not act as that principal")
+                && why.contains("acknowledged by its holder")),
+        "{by_dispatcher:?}"
+    );
+    // So is another principal allowed to comment, at the right epoch.
+    let by_other = ack(&grant(&["read", "comment"], OTHER_WORKER));
+    assert!(matches!(&by_other, Err(Error::Denied(_))), "{by_other:?}");
+    let after = item_json(&kernel)["item"]["comments"]
+        .as_array()
+        .expect("comments")
+        .len();
+    assert_eq!(after, before, "a refused acknowledgment writes no comment");
+    let answer = renew_answer(&kernel);
+    assert!(
+        answer.trim_end().ends_with(", 1 unread note"),
+        "the holder's count is unchanged: {answer}"
+    );
+    // The holder still acknowledges, and the count drops.
+    ack(&worker()).expect("the holder acknowledges");
+    let answer = renew_answer(&kernel);
+    assert!(!answer.contains("note"), "nothing unread now: {answer}");
+}
