@@ -2569,6 +2569,31 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.23.0: stalled claims, dispatch notes, write shapes, and session summaries in their own graph
+
+A minor release. Two existing answers change: a label removal that removes nothing is refused, and the plain
+face says priorities and groups in words. Summaries recorded by 0.22.0 move only by an explicit step.
+
+- **Stalled claims** (ledger #3709, PR 120): `urn:iki:ledger:{ledger}:stalled` lists open items held on a lease
+  that has run out, oldest first, each saying whether its lapse is recorded; `urn:iki:ledger:{ledger}:lapse`
+  records each lapse once as a `ledger:LapseEvent` in the item's history and can route it to a person. Nothing is
+  released or reaped. See "A lapsed lease is recorded once, listed, and can be routed to a person".
+- **Dispatch notes** (ledger #3710, #3718, PR 121, 124): the dispatcher writes a `ledger:DispatchNote` to a
+  claim's holder at its epoch, and the holder acknowledges it on the record. See "Dispatch notes".
+- **Write shapes** (ledger #3724, PR 126): a host-configured SHACL shape refuses or warns on a claim, hand-back,
+  comment or other write before it lands. See "Write shapes".
+- **Session summaries in their own named graph** (ledger #3661, PR 118), with `ledger:sessionItemNumber`. ⚠ A
+  worker recording summaries now needs the session graph's store read and write grants beside
+  `urn:cap:ledger:session:{ledger}` (see the grant table); summaries 0.22.0 wrote move by the explicit `sessions`
+  Sink, never at startup.
+- **A label removal that changes nothing is refused** (PR 119) instead of answering success.
+- **Plain faces say priorities and groups in words** (PR 125).
+- **Waiting for a held item** is documented (ledger #3711, PR 123): wait on the store's change feed instead of
+  retrying a refused claim. No endpoint is added.
+
+After the release, `/ns/ledger` needs a redeploy (Brian's) so the published vocabulary carries 0.23.0 and the lapse
+and dispatch-note terms.
+
 ### 0.22.0: agent session summaries, a summaries-only grant, and a fourth finding severity
 
 A minor release: new resources and a new grant; no existing answer changes shape.
