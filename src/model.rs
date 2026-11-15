@@ -301,8 +301,8 @@ impl Item {
     pub fn line(&self) -> String {
         let status = if self.open { "open  " } else { "closed" };
         let priority = match self.priority {
-            Some(p) => format!("p{p}"),
-            None => "p-".to_string(),
+            Some(p) => format!("priority {p}"),
+            None => "no priority set".to_string(),
         };
         let mut line = format!("{:>5}  {status}  {priority}  {}", self.short(), self.title);
         if !self.labels.is_empty() {
@@ -747,7 +747,7 @@ impl Comment {
             .collect();
         let rejects = format!("{rejects}{acks}");
         format!(
-            "  {}{} {author}{committer}\n{rejects}{note}{}\n",
+            "  comment by {author}{committer} at {}{}:\n{rejects}{note}{}\n",
             sparql::iso8601(self.created),
             claimed_date(self.created_claimed),
             self.body
@@ -2798,7 +2798,7 @@ mod tests {
         assert!(!line.contains('\n'));
         assert!(line.contains("#12"), "{line}");
         assert!(line.contains("open"), "{line}");
-        assert!(line.contains("p1"), "{line}");
+        assert!(line.contains("priority 1"), "{line}");
         assert!(line.contains("[module]"), "{line}");
     }
 

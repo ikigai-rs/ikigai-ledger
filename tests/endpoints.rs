@@ -269,7 +269,7 @@ fn editing_replaces_fields_and_stamps_the_item() {
     let view = source(&kernel, "urn:iki:ledger:item:1", &[]);
     assert!(view.contains("Right title"), "{view}");
     assert!(!view.contains("Wrong title"), "{view}");
-    assert!(view.contains("p0"), "{view}");
+    assert!(view.contains("priority 0"), "{view}");
     assert!(view.contains("And a body."), "{view}");
 }
 

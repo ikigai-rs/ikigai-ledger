@@ -142,7 +142,7 @@ fn a_scalar_edit_with_the_engines_empty_content_keeps_the_title_and_body() {
     assert_eq!(body, "The valuable part.");
     assert!(about.contains("urn:agents:session:abc"), "{about}");
     let listing = source(&kernel, &item, &[]);
-    assert!(listing.contains("p3"), "{listing}");
+    assert!(listing.contains("priority 3"), "{listing}");
 
     // An empty content with NOTHING else is still refused: it asks for no change at all,
     // and reading it as a request to blank the title is the hazard this closes.
@@ -224,7 +224,10 @@ fn titles(listing: &str) -> Vec<String> {
         .map(str::trim_start)
         .filter(|line| line.starts_with('#'))
         .map(|line| {
-            line.split_whitespace()
+            // Columns are separated by two spaces; priority and titles contain words.
+            line.split("  ")
+                .map(str::trim)
+                .filter(|column| !column.is_empty())
                 .nth(3)
                 .unwrap_or_default()
                 .to_string()

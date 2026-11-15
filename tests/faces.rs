@@ -1,6 +1,8 @@
-//! **The faces, as literals.** The plain face is what the gonk bridges parse (`iri:` lines,
-//! status tokens, `blocks:` lines, the `#N <iri>` answer), so a change to it breaks them
-//! silently; these pin it byte for byte, as 0.3.0 rendered it. The JSON face is the
+//! **The faces, as literals.** Gonk bridges historically parsed the plain face (`iri:`
+//! lines, status tokens, `blocks:` lines, the `#N <iri>` answer). These pin it byte for byte.
+//! Ledger #3625 deliberately updates readable
+//! priorities, comment stamps and exclusion plurals after auditing consumers
+//! (`docs/plain-face-consumers.md`). The JSON face is the
 //! machine contract that replaces that parsing, and its literals are the schema.
 //!
 //! Minted ids are random per process, so every id is replaced by `{a}`, `{b}`, … in order
@@ -123,16 +125,15 @@ fn seeded() -> Kernel {
     kernel
 }
 
-// ------------------------------------------------------------------ the plain face, 0.3.0
+// ------------------------------------------------------------------ the plain face
 
-/// Unchanged but for one line since 0.20.0: a claimed item's detail names its claim's epoch
-/// (`epoch:`, ledger #3205), under its purpose.
+/// Priority words and comment grouping are intentional changes for ledger #3625.
 #[test]
-fn the_plain_item_detail_is_unchanged() {
+fn the_plain_item_detail_uses_readable_priority_and_comment_groups() {
     let kernel = seeded();
     assert_eq!(
         normalize(&source(&kernel, "urn:iki:ledger:item:1", &[])),
-        "   #1  open    p1  Fix the thing  [audit rust]  claimed:satellite\n\
+        "   #1  open    priority 1  Fix the thing  [audit rust]  claimed:satellite\n\
          \x20 iri:      urn:iki:ledger:default:item:{a}\n\
          \x20 filed:    2026-09-15T00:00:00.000Z by brian\n\
          \x20 updated:  2026-09-15T00:00:00.000Z\n\
@@ -147,13 +148,13 @@ fn the_plain_item_detail_is_unchanged() {
          \x20 Badly.\n\
          \n\
          1 comment(s):\n\
-         \x20 2026-09-15T00:00:00.000Z chris (claimed, free text)\n\
+         \x20 comment by chris (claimed, free text) at 2026-09-15T00:00:00.000Z:\n\
          \x20   looked at it\n"
     );
 }
 
 #[test]
-fn the_plain_listing_is_unchanged() {
+fn the_plain_listing_uses_readable_priority() {
     let kernel = seeded();
     assert_eq!(
         normalize(&source(
@@ -161,9 +162,9 @@ fn the_plain_listing_is_unchanged() {
             "urn:iki:ledger:items",
             &[("status", "all")]
         )),
-        "   #3  closed  p-  Third  (wontfix)\n\
-         \x20  #2  open    p-  Second\n\
-         \x20  #1  open    p1  Fix the thing  [audit rust]  claimed:satellite\n\
+        "   #3  closed  no priority set  Third  (wontfix)\n\
+         \x20  #2  open    no priority set  Second\n\
+         \x20  #1  open    priority 1  Fix the thing  [audit rust]  claimed:satellite\n\
          \n\
          3 item(s)\n"
     );
@@ -204,11 +205,11 @@ fn the_plain_write_answers_are_unchanged() {
 }
 
 #[test]
-fn the_plain_next_is_unchanged() {
+fn the_plain_next_uses_real_plurals() {
     let kernel = seeded();
     assert_eq!(
         source(&kernel, "urn:iki:ledger:next", &[]),
-        "nothing is ready (2 open item(s) excluded: #2 blocked by #1; #1 claimed by satellite)\n\
+        "nothing is ready (2 open items excluded: #2 blocked by #1; #1 claimed by satellite)\n\
          policy: priority-recency\n"
     );
 }
@@ -753,7 +754,7 @@ fn a_keyed_items_plain_detail_gains_one_line() {
             "urn:iki:ledger:item:key:urn:kata:issue:01JZ",
             &[]
         )),
-        "   #4  open    p-  Keyed\n\
+        "   #4  open    no priority set  Keyed\n\
          \x20 iri:      urn:iki:ledger:default:item:{a}\n\
          \x20 key:      urn:kata:issue:01JZ\n\
          \x20 filed:    2026-09-15T00:00:00.000Z\n\
@@ -778,4 +779,95 @@ fn a_write_invalidates_a_cached_json_read() {
     assert_eq!(count(), 4);
     append(&kernel, "Fifth", &[]);
     assert_eq!(count(), 5, "a cached JSON read survived a write");
+}
+
+/// These checks also read the output with indentation removed, as a spoken stream would.
+#[test]
+fn plain_readability_priority_words_cover_every_value_and_unset() {
+    let kernel = frozen();
+    for priority in ["0", "1", "2", "3", "4"] {
+        let n = append(&kernel, "Priority", &[("priority", priority)]);
+        let detail = source(
+            &kernel,
+            &format!("urn:iki:ledger:item:{}", n.trim_start_matches('#')),
+            &[],
+        );
+        assert!(
+            detail
+                .lines()
+                .next()
+                .unwrap()
+                .contains(&format!("priority {priority}")),
+            "{detail}"
+        );
+    }
+    let n = append(&kernel, "Unset", &[]);
+    let detail = source(
+        &kernel,
+        &format!("urn:iki:ledger:item:{}", n.trim_start_matches('#')),
+        &[],
+    );
+    assert!(
+        detail.lines().next().unwrap().contains("no priority set"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn plain_readability_empty_selection_uses_the_counts_plural() {
+    let kernel = frozen();
+    for count in 0..=3 {
+        if count > 0 {
+            let n = append(&kernel, "Deferred", &[]);
+            sink(&kernel, "urn:iki:ledger:defer", &[("item", &n)]);
+        }
+        let next = source(&kernel, "urn:iki:ledger:next", &[]);
+        let noun = if count == 1 { "item" } else { "items" };
+        assert!(
+            next.starts_with(&format!("nothing is ready ({count} open {noun} excluded:")),
+            "{next}"
+        );
+    }
+}
+
+#[test]
+fn plain_readability_groups_name_their_relationships_without_indentation() {
+    let kernel = seeded();
+    sink(
+        &kernel,
+        "urn:iki:ledger:comment",
+        &[("item", "#1"), ("content", "First line\nSecond line")],
+    );
+    let detail = source(&kernel, "urn:iki:ledger:item:1", &[]);
+    let lines: Vec<_> = detail.lines().map(str::trim).collect();
+    assert!(
+        lines.contains(&"comment by chris (claimed, free text) at 2026-09-15T00:00:00.000Z:"),
+        "{detail}"
+    );
+    assert!(
+        lines.windows(3).any(|group| group
+            == [
+                "comment by (unattributed) at 2026-09-15T00:00:00.000Z:",
+                "First line",
+                "Second line",
+            ]),
+        "{detail}"
+    );
+}
+
+#[test]
+fn plain_readability_doctor_remedies_name_the_finding_without_indentation() {
+    let kernel = seeded();
+    let doctor = source(&kernel, "urn:iki:ledger:doctor", &[]);
+    assert_eq!(
+        doctor,
+        "doctor: default (lifecycle kata-flight): 1 problem(s)\n\n\
+         \x20 orphaned       #1 is held by satellite (a machine claim) in `filed`, which is not in flight\n\
+         \x20 remedy for orphaned on #1: release it (`delete urn:iki:ledger:claim item=1`), or move it into flight (`sink urn:iki:ledger:default::item:1:state from=filed to=<an in-flight state>`)\n\n\
+         checked: orphaned, abandoned, lease-expired, unknown-state, two-states, awaiting-closed, awaiting-stale at 2026-09-15T00:00:00.000Z\n"
+    );
+    assert!(doctor
+        .lines()
+        .map(str::trim)
+        .any(|line| line.starts_with("remedy for orphaned on #1:")));
 }

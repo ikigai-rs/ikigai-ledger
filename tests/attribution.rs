@@ -125,7 +125,8 @@ fn writing_as_yourself_is_a_verified_author_on_every_face() {
 
     has(&plain, &format!("  author:   {ADA} (verified)\n"));
     has(&plain, &format!("  committer: {ADA} at "));
-    has(&plain, &format!("{ADA} (verified)\n    a note"));
+    has(&plain, &format!("comment by {ADA} (verified) at "));
+    has(&plain, ":\n    a note");
     lacks(&plain, "(claimed");
 
     let who = &json["item"]["attribution"];
@@ -162,7 +163,7 @@ fn an_enrolled_delegate_records_a_claimed_author_and_itself_as_committer() {
     has(&plain, &format!("  committer: {ADA_AGENT} at "));
     has(
         &plain,
-        &format!("{ADA} (claimed by a delegate), committed by {ADA_AGENT}\n"),
+        &format!("comment by {ADA} (claimed by a delegate), committed by {ADA_AGENT} at "),
     );
 
     let who = &json["item"]["attribution"];
@@ -257,8 +258,8 @@ fn an_import_principal_claims_a_foreign_author_and_authored_dates() {
     has(
         &plain,
         &format!(
-            "  2020-01-05T00:00:00.000Z (claimed) {FOREIGN} (claimed by an importer), \
-             committed by {IMPORTER}\n"
+            "  comment by {FOREIGN} (claimed by an importer), committed by {IMPORTER} \
+             at 2020-01-05T00:00:00.000Z (claimed):\n"
         ),
     );
     has(&plain, "  updated:  2020-02-03T04:05:06.000Z (claimed)\n");
