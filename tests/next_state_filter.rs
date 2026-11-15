@@ -210,7 +210,7 @@ fn the_filters_compose() {
     let none = source(&kernel, NEXT, &[("drain", "triage"), ("state", "queued")]);
     assert_eq!(
         none,
-        "nothing is ready (0 open item(s) excluded: the ledger has no open items matching the \
+        "nothing is ready (0 open items excluded: the ledger has no open items matching the \
          filter)\npolicy: priority-recency\n"
     );
 }

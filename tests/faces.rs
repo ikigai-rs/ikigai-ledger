@@ -1,5 +1,6 @@
 //! **The faces, as literals.** Gonk bridges historically parsed the plain face (`iri:`
-//! lines, status tokens, `blocks:` lines, the `#N <iri>` answer). These pin it byte for byte. Ledger #3625 deliberately updates readable
+//! lines, status tokens, `blocks:` lines, the `#N <iri>` answer). These pin it byte for byte.
+//! Ledger #3625 deliberately updates readable
 //! priorities, comment stamps and exclusion plurals after auditing consumers
 //! (`docs/plain-face-consumers.md`). The JSON face is the
 //! machine contract that replaces that parsing, and its literals are the schema.
