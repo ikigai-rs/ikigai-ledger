@@ -2106,6 +2106,40 @@ SELECT DISTINCT ?item ?commit ?closed ?reopened WHERE {
 `eventSequence` and not the dates, because an importer's close carries its source date. What counts
 as a commit is the query's to say; this one reads GitHub's `/commit/` from the IRI.
 
+### Write shapes: a SHACL shape that refuses or warns on a write
+
+A host can have a write checked against a SHACL shape before it lands (ledger #3724). **Off by
+default**: a ledger with no shapes configured writes exactly as before and issues nothing more.
+
+```rust,ignore
+use ikigai_ledger::{ShapeOutcome, SpaceConfig, WriteKind};
+let config = SpaceConfig::default()
+    .write_shape("default", "urn:acme:shape:close-carries-evidence",
+                 &[WriteKind::Close], ShapeOutcome::Refuse);
+```
+
+- **The shape is a resource**, read through the kernel when the write is made, and the write's
+  would-be graph is validated at `urn:shacl:validate` in the same request, so bind
+  `ikigai-shacl` (or another implementation of it) in the same kernel.
+- **The would-be graph** is what the write would add, in the ledger's own vocabulary: a close is
+  a `ledger:StatusEvent` with `ledger:onItem`, `ledger:status ledger:closed`,
+  `ledger:closedReason` and each `ledger:evidence`; a comment is a `ledger:Comment` with
+  `ledger:onItem` and `ledger:body`. A hand-back (`handback=true`) is checked as both `report`
+  and `comment`. "A close carries evidence" is `sh:minCount 1` on `ledger:evidence`.
+- **Refuse**: the write is refused (`Conflict`), naming the shape and each violated constraint
+  in words (`MinCount on evidence: a close carries evidence`), and nothing is written.
+- **Warn**: the write lands, and the firing is recorded on the request's trace span as the note
+  `ledger-shape-warning`, naming the shape and the constraint; the tracer writes it as an
+  ikigai-log line.
+- ⚠ **A shape that fails to load refuses nothing**: an unreadable shape, or no validator bound,
+  lets the write through and records `ledger-shape-unloaded` on the trace, naming the shape and
+  the error.
+- ⚠ **Only `report`, `close` and `comment` can be governed today.** `claim` and `label` are
+  not checked yet, so a shape that lists either one is refused when the manifest is built (a
+  panic in `write_shape`), rather than looking enforced and doing nothing.
+
+`tests/write_shapes.rs` holds all of this.
+
 ### Explicit one-time backfill of `handedBackBy` (never at startup)
 
 A hand-back written before 0.15.0 names no holder in the graph, but gonk's worker loop wrote it

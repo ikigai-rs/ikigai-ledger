@@ -150,6 +150,7 @@ pub mod lifecycle;
 pub mod model;
 pub mod policy;
 pub mod select;
+pub mod shapes;
 pub mod sparql;
 pub mod vocabulary;
 
@@ -162,4 +163,5 @@ pub use ledger::Ledger;
 pub use lifecycle::{Lifecycle, Lifecycles};
 pub use policy::{Candidate, OrderingPolicy, Ranked, SelectionInputs};
 pub use select::{ready, Selection};
+pub use shapes::{Outcome as ShapeOutcome, WriteKind};
 pub use vocabulary::{LEDGER_NS, VOCABULARY_TTL};

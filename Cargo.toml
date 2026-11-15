@@ -126,3 +126,7 @@ ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # 0.3.0 shares core 0.3.0 and its scoped content store (ledger #2965).
 # 0.3.4 projects resend declarations in the Turtle Meta face.
 ikigai-vocab = "0.3.4"
+# `urn:shacl:validate` for `tests/write_shapes.rs` (ledger #3724): the write-shape hook issues
+# it through the kernel and links nothing of it. Default features off: the subset validator,
+# with no rudof and no network stack, which is all a `sh:minCount` shape needs.
+ikigai-shacl = { version = "0.6.1", default-features = false }
