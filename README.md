@@ -2606,6 +2606,17 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.23.1: a list row can leave out bodies, comments and attribution
+
+A patch release: two optional inputs and one new JSON field; no existing answer changes shape.
+
+- **`omit=` and `comments=` on `items` and `next`** (ledger #3781, PR 128), single-ledger and `ledgers=`: `omit=` takes any
+  of `body`, `comments`, `attribution`; `comments=` is `all` (the default), `last` or `none`. JSON schema 1 holds: an
+  omitted body is `""`, omitted comments are `[]` (or the newest one under `last`), an omitted attribution is left out
+  as an unattributed one is, and every row gains `omitted`, the sorted list of what it left out. `comments=none` runs
+  no comments query at all; `last` runs a bounded one. The plain and Turtle faces refuse a shape that leaves anything
+  out. See "Leaving bodies and comments out of a list row".
+
 ### 0.23.0: stalled claims, dispatch notes, write shapes, and session summaries in their own graph
 
 A minor release. Two existing answers change: a label removal that removes nothing is refused, and the plain
