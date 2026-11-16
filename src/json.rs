@@ -57,6 +57,58 @@
 //! assert!(serde_json::from_str::<ItemDocument>(&newer).is_ok());
 //! ```
 //!
+//! ## A row that leaves parts out: `omitted`
+//!
+//! `items` and `next` take `omit=` (a comma-separated subset of `body`, `comments`,
+//! `attribution`) and `comments=` (`all`, the default; `last`; `none`), so a face that draws a
+//! list need not carry text it does not show (ledger #3781). The row stays schema 1, so nothing
+//! changes type: an omitted `body` is `""`, omitted `comments` are `[]` (or the one latest
+//! comment under `comments=last`), and an omitted `attribution` is absent, which reads as
+//! `null`, on the item and its comments. Every item carries [`Item::omitted`], last: the sorted
+//! list of what THAT row left out, `[]` when nothing was. It is how a reader tells "left out"
+//! from "empty".
+//!
+//! ```
+//! use ikigai_ledger::json::ItemsDocument;
+//! // `items omit=body,attribution comments=last as=application/json`, one row.
+//! let served = r##"{"schema": 1, "ledger": "default", "count": 1, "total": 1, "offset": 0,
+//!   "items": [{
+//!     "number": 1, "display": "#1",
+//!     "iri": "urn:iki:ledger:default:item:01m491qbh6e51p14abcdefg",
+//!     "kind": null, "title": "Fix the thing", "body": "",
+//!     "status": "open", "closed_reason": null, "priority": null, "deferred": false,
+//!     "labels": [], "about": [], "key": null, "author": "brian", "revision": null,
+//!     "claim": null,
+//!     "created": "2026-09-15T00:00:00.000Z", "modified": "2026-09-15T00:00:00.000Z",
+//!     "links": [], "children": [],
+//!     "comments": [{"id": "urn:iki:ledger:default:comment:01m491qbh6e51p14abcdefk",
+//!                   "author": "chris", "time": "2026-09-15T00:00:01.000Z",
+//!                   "text": "the latest", "kind": "comment"}],
+//!     "defects": [], "state": "filed", "awaiting": null,
+//!     "raised": null, "omitted": ["attribution", "body", "comments"]
+//!   }],
+//!   "unreadable": []}"##;
+//! let doc: ItemsDocument = serde_json::from_str(served).unwrap();
+//! let row = &doc.items[0];
+//! // Sorted; `comments` because the item had more comments than the one shown.
+//! assert_eq!(row.omitted, ["attribution", "body", "comments"]);
+//! assert_eq!(row.body, "");
+//! assert!(row.attribution.is_none() && row.comments[0].attribution.is_none());
+//! assert_eq!(row.comments.len(), 1);
+//! // A document from before the field reads with nothing omitted.
+//! let earlier = served.replacen(r#", "omitted": ["attribution", "body", "comments"]"#, "", 1);
+//! let earlier: ItemsDocument = serde_json::from_str(&earlier).unwrap();
+//! assert!(earlier.items[0].omitted.is_empty());
+//! // And the field is serialized last, after every earlier one.
+//! let json = serde_json::to_string(row).unwrap();
+//! assert!(json.ends_with(r#","omitted":["attribution","body","comments"]}"#), "{json}");
+//! ```
+//!
+//! With `comments=none` or `omit=comments` the comments query is not run at all; with
+//! `comments=last` the query answers one comment per item. The plain and Turtle faces refuse a
+//! shape that leaves anything out (InvalidArgument, naming the JSON face), since neither carries
+//! the parts it would leave out in a way the omission could be told from.
+//!
 //! The other documents, field by field: [`ItemsDocument`] (`items`), [`CountDocument`]
 //! (`count`), [`LedgersDocument`] (`ledgers`), [`NextDocument`] (`next`) and [`Answer`]
 //! (the four writes). `tests/faces.rs` pins the ledger-bound documents as literals;
@@ -301,6 +353,111 @@ pub struct Item {
     /// author nor a committer. Added in 0.15.0 (ledger #2827).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<Attribution>,
+    /// What this row leaves out, sorted: `attribution`, `body`, `comments`, each named when
+    /// the read's `omit=` or `comments=` left it out (ledger #3781). `[]` when nothing was,
+    /// which is every row of `item:{id}` and every row read without those inputs. Under
+    /// `comments=last` it names `comments` only when the item had more comments than the one
+    /// shown. An omitted `body` is `""`, omitted `comments` are `[]` and an omitted
+    /// `attribution` is absent (`null`), on the item and on any comment shown, so a reader
+    /// tells "left out" from "empty" by this field alone. Added after 0.23.0, LAST so every
+    /// earlier field keeps its place; `#[serde(default)]`, so an earlier document reads with
+    /// `[]`.
+    #[serde(default)]
+    pub omitted: Vec<String>,
+}
+
+/// Which comments a row carries: `comments=` on `items` and `next` (ledger #3781).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Comments {
+    /// Every comment, oldest first: today's rows.
+    #[default]
+    All,
+    /// Only the most recent comment.
+    Last,
+    /// None, and the comments query is not run.
+    None,
+}
+
+/// How the rows of a listing are shaped: `omit=` and `comments=` on `items` and `next`
+/// (ledger #3781). The default is the whole item.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Shape {
+    /// Leave out the body (`""`).
+    pub body: bool,
+    /// Leave out the attribution of the item and of its comments (`null`).
+    pub attribution: bool,
+    /// Which comments to carry.
+    pub comments: Comments,
+}
+
+/// The values `omit=` takes.
+pub(crate) const OMIT_VALUES: [&str; 3] = ["body", "comments", "attribution"];
+/// The values `comments=` takes; the first is the default.
+pub(crate) const COMMENTS_VALUES: [&str; 3] = ["all", "last", "none"];
+
+impl Shape {
+    /// Read `omit=` and `comments=`, each `None` when absent. `omit=comments` is
+    /// `comments=none`, and with `comments=last` the two contradict, which is refused rather
+    /// than resolved.
+    pub(crate) fn parse(omit: Option<&str>, comments: Option<&str>) -> Result<Shape> {
+        let mut shape = Shape::default();
+        let mut omit_comments = false;
+        if let Some(omit) = omit.filter(|o| !o.trim().is_empty()) {
+            for value in omit.split(',').map(str::trim) {
+                match value {
+                    "body" => shape.body = true,
+                    "attribution" => shape.attribution = true,
+                    "comments" => omit_comments = true,
+                    other => {
+                        return Err(Error::InvalidArgument {
+                            name: "omit".to_string(),
+                            detail: format!(
+                                "`{other}` is not a part a row can leave out; a \
+                                 comma-separated list of {}",
+                                OMIT_VALUES.join(", ")
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+        shape.comments = match comments.map(str::trim) {
+            None => Comments::All,
+            Some("all") => Comments::All,
+            Some("last") => Comments::Last,
+            Some("none") => Comments::None,
+            Some(other) => {
+                return Err(Error::InvalidArgument {
+                    name: "comments".to_string(),
+                    detail: format!(
+                        "`{other}` is not one of {} (default all)",
+                        COMMENTS_VALUES.join(", ")
+                    ),
+                })
+            }
+        };
+        // ⚠ Only `last` can be refused here. `all` is the declared default, and the kernel
+        // injects a declared default before an endpoint runs (ikigai-core, ledger #19), so an
+        // explicit `comments=all` cannot be told from no `comments=` at all; refusing it would
+        // refuse every `omit=comments`.
+        if omit_comments {
+            if shape.comments == Comments::Last {
+                return Err(Error::InvalidArgument {
+                    name: "omit".to_string(),
+                    detail: "`omit=comments` leaves every comment out and `comments=last` asks \
+                             for the last one, so they contradict; pass one of them"
+                        .to_string(),
+                });
+            }
+            shape.comments = Comments::None;
+        }
+        Ok(shape)
+    }
+
+    /// Whether this is the whole item, which every face serves.
+    pub(crate) fn is_whole(&self) -> bool {
+        *self == Shape::default()
+    }
 }
 
 /// Who wrote an item or a comment (ledger #2827): the author, verified or claimed, and the
@@ -904,10 +1061,15 @@ pub(crate) fn comment(comment: &model::Comment) -> Comment {
 
 /// An item as this face carries it. `numbers` names the link targets (from
 /// [`model::numbers_of`]); a target missing from it is a reference without a number.
+///
+/// `comments` are the ones to carry, already chosen by `shape.comments`; `more` says the item
+/// had comments beyond them, which is what puts `comments` in `omitted`.
 pub(crate) fn item(
     item: &model::Item,
     numbers: &BTreeMap<String, i64>,
     comments: &[model::Comment],
+    shape: Shape,
+    more: bool,
 ) -> Item {
     let ledger = Ledger::of_subject(&item.iri).unwrap_or_default();
     let target = |iri: &String| ItemRef {
@@ -938,7 +1100,11 @@ pub(crate) fn item(
         iri: item.iri.clone(),
         kind: item.kind.clone(),
         title: item.title.clone(),
-        body: item.body.clone(),
+        body: if shape.body {
+            String::new()
+        } else {
+            item.body.clone()
+        },
         status: if item.open { "open" } else { "closed" }.to_string(),
         closed_reason: item.closed_reason.clone(),
         priority: item.priority,
@@ -974,31 +1140,60 @@ pub(crate) fn item(
                 status: if edge.open { "open" } else { "closed" }.to_string(),
             })
             .collect(),
-        comments: comments.iter().map(self::comment).collect(),
+        comments: comments
+            .iter()
+            .map(self::comment)
+            .map(|mut comment| {
+                if shape.attribution {
+                    comment.attribution = None;
+                }
+                comment
+            })
+            .collect(),
         defects: item.defects.clone(),
         state: item.state().map(str::to_string),
         awaiting: item
             .awaiting
             .as_deref()
             .map(|a| model::awaiting_name(a).to_string()),
-        attribution: attribution(
-            &item.author,
-            &item.author_source,
-            &item.committer,
-            item.committed_at,
-            &[
-                ("created", item.created_claimed),
-                ("modified", item.modified_claimed),
-            ],
-        ),
+        attribution: if shape.attribution {
+            None
+        } else {
+            attribution(
+                &item.author,
+                &item.author_source,
+                &item.committer,
+                item.committed_at,
+                &[
+                    ("created", item.created_claimed),
+                    ("modified", item.modified_claimed),
+                ],
+            )
+        },
+        // Sorted by construction: the words in alphabetical order.
+        omitted: [
+            ("attribution", shape.attribution),
+            ("body", shape.body),
+            ("comments", more),
+        ]
+        .into_iter()
+        .filter(|(_, left_out)| *left_out)
+        .map(|(word, _)| word.to_string())
+        .collect(),
     }
 }
 
 /// Items as this face carries them, with their link targets' numbers and their comments —
-/// two queries for the whole set, whatever its size.
+/// two queries for the whole set, whatever its size, shaped by `shape`.
+///
+/// ★ **The work a shape skips is not done** (ledger #3781): with `comments=none` (or
+/// `omit=comments`) the comments query is not run at all, and with `comments=last` it is
+/// [`model::load_last_comments_for`], which answers one comment per item rather than all of
+/// them.
 pub(crate) async fn items(
     client: &sparql::StoreClient<'_, '_>,
     items: &[&model::Item],
+    shape: Shape,
 ) -> Result<Vec<Item>> {
     let targets = items
         .iter()
@@ -1013,15 +1208,26 @@ pub(crate) async fn items(
         .collect();
     let numbers = model::numbers_of(client, &targets).await?;
     let iris: Vec<String> = items.iter().map(|i| i.iri.clone()).collect();
-    let comments = model::load_comments_for(client, &iris).await?;
+    // Each item's comments to carry, and whether it had more than those.
+    let mut comments: BTreeMap<String, (Vec<model::Comment>, bool)> = match shape.comments {
+        Comments::All => model::load_comments_for(client, &iris)
+            .await?
+            .into_iter()
+            .map(|(iri, all)| (iri, (all, false)))
+            .collect(),
+        Comments::Last => model::load_last_comments_for(client, &iris)
+            .await?
+            .into_iter()
+            .map(|(iri, (last, more))| (iri, (vec![last], more)))
+            .collect(),
+        Comments::None => BTreeMap::new(),
+    };
     Ok(items
         .iter()
         .map(|i| {
-            item(
-                i,
-                &numbers,
-                comments.get(&i.iri).map(Vec::as_slice).unwrap_or_default(),
-            )
+            let (carried, more) = comments.remove(&i.iri).unwrap_or_default();
+            let more = more || shape.comments == Comments::None;
+            item(i, &numbers, &carried, shape, more)
         })
         .collect())
 }
@@ -1030,6 +1236,7 @@ pub(crate) async fn items(
 pub(crate) async fn next(
     client: &sparql::StoreClient<'_, '_>,
     selection: &Selection,
+    shape: Shape,
 ) -> Result<NextDocument> {
     let all: Vec<&model::Item> = selection
         .ranked
@@ -1037,7 +1244,7 @@ pub(crate) async fn next(
         .map(|(_, item)| item)
         .chain(selection.excluded.iter().map(|(item, _)| item))
         .collect();
-    let mut rendered = items(client, &all).await?.into_iter();
+    let mut rendered = items(client, &all, shape).await?.into_iter();
     let ranking = selection
         .ranked
         .iter()
