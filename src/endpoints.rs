@@ -1719,6 +1719,65 @@ fn ledgers_arg() -> ArgSpec {
 
 mod listing_sort;
 
+/// `omit=` and `comments=` (ledger #3781), read and checked against the face asked for.
+///
+/// ★ **They shape the JSON face only, and anything else that would change is refused.** The
+/// plain face's rows are item lines, which carry no body, comment or attribution to leave out,
+/// and the Turtle face is the items' triples, where a missing body reads as an item that has
+/// none. Serving either unchanged would let a caller believe the omission happened; so a shape
+/// that leaves anything out is refused there, naming the face it applies to. The defaults
+/// (`comments=all`, an empty `omit=`) change nothing and are served by every face.
+fn listing_shape(inv: &Invocation<'_>, want: &str) -> Result<json::Shape> {
+    let shape = json::Shape::parse(present_str(inv, "omit")?, present_str(inv, "comments")?)?;
+    if want != JSON && !shape.is_whole() {
+        let name = if present_str(inv, "omit")?.is_some_and(|o| !o.trim().is_empty()) {
+            "omit"
+        } else {
+            "comments"
+        };
+        return Err(Error::InvalidArgument {
+            name: name.to_string(),
+            detail: format!(
+                "`{name}` shapes the JSON face only (as={JSON}); the {} face has nothing to \
+                 leave out, so nothing was read",
+                if want == TURTLE { "Turtle" } else { "plain" }
+            ),
+        });
+    }
+    Ok(shape)
+}
+
+/// The `omit` and `comments` ArgSpecs of `items` and `next`.
+fn shape_args(description: Description) -> Description {
+    description
+        .input(
+            ArgSpec::new("omit")
+                .summary(
+                    "Comma-separated parts each JSON row leaves out: body, comments, \
+                     attribution. An omitted body is \"\", omitted comments are [] and an \
+                     omitted attribution is null, on the item and its comments; each row's \
+                     `omitted` names what it left out. omit=comments is comments=none, and \
+                     with comments=last is refused. JSON face only: the plain \
+                     and Turtle faces refuse it.",
+                )
+                .class(v::ext::XSD_STRING)
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("comments")
+                .summary(
+                    "Which comments each JSON row carries: all (default), last (only the \
+                     most recent; the row's `omitted` names comments when it had more) or \
+                     none (the comments are not read at all). JSON face only: the plain and \
+                     Turtle faces refuse last and none.",
+                )
+                .class(v::ext::XSD_STRING)
+                .one_of(json::COMMENTS_VALUES)
+                .default_value(json::COMMENTS_VALUES[0])
+                .optional(),
+        )
+}
+
 // --------------------------------------------------------------------------- items
 
 #[derive(Clone)]
@@ -1734,6 +1793,7 @@ impl Endpoint for ItemsEndpoint {
         let union = inv.inline_str("ledgers").is_ok();
         let bound = Ledger::from_bindings(inv.bindings)?;
         let want = wanted_face(inv, &READ_FACES)?;
+        let shape = listing_shape(inv, want)?;
         let sort = listing_sort::Sort::parse(inv.inline_str("sort").ok())?;
         let mut filter = parsed_listing_filter(inv)?;
         filter.limit = parse_limit(inv, 50)?;
@@ -1829,7 +1889,7 @@ impl Endpoint for ItemsEndpoint {
                     rendered.extend(
                         positions
                             .into_iter()
-                            .zip(json::items(&client, &rows).await?),
+                            .zip(json::items(&client, &rows, shape).await?),
                     );
                 }
             }
@@ -1950,63 +2010,64 @@ impl Endpoint for ItemsEndpoint {
     }
 
     fn describe(&self) -> Description {
-        read_scopes(
-            filter_inputs(
-                Description::new("ledger-items")
-                    .title("The ledger, filtered")
-                    .summary(
-                        "Every item matching the filter, ordered by sort (default -modified). The \
+        let described = filter_inputs(
+            Description::new("ledger-items")
+                .title("The ledger, filtered")
+                .summary(
+                    "Every item matching the filter, ordered by sort (default -modified). The \
                          filters are evaluated in the query, which is why the ordering policy \
                          behind `urn:iki:ledger:next` can stay small.",
-                    )
-                    .verb(Verb::Source)
-                    .verb(Verb::Meta)
-                    .input(ledger_arg("items"))
-                    .input(ledgers_arg()),
-            )
-            .input(
-                ArgSpec::new("sort")
-                    .summary(
-                        "Comma-separated priority, created, modified, number or landing; prefix a \
+                )
+                .verb(Verb::Source)
+                .verb(Verb::Meta)
+                .input(ledger_arg("items"))
+                .input(ledgers_arg()),
+        )
+        .input(
+            ArgSpec::new("sort")
+                .summary(
+                    "Comma-separated priority, created, modified, number or landing; prefix a \
                          key with - for descending order. Default -modified. Unset priority is \
                          always last. Landing orders the matching readable blocks graph before \
                          paging, with priority, ledger and number ties; a cycle is refused. \
                          Other ties use descending number, ledger and IRI.",
-                    )
-                    .class(v::ext::XSD_STRING)
-                    .default_value("-modified")
-                    .optional(),
-            )
-            .input(
-                ArgSpec::new("limit")
-                    .summary(
-                        "At most this many items on the page (default 50; `0` means 500). \
+                )
+                .class(v::ext::XSD_STRING)
+                .default_value("-modified")
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("limit")
+                .summary(
+                    "At most this many items on the page (default 50; `0` means 500). \
                          A page is not the set: the plain face's footer and the JSON \
                          face's `total` give how many items match, and `offset=` reaches \
                          the rest. The Turtle face is the page's items alone. For the total \
                          alone, read `urn:iki:ledger:count` with the same filter: it skips \
                          the page and the corpus check.",
-                    )
-                    .class(v::ext::XSD_INTEGER)
-                    .default_value("50")
-                    .optional(),
-            )
-            .input(
-                ArgSpec::new("offset")
-                    .summary(
-                        "How many matching items to skip, in the listing's order (default \
+                )
+                .class(v::ext::XSD_INTEGER)
+                .default_value("50")
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("offset")
+                .summary(
+                    "How many matching items to skip, in the listing's order (default \
                          0); the next page is at `offset` plus `limit`. Changes to sort keys \
                          or blocks between page reads can move rows, so an item can be \
                          missed or repeated: when the whole set matters, read it as one page.",
-                    )
-                    .class(v::ext::XSD_INTEGER)
-                    .default_value("0")
-                    .optional(),
-            )
-            .input(as_arg(&READ_FACES))
-            .output(PLAIN)
-            .output(TURTLE)
-            .output(JSON),
+                )
+                .class(v::ext::XSD_INTEGER)
+                .default_value("0")
+                .optional(),
+        )
+        .input(as_arg(&READ_FACES));
+        read_scopes(
+            shape_args(described)
+                .output(PLAIN)
+                .output(TURTLE)
+                .output(JSON),
         )
     }
 }
@@ -2350,7 +2411,7 @@ impl Endpoint for ItemEndpoint {
                     let doc = json::ItemDocument {
                         schema: json::SCHEMA,
                         ledger: client.ledger().name().to_string(),
-                        item: json::items(&client, &[&item])
+                        item: json::items(&client, &[&item], json::Shape::default())
                             .await?
                             .pop()
                             .expect("one rendered item"),
@@ -7173,6 +7234,7 @@ impl Endpoint for NextEndpoint {
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv, &READ_FACES)?;
+        let shape = listing_shape(inv, want)?;
         let now = now_ms(inv)?;
         let name = inv
             .inline_str("policy")
@@ -7243,7 +7305,9 @@ impl Endpoint for NextEndpoint {
                 // links into other ledgers and the mirrors of theirs, for the whole selection in
                 // two queries. Until 0.18.0 `next` rendered its items without them.
                 across::decorate_selection(inv, &client, &mut selection).await?;
-                json_repr(json::render(&json::next(&client, &selection).await?)?)
+                json_repr(json::render(
+                    &json::next(&client, &selection, shape).await?,
+                )?)
             }
             _ => plain(selection.plain()),
         };
@@ -7275,97 +7339,98 @@ impl Endpoint for NextEndpoint {
     }
 
     fn describe(&self) -> Description {
-        read_scopes(
-            Description::new("ledger-next")
-                .title("What to do next")
-                .summary(
-                    "The ready set — open, unclaimed, not deferred, not blocked by an open \
+        let described = Description::new("ledger-next")
+            .title("What to do next")
+            .summary(
+                "The ready set — open, unclaimed, not deferred, not blocked by an open \
                      item — ranked by an ordering policy, with the reasons. Refuses, naming \
                      the cycle, when the `blocks` graph is not a DAG. ⚠ Selection OFFERS; it \
                      never authorizes: acting on the answer still requires the actor's own \
                      capability.",
-                )
-                .verb(Verb::Source)
-                .verb(Verb::Meta)
-                .input(ledger_arg("next"))
-                .input(
-                    ArgSpec::new("policy")
-                        .summary(format!(
-                            "Which ordering policy ranks the ready set. Each is a resource \
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(ledger_arg("next"))
+            .input(
+                ArgSpec::new("policy")
+                    .summary(format!(
+                        "Which ordering policy ranks the ready set. Each is a resource \
                              at `urn:iki:ledger:policy:{{name}}` that says what it weighs. \
                              This host offers: {}.",
-                            self.policies.names().join(", ")
-                        ))
-                        .class(v::ext::XSD_STRING)
-                        .one_of(self.policies.names())
-                        .default_value(self.policies.default_name())
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("kind")
-                        .summary(
-                            "An item class IRI — ask \"what is next\" at one LEVEL. \"What is \
+                        self.policies.names().join(", ")
+                    ))
+                    .class(v::ext::XSD_STRING)
+                    .one_of(self.policies.names())
+                    .default_value(self.policies.default_name())
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("kind")
+                    .summary(
+                        "An item class IRI — ask \"what is next\" at one LEVEL. \"What is \
                              next\" among decisions is a different question from \"what is \
                              next\" among findings.",
-                        )
-                        .class(v::ext::XSD_ANY_URI)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("labels")
-                        .summary("Comma-separated; a candidate must carry ALL of them.")
-                        .class(v::ext::XSD_STRING)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("without")
-                        .summary("Comma-separated; a candidate must carry NONE of them.")
-                        .class(v::ext::XSD_STRING)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("about")
-                        .summary("Only candidates filed against this resource IRI.")
-                        .class(v::ext::XSD_ANY_URI)
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("drain")
-                        .summary(
-                            "Only candidates whose current state drains to this step, `filed` \
+                    )
+                    .class(v::ext::XSD_ANY_URI)
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("labels")
+                    .summary("Comma-separated; a candidate must carry ALL of them.")
+                    .class(v::ext::XSD_STRING)
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("without")
+                    .summary("Comma-separated; a candidate must carry NONE of them.")
+                    .class(v::ext::XSD_STRING)
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("about")
+                    .summary("Only candidates filed against this resource IRI.")
+                    .class(v::ext::XSD_ANY_URI)
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("drain")
+                    .summary(
+                        "Only candidates whose current state drains to this step, `filed` \
                              included when its drain matches. A drain of the ledger's lifecycle \
                              (`urn:iki:ledger:lifecycle:{name}`), which is what a value is \
                              judged against. Blocked items, cycles and leverage are still \
                              computed over the whole ledger.",
-                        )
-                        .class(v::ext::XSD_STRING)
-                        .one_of(self.lifecycles.drain_names())
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("state")
-                        .summary(
-                            "Only candidates in this state, `filed` being an item that holds \
+                    )
+                    .class(v::ext::XSD_STRING)
+                    .one_of(self.lifecycles.drain_names())
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("state")
+                    .summary(
+                        "Only candidates in this state, `filed` being an item that holds \
                              none. A state of the ledger's lifecycle \
                              (`urn:iki:ledger:lifecycle:{name}`), which is what a value is \
                              judged against. Blocked items, cycles and leverage are still \
                              computed over the whole ledger.",
-                        )
-                        .class(v::ext::XSD_STRING)
-                        .one_of(self.lifecycles.state_names())
-                        .optional(),
-                )
-                .input(
-                    ArgSpec::new("limit")
-                        .summary(
-                            "How many ranked candidates to return (default 3). Applied AFTER \
+                    )
+                    .class(v::ext::XSD_STRING)
+                    .one_of(self.lifecycles.state_names())
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("limit")
+                    .summary(
+                        "How many ranked candidates to return (default 3). Applied AFTER \
                              ranking, never before.",
-                        )
-                        .class(v::ext::XSD_INTEGER)
-                        .default_value("3")
-                        .optional(),
-                )
-                .input(as_arg(&READ_FACES))
+                    )
+                    .class(v::ext::XSD_INTEGER)
+                    .default_value("3")
+                    .optional(),
+            )
+            .input(as_arg(&READ_FACES));
+        read_scopes(
+            shape_args(described)
                 .output(PLAIN)
                 .output(TURTLE)
                 .output(JSON),

@@ -326,7 +326,8 @@ fn the_json_item_document_is_schema_1() {
       "committer": null,
       "committed": "2026-09-15T00:00:00.000Z",
       "claimed_dates": []
-    }
+    },
+    "omitted": []
   }
 }"##
     );
@@ -374,7 +375,8 @@ fn the_json_items_document_is_schema_1() {
       "defects": [],
       "state": "filed",
       "awaiting": null,
-      "raised": null
+      "raised": null,
+      "omitted": []
     },
     {
       "number": 3,
@@ -409,7 +411,8 @@ fn the_json_items_document_is_schema_1() {
       "defects": [],
       "state": "filed",
       "awaiting": null,
-      "raised": null
+      "raised": null,
+      "omitted": []
     }
   ],
   "unreadable": []
@@ -495,7 +498,8 @@ fn the_json_next_document_is_schema_1() {
         "defects": [],
         "state": "filed",
         "awaiting": null,
-        "raised": null
+        "raised": null,
+        "omitted": []
       }
     }
   ],
@@ -533,7 +537,8 @@ fn the_json_next_document_is_schema_1() {
         "defects": [],
         "state": "filed",
         "awaiting": null,
-        "raised": null
+        "raised": null,
+        "omitted": []
       }
     },
     {
@@ -613,7 +618,8 @@ fn the_json_next_document_is_schema_1() {
           "committer": null,
           "committed": "2026-09-15T00:00:00.000Z",
           "claimed_dates": []
-        }
+        },
+        "omitted": []
       }
     }
   ]

@@ -982,6 +982,43 @@ item's `iri` and `display` identify its own ledger. `ledgers` is absent on a rea
 the plural argument, so existing single-ledger documents keep their shape. Comments,
 links, defects and totals are read from each row's own graph.
 
+## Leaving bodies and comments out of a list row
+
+A face drawing a list of items shows none of their bodies, comments or attribution, and those
+were most of the JSON it read: on one deployment 78% of 200 open items' `items` document, and
+87% of 200 review jobs' (ledger #3781). `items` (single-ledger and `ledgers=`) and `next` take
+two inputs that shape the JSON face's rows:
+
+- `omit=` a comma-separated subset of `body`, `comments`, `attribution`. Anything else is
+  refused (`omit`, naming the three).
+- `comments=` `all` (the default, every comment, as before), `last` (only each item's most
+  recent comment) or `none`. `omit=comments` means `comments=none`; with `comments=last` it
+  contradicts and is refused. (`comments=all` is the declared default, which the kernel
+  fills in when it is not given, so beside `omit=comments` it cannot be told from no
+  `comments=` and is served as `none`.)
+
+```text
+source urn:iki:ledger:items status=open omit=body,comments,attribution as=application/json
+source urn:iki:ledger:items ledgers=alpha,beta comments=last omit=body as=application/json
+source urn:iki:ledger:next limit=10 omit=body comments=none as=application/json
+```
+
+The documents stay schema 1: an omitted `body` is `""`, omitted `comments` are `[]` (or the
+one latest comment), and an omitted `attribution` is absent (`null`), on the item and on any
+comment shown. Every item now ends with `omitted`, the sorted list of what that row left out,
+`[]` when nothing was (every row of `item:{id}`, and every row read without these inputs).
+Under `comments=last` it names `comments` only when the item had more than the one shown.
+
+The work left out is not done. `comments=none` (or `omit=comments`) runs no comments query at
+all; `comments=last` runs one that answers only the latest comment per item, choosing it in
+the query (no later comment on the same item, by time and then comment IRI, the order the
+full list uses) rather than reading every comment and dropping the rest.
+
+These inputs shape the JSON face only. The plain face's rows are item lines with no body or
+comment in them, and the Turtle face is the items' triples, where a missing body would read as
+an item without one; so a shape that leaves anything out is refused on either face
+(InvalidArgument naming `as=application/json`), and the defaults are served unchanged.
+
 ## Assume an editor got there first
 
 A ledger whose items can only change through its own `Sink` is not what anyone wants from

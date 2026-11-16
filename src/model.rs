@@ -2152,32 +2152,103 @@ pub async fn load_comments_for(
         rows.extend(client.select(&query).await?);
     }
     for row in rows {
-        let Some(comment) = (|| {
-            Some(Comment {
-                iri: row.get("comment")?.value.clone(),
-                on_item: row.get("item")?.value.clone(),
-                body: row.get("body")?.value.clone(),
-                author: row.get("author").map(|b| b.value.clone()),
-                created: millis(row.get("created")?.value.as_str())?,
-                author_source: row.get("authorSource").map(|b| b.value.clone()),
-                committer: row.get("committer").map(|b| b.value.clone()),
-                committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
-                created_claimed: row.contains_key("createdSource"),
-                rejects: row
-                    .get("rejects")
-                    .map(|b| b.value.clone())
-                    .into_iter()
-                    .collect(),
-                note: note_of(&row),
-                acks: acks_of(&row),
-            })
-        })() else {
+        let Some(comment) = comment_on_item(&row) else {
             continue;
         };
         let comments = by_item.entry(comment.on_item.clone()).or_default();
         gather_comment(comments, comment);
     }
     Ok(by_item)
+}
+
+/// One row of [`load_comments_for`] or [`load_last_comments_for`], as a comment.
+fn comment_on_item(row: &sparql::Row) -> Option<Comment> {
+    Some(Comment {
+        iri: row.get("comment")?.value.clone(),
+        on_item: row.get("item")?.value.clone(),
+        body: row.get("body")?.value.clone(),
+        author: row.get("author").map(|b| b.value.clone()),
+        created: millis(row.get("created")?.value.as_str())?,
+        author_source: row.get("authorSource").map(|b| b.value.clone()),
+        committer: row.get("committer").map(|b| b.value.clone()),
+        committed_at: row.get("committedAt").and_then(|b| millis(&b.value)),
+        created_claimed: row.contains_key("createdSource"),
+        rejects: row
+            .get("rejects")
+            .map(|b| b.value.clone())
+            .into_iter()
+            .collect(),
+        note: note_of(row),
+        acks: acks_of(row),
+    })
+}
+
+/// The most recent comment on each of several items, and whether the item has any other —
+/// `comments=last` on `items` and `next` (ledger #3781). One query for a whole page.
+///
+/// ★ **Bounded in the query, not after it**: the latest comment per item is chosen by two
+/// grouped sub-selects — the item's latest `dcterms:created` (and how many comments it has),
+/// then the greatest comment IRI at that time, which is the order [`load_comments_for`]
+/// lists in — and only that comment's fields are read. ⚠ Not a correlated `FILTER NOT
+/// EXISTS { a later comment }`, which says the same thing: this store evaluated it once per
+/// candidate over every comment, and 200 items with five comments each took over a second,
+/// sixty times the full read. An item with no comments is absent from the answer.
+pub async fn load_last_comments_for(
+    client: &StoreClient<'_, '_>,
+    items: &[String],
+) -> Result<BTreeMap<String, (Comment, bool)>> {
+    let mut by_item: BTreeMap<String, (Vec<Comment>, bool)> = BTreeMap::new();
+    if items.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut rows = Vec::new();
+    for values in values_lists(items)? {
+        let query = format!(
+            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks ?count WHERE {{ {} }} ORDER BY ?item ?comment",
+            client.in_graph(&format!(
+                "{{ SELECT ?item ?count (MAX(STR(?atLatest)) AS ?latest) WHERE {{\n\
+                 {{ SELECT ?item (MAX(?stamp) AS ?created) (COUNT(DISTINCT ?any) AS ?count) \
+                 WHERE {{ VALUES ?item {{ {values} }}\n\
+                 ?any <{on_item}> ?item ; <{body}> ?anyBody ; <{created}> ?stamp . }} \
+                 GROUP BY ?item }}\n\
+                 ?atLatest <{on_item}> ?item ; <{body}> ?latestBody ; <{created}> ?created . \
+                 }} GROUP BY ?item ?count ?created }}\n\
+                 BIND(IRI(?latest) AS ?comment)\n\
+                 ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
+                 OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
+                 OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}",
+                note = note_optional("?comment"),
+                provenance = comment_provenance("?comment"),
+                rejects = v::REJECTS,
+                on_item = v::ON_ITEM,
+                body = v::BODY,
+                created = v::ext::CREATED,
+                author = v::AUTHOR,
+            ))
+        );
+        rows.extend(client.select(&query).await?);
+    }
+    for row in rows {
+        let more = row
+            .get("count")
+            .and_then(|b| b.value.parse::<u64>().ok())
+            .is_some_and(|n| n > 1);
+        let Some(comment) = comment_on_item(&row) else {
+            continue;
+        };
+        let (comments, any_more) = by_item.entry(comment.on_item.clone()).or_default();
+        *any_more |= more;
+        gather_comment(comments, comment);
+    }
+    Ok(by_item
+        .into_iter()
+        .filter_map(|(item, (mut comments, more))| {
+            // One comment per item, unless two shared a stamp AND an IRI, which they cannot;
+            // keep the last in list order whatever happens.
+            let more = more || comments.len() > 1;
+            comments.pop().map(|last| (item, (last, more)))
+        })
+        .collect())
 }
 
 /// Resolve `{id}` — a short number (`12`, `#12`, `acme#12`) or an opaque id (`01k5…`) —

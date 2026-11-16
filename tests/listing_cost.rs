@@ -173,3 +173,66 @@ fn what_a_one_row_listing_costs() {
         );
     }
 }
+
+/// ★ What `omit=` saves (ledger #3781): 200 items with a body and five comments each, read
+/// `as=application/json` whole and with `omit=body,comments,attribution`, and with
+/// `comments=last`. Bytes, and the median of several cold reads.
+#[test]
+#[ignore = "a measurement: run by hand with --ignored --nocapture"]
+fn what_omit_saves_on_a_listing() {
+    let kernel = uncached_kernel();
+    let body = "A body of the kind a review job carries: what was found, where, and why it \
+                matters, over a few lines of text that a list row never shows.\n"
+        .repeat(4);
+    for n in 1..=200 {
+        sink(
+            &kernel,
+            "urn:iki:ledger:append",
+            &[
+                ("content", &format!("Item {n}\n\n{body}")),
+                ("author", "brian"),
+            ],
+        );
+        for c in 1..=5 {
+            sink(
+                &kernel,
+                "urn:iki:ledger:comment",
+                &[
+                    ("item", &n.to_string()),
+                    (
+                        "content",
+                        &format!("comment {c}: a reviewer's note on item {n}, a line or two long"),
+                    ),
+                    ("author", "chris"),
+                ],
+            );
+        }
+    }
+    let runs = 9;
+    println!(
+        "\n{:<36} {:>9} {:>9}   (200 items, 5 comments each, median of {runs})",
+        "args", "bytes", "ms"
+    );
+    for args in [
+        vec![],
+        vec![("comments", "last")],
+        vec![("comments", "none")],
+        vec![("omit", "body,comments,attribution")],
+    ] {
+        let mut all = vec![("as", "application/json"), ("limit", "200")];
+        all.extend_from_slice(&args);
+        let bytes = source(&kernel, "urn:iki:ledger:items", &all).len();
+        let time = median(runs, || {
+            source(&kernel, "urn:iki:ledger:items", &all);
+        });
+        let label = if args.is_empty() {
+            "(whole)".to_string()
+        } else {
+            args.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        println!("{label:<36} {bytes:>9} {}", ms(time));
+    }
+}
