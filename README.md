@@ -1019,6 +1019,54 @@ comment in them, and the Turtle face is the items' triples, where a missing body
 an item without one; so a shape that leaves anything out is refused on either face
 (InvalidArgument naming `as=application/json`), and the defaults are served unchanged.
 
+## Searching bodies and comments, several words at once
+
+`text=` matched a case-insensitive substring of the title, and only the title. A collaborator
+whose agents search items by what they say ran their own SPARQL instead, one call per ledger
+per word, and intersected the words client-side: about 1.1 s on a 3,682-item ledger (ledger
+#3803). `items` (single-ledger and `ledgers=`), `count` and `next` take four more inputs:
+
+- `match=` a comma-separated subset of `title`, `body` and `comments` (the body of any
+  comment on the item): the fields `text=` and `search=` look in. The default is `title`,
+  so a caller that does not name it gets today's answer. Anything else is refused.
+- `search=` space-separated words, each looked for as `text=` is. Every word must match,
+  each in any of the `match=` fields (two words may match in two fields), unless
+  `search_mode=any`, where one is enough. `text=` stays ONE substring, spaces and all;
+  given both, both must match.
+- `search_mode=` `all` (the default) or `any`.
+- `whole_word=true` matches each term at word boundaries (`REGEX` with `\b`), so `rule` no
+  longer matches `ruler`. A term is regex-escaped first: its characters are matched as
+  written (`c++`, `a.b`), never read as a pattern.
+
+```text
+source urn:iki:ledger:items text=parser match=body,comments omit=body,comments as=application/json
+source urn:iki:ledger:items ledgers=alpha,beta search="parser panic" match=title,body,comments labels=bug
+source urn:iki:ledger:next search="lexer aarch64" search_mode=any match=title,comments whole_word=true
+```
+
+These are filters, so they compose with every other one (`labels`, `without`, `parent`,
+`about`, `status`, `sort`, the page) and with `omit=` and `comments=`. Comments are read
+from the ledger's own graph under the store read grant every listing already needs.
+
+**Where each row matched.** Every JSON row read with a text search gains `matches`, one
+`{field, excerpt}` per field that holds a term, in the order title, body, comments: the
+excerpt is up to 40 characters each side of the first hit there, `…` where it was cut and
+whitespace folded to single spaces, and for `comments` it comes from the oldest comment
+holding a hit. It is found from the item's own text, so a row read with `omit=body,comments`
+still says why it matched. Read without a search, a row's `matches` is `[]` and is left out
+of the served bytes, so those documents are byte for byte what they were (schema 1). The
+plain face of `items` adds a line under an item for a body or a comment that matched (`  #1
+matched in the body: …`, `  #2 matched in a comment: …`). A title match is the item's own
+line, so `text=` over titles adds no line.
+
+**The text first.** A search of bodies or comments starts from those literals, filtered by
+the terms, and only then joins them to items; the item pattern comes after. Bodies and
+comments share `ledger:body`, so asked for together they are one scan. Written the other way
+round, every item and then its comments, the collaborator's query ran past the store's 5 s
+budget on a 664-item, 2,454-comment ledger. `tests/text_search.rs` times a search over 4,000
+items and 4,000 comments: 0.2 to 0.7 s a read in a debug build on
+2026-11-17, `next` the slowest, each asserted under 2.5 s.
+
 ## Assume an editor got there first
 
 A ledger whose items can only change through its own `Sink` is not what anyone wants from

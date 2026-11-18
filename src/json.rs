@@ -364,6 +364,27 @@ pub struct Item {
     /// `[]`.
     #[serde(default)]
     pub omitted: Vec<String>,
+    /// Where this row matched the read's text search (`text=`, `search=`, over the fields
+    /// `match=` names): one [`Match`] per field that holds a term, in the order title, body,
+    /// comments (ledger #3803). Found from the item's own text, so it is there when `omit=`
+    /// left that text out of the row. `[]` when the read searched no text, which is every row
+    /// of `item:{id}`; absent from the served bytes then, so a document read without a search
+    /// is byte for byte what it was. Added in 0.24.0, LAST so every earlier field keeps its
+    /// place; `#[serde(default)]`, so an earlier document reads with `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matches: Vec<Match>,
+}
+
+/// One field a row matched a text search in, and a short window of its text around the first
+/// hit there (ledger #3803).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Match {
+    /// `title`, `body` or `comments`.
+    pub field: String,
+    /// Up to 40 characters each side of the first hit, `…` where the text was cut, and every
+    /// run of whitespace one space. For `comments`, from the oldest comment holding a hit.
+    pub excerpt: String,
 }
 
 /// Which comments a row carries: `comments=` on `items` and `next` (ledger #3781).
@@ -1070,6 +1091,7 @@ pub(crate) fn item(
     comments: &[model::Comment],
     shape: Shape,
     more: bool,
+    matches: Vec<model::Hit>,
 ) -> Item {
     let ledger = Ledger::of_subject(&item.iri).unwrap_or_default();
     let target = |iri: &String| ItemRef {
@@ -1180,6 +1202,13 @@ pub(crate) fn item(
         .filter(|(_, left_out)| *left_out)
         .map(|(word, _)| word.to_string())
         .collect(),
+        matches: matches
+            .into_iter()
+            .map(|hit| Match {
+                field: hit.field.to_string(),
+                excerpt: hit.excerpt,
+            })
+            .collect(),
     }
 }
 
@@ -1189,11 +1218,13 @@ pub(crate) fn item(
 /// ★ **The work a shape skips is not done** (ledger #3781): with `comments=none` (or
 /// `omit=comments`) the comments query is not run at all, and with `comments=last` it is
 /// [`model::load_last_comments_for`], which answers one comment per item rather than all of
-/// them.
+/// them. Each row's `matches` are where it matched `filter`'s text search
+/// ([`model::matches_for`]), none when it searches nothing.
 pub(crate) async fn items(
     client: &sparql::StoreClient<'_, '_>,
     items: &[&model::Item],
     shape: Shape,
+    filter: &model::Filter,
 ) -> Result<Vec<Item>> {
     let targets = items
         .iter()
@@ -1222,12 +1253,14 @@ pub(crate) async fn items(
             .collect(),
         Comments::None => BTreeMap::new(),
     };
+    let mut matches = model::matches_for(client, filter, items).await?;
     Ok(items
         .iter()
         .map(|i| {
             let (carried, more) = comments.remove(&i.iri).unwrap_or_default();
             let more = more || shape.comments == Comments::None;
-            item(i, &numbers, &carried, shape, more)
+            let hits = matches.remove(&i.iri).unwrap_or_default();
+            item(i, &numbers, &carried, shape, more, hits)
         })
         .collect())
 }
@@ -1237,6 +1270,7 @@ pub(crate) async fn next(
     client: &sparql::StoreClient<'_, '_>,
     selection: &Selection,
     shape: Shape,
+    filter: &model::Filter,
 ) -> Result<NextDocument> {
     let all: Vec<&model::Item> = selection
         .ranked
@@ -1244,7 +1278,7 @@ pub(crate) async fn next(
         .map(|(_, item)| item)
         .chain(selection.excluded.iter().map(|(item, _)| item))
         .collect();
-    let mut rendered = items(client, &all, shape).await?.into_iter();
+    let mut rendered = items(client, &all, shape, filter).await?.into_iter();
     let ranking = selection
         .ranked
         .iter()
