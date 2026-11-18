@@ -49,8 +49,13 @@ pub struct Filter {
     pub holder: Holder,
     /// Whether deferred items are included.
     pub deferred: Deferred,
-    /// A case-insensitive substring of the title.
+    /// A case-insensitive substring of the title, or of the fields `search.fields` names.
+    /// ONE substring, spaces and all: `search.words` is the several-words form.
     pub text: Option<String>,
+    /// Where `text` and the search words look, the words themselves, and how they match
+    /// (ledger #3803). The default is `text` over the title alone, which is the query this
+    /// crate built before the search existed.
+    pub search: Search,
     /// At most this many rows. Applied by the query; a ranking applies its own limit
     /// AFTER ranking, never before (kata's `ready --limit N` truncates by recency and
     /// then ranks, so "highest priority" silently means "best of the N most recent").
@@ -60,6 +65,130 @@ pub struct Filter {
     /// hand edit gave two values of one property is two rows, and a row offset would split it
     /// across two pages.
     pub offset: usize,
+}
+
+/// The text search half of a [`Filter`]: `match=`, `search=`, `search_mode=` and
+/// `whole_word=` on `items`, `count` and `next` (ledger #3803).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Search {
+    /// Which fields `text` and `words` are looked for in. Never empty.
+    pub fields: Fields,
+    /// Space-separated words, each required unless `any`. Empty is no constraint.
+    pub words: Vec<String>,
+    /// Any word matching is enough (`search_mode=any`); otherwise every word must.
+    pub any: bool,
+    /// Match at word boundaries, through `REGEX` with `\b`, rather than as a substring.
+    pub whole_word: bool,
+}
+
+/// The fields a [`Search`] looks in: `match=`, a comma-separated subset of `title`, `body`
+/// and `comments` (the body of any comment on the item). The default is the title alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Fields {
+    /// The item's title.
+    pub title: bool,
+    /// The item's body.
+    pub body: bool,
+    /// The body of any comment on the item.
+    pub comments: bool,
+}
+
+impl Default for Fields {
+    fn default() -> Self {
+        Fields {
+            title: true,
+            body: false,
+            comments: false,
+        }
+    }
+}
+
+/// The values `match=` takes, in the order `matches` lists them.
+pub const MATCH_VALUES: [&str; 3] = ["title", "body", "comments"];
+
+impl Fields {
+    /// Read `match=`: a comma-separated subset of [`MATCH_VALUES`], `None` when absent. An
+    /// empty entry or an unknown field is refused, and so is a list that names none.
+    pub fn parse(value: Option<&str>) -> Result<Fields> {
+        let Some(value) = value else {
+            return Ok(Fields::default());
+        };
+        let mut fields = Fields {
+            title: false,
+            body: false,
+            comments: false,
+        };
+        for name in value.split(',').map(str::trim) {
+            match name {
+                "title" => fields.title = true,
+                "body" => fields.body = true,
+                "comments" => fields.comments = true,
+                other => {
+                    return Err(Error::InvalidArgument {
+                        name: "match".to_string(),
+                        detail: format!(
+                            "`{other}` is not a field the text can be looked for in; a \
+                             comma-separated list of {} (default title)",
+                            MATCH_VALUES.join(", ")
+                        ),
+                    })
+                }
+            }
+        }
+        Ok(fields)
+    }
+
+    /// The fields named, in [`MATCH_VALUES`] order.
+    pub fn names(&self) -> Vec<&'static str> {
+        [
+            ("title", self.title),
+            ("body", self.body),
+            ("comments", self.comments),
+        ]
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(name, _)| name)
+        .collect()
+    }
+}
+
+/// The search modes `search_mode=` takes; the first is the default.
+pub const SEARCH_MODE_VALUES: [&str; 2] = ["all", "any"];
+
+impl Filter {
+    /// Whether this filter searches text at all: `text` or any word.
+    pub fn searches(&self) -> bool {
+        self.text.is_some() || !self.search.words.is_empty()
+    }
+
+    /// The search as groups that must ALL match, each matched by ANY of its terms: `text` is
+    /// a group of one, each word is a group of one, and under `any` the words are one group.
+    fn groups(&self) -> Vec<Vec<&str>> {
+        let mut groups: Vec<Vec<&str>> = self.text.iter().map(|t| vec![t.as_str()]).collect();
+        if self.search.any {
+            if !self.search.words.is_empty() {
+                groups.push(self.search.words.iter().map(String::as_str).collect());
+            }
+        } else {
+            groups.extend(self.search.words.iter().map(|w| vec![w.as_str()]));
+        }
+        groups
+    }
+
+    /// Whether the search is `text=` over the title alone and nothing more, which is served by
+    /// the clause this crate has always written, unchanged.
+    fn is_title_text(&self) -> bool {
+        self.search.words.is_empty()
+            && !self.search.whole_word
+            && self.search.fields == Fields::default()
+    }
+
+    /// Every term searched for, `text` first, for finding where a row matched.
+    pub(crate) fn terms(&self) -> Vec<&str> {
+        self.groups().into_iter().flatten().collect()
+    }
 }
 
 /// The status half of a [`Filter`].
@@ -1075,13 +1204,287 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
         )),
         Deferred::Only => clauses.push_str(&format!("?item <{}> true .\n", v::DEFERRED)),
     }
-    if let Some(text) = &filter.text {
-        clauses.push_str(&format!(
-            "FILTER(CONTAINS(LCASE(STR(?title)), LCASE({})))\n",
-            literal(text)
-        ));
+    if filter.is_title_text() {
+        if let Some(text) = &filter.text {
+            clauses.push_str(&format!(
+                "FILTER(CONTAINS(LCASE(STR(?title)), LCASE({})))\n",
+                literal(text)
+            ));
+        }
+    } else {
+        // The first group is the lead ([`search_lead`]); every other one is checked against
+        // the items it admitted, each with the item already bound.
+        for (n, group) in filter.groups().iter().enumerate().skip(1) {
+            clauses.push_str(&format!(
+                "FILTER EXISTS {{ {} }}\n",
+                search_branches(&filter.search, group, n, false)
+            ));
+        }
     }
     Ok(clauses)
+}
+
+/// `pattern`, the items a listing reads, with `filter`'s clauses: the text search's lead
+/// FIRST ([`search_lead`]), then the pattern, then the rest of the filter.
+fn filtered(filter: &Filter, pattern: &str) -> Result<String> {
+    Ok(format!(
+        "{}{pattern}{}",
+        search_lead(filter),
+        filter_clauses(filter)?
+    ))
+}
+
+/// The items whose fields match the search's first group, as a sub-select binding `?item`,
+/// or nothing when the search is `text=` over the title alone (a `FILTER` on the `?title`
+/// the listing binds anyway, as it always was) or there is no search.
+///
+/// ★ **The text pattern FIRST, and the item pattern after** (ledger #3803). Each field's
+/// literals are scanned and filtered before anything joins them to an item: a search over
+/// bodies and comments written the other way round, every item first and then its comments,
+/// ran past the store's 5 s budget on a 664-item, 2,454-comment ledger. Bodies and comments
+/// share `ledger:body`, so asked for together they are ONE scan, each matching subject then
+/// taken to its item (a comment's `ledger:onItem`, or the subject itself).
+///
+/// ⚠ Every term reaches the query as a literal ([`literal`]) and, under `whole_word`, as a
+/// regex-ESCAPED literal ([`word_pattern`]): a term is data, never SPARQL and never a pattern.
+fn search_lead(filter: &Filter) -> String {
+    if filter.is_title_text() {
+        return String::new();
+    }
+    match filter.groups().first() {
+        None => String::new(),
+        Some(group) => format!(
+            "{{ SELECT DISTINCT ?item WHERE {{ {} }} }}\n",
+            search_branches(&filter.search, group, 0, true)
+        ),
+    }
+}
+
+/// One group of a search over its fields, a `UNION` of one branch per field (variables
+/// suffixed with `n`, so no two groups share one, nor any with the listing). As the `lead`,
+/// each branch starts from the field's literals and ends at `?item`; otherwise `?item` is
+/// bound already and each starts from it.
+fn search_branches(search: &Search, terms: &[&str], n: usize, lead: bool) -> String {
+    let hay = format!("?searchHay{n}");
+    let test = terms
+        .iter()
+        .map(|term| term_test(&hay, term, search.whole_word))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let (title, body, on_item) = (v::ext::TITLE, v::BODY, v::ON_ITEM);
+    let mut branches = Vec::new();
+    if search.fields.title {
+        branches.push(format!("{{ ?item <{title}> {hay} . FILTER({test}) }}"));
+    }
+    match (search.fields.body, search.fields.comments, lead) {
+        (true, true, true) => branches.push(format!(
+            "{{ {{ ?searchSubject{n} <{body}> {hay} . FILTER({test}) }}\n  \
+             OPTIONAL {{ ?searchSubject{n} <{on_item}> ?searchOn{n} }}\n  \
+             BIND(COALESCE(?searchOn{n}, ?searchSubject{n}) AS ?item) }}"
+        )),
+        (false, true, true) => branches.push(format!(
+            "{{ {{ ?searchComment{n} <{body}> {hay} . FILTER({test}) }}\n  \
+             ?searchComment{n} <{on_item}> ?item . }}"
+        )),
+        (in_body, in_comments, _) => {
+            if in_body {
+                branches.push(format!("{{ ?item <{body}> {hay} . FILTER({test}) }}"));
+            }
+            if in_comments {
+                branches.push(format!(
+                    "{{ ?searchComment{n} <{on_item}> ?item ; <{body}> {hay} . FILTER({test}) }}"
+                ));
+            }
+        }
+    }
+    branches.join("\n  UNION ")
+}
+
+/// Whether the literal in `hay` holds `term`: case-insensitively as a substring, the test
+/// `text=` has always made, or under `whole_word` at word boundaries.
+fn term_test(hay: &str, term: &str, whole_word: bool) -> String {
+    if whole_word {
+        format!("REGEX(STR({hay}), {}, \"i\")", literal(&word_pattern(term)))
+    } else {
+        format!("CONTAINS(LCASE(STR({hay})), LCASE({}))", literal(term))
+    }
+}
+
+/// The regular expression `whole_word=true` matches `term` with: the term regex-ESCAPED, so
+/// every character in it stands for itself, between `\b` assertions at each end that is a
+/// word character. An end that is not (`c++`, `#12`) has no boundary to assert, so it is
+/// matched as written.
+///
+/// ★ Escaped by `regex::escape`, the same crate and function the store's evaluator escapes a
+/// `REGEX(…, "q")` pattern with, so the escaping is the evaluator's own grammar, not a copy.
+pub(crate) fn word_pattern(term: &str) -> String {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    format!(
+        "{}{}{}",
+        if word(term.chars().next()) { "\\b" } else { "" },
+        regex::escape(term),
+        if word(term.chars().next_back()) {
+            "\\b"
+        } else {
+            ""
+        },
+    )
+}
+
+/// Where the first of `terms` to occur in `hay` starts and ends (byte offsets into `hay`),
+/// by the test [`term_test`] makes in the query, or `None` when none occurs.
+///
+/// The substring test lowercases both sides as SPARQL's `LCASE` does (Rust's
+/// `to_lowercase`, which the store's evaluator calls) and maps the hit back to `hay`'s own
+/// characters; the whole-word test compiles [`word_pattern`] case-insensitively, as the
+/// evaluator compiles `REGEX(…, "i")`.
+pub(crate) fn first_hit(hay: &str, terms: &[&str], whole_word: bool) -> Option<(usize, usize)> {
+    let mut lowered = String::new();
+    // The byte in `hay` each byte of `lowered` came from.
+    let mut origin = Vec::new();
+    if !whole_word {
+        for (at, c) in hay.char_indices() {
+            for lower in c.to_lowercase() {
+                let before = lowered.len();
+                lowered.push(lower);
+                origin.extend(std::iter::repeat_n(at, lowered.len() - before));
+            }
+        }
+    }
+    let end_of = |from: usize| {
+        hay[from..]
+            .chars()
+            .next()
+            .map_or(hay.len(), |c| from + c.len_utf8())
+    };
+    terms
+        .iter()
+        .filter_map(|term| {
+            if whole_word {
+                let found = regex::RegexBuilder::new(&word_pattern(term))
+                    .case_insensitive(true)
+                    .build()
+                    .ok()?
+                    .find(hay)?;
+                Some((found.start(), found.end()))
+            } else {
+                let term = term.to_lowercase();
+                let at = lowered.find(&term)?;
+                let start = origin.get(at).copied().unwrap_or(hay.len());
+                let end = match at + term.len() {
+                    0 => start,
+                    last => end_of(origin[last - 1]),
+                };
+                Some((start, end))
+            }
+        })
+        .min()
+}
+
+/// How many characters of context an excerpt keeps on each side of its hit.
+const EXCERPT_CONTEXT: usize = 40;
+
+/// A short window of `hay` around the hit at `start..end`: up to [`EXCERPT_CONTEXT`]
+/// characters each side, `…` where it was cut, and every run of whitespace (a newline
+/// included) one space, so an excerpt is one line on every face.
+pub(crate) fn excerpt(hay: &str, (start, end): (usize, usize)) -> String {
+    let before: Vec<char> = hay[..start].chars().collect();
+    let after: Vec<char> = hay[end..].chars().collect();
+    let cut_before = before.len() > EXCERPT_CONTEXT;
+    let cut_after = after.len() > EXCERPT_CONTEXT;
+    let window: String = before[before.len().saturating_sub(EXCERPT_CONTEXT)..]
+        .iter()
+        .chain(hay[start..end].chars().collect::<Vec<_>>().iter())
+        .chain(after[..after.len().min(EXCERPT_CONTEXT)].iter())
+        .collect();
+    let mut text = window.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cut_before {
+        text.insert(0, '…');
+    }
+    if cut_after {
+        text.push('…');
+    }
+    text
+}
+
+/// Where one row matched a search: the field (`title`, `body` or `comments`) and a short
+/// window of its text around the first hit there ([`excerpt`]). For `comments`, the first
+/// comment, oldest first, that holds a hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Hit {
+    pub field: &'static str,
+    pub excerpt: String,
+}
+
+/// Where each of `items` matched `filter`'s search, one [`Hit`] per field that holds a term,
+/// in `match=` order; an empty map when the filter searches nothing.
+///
+/// ★ **Found from the store's text, whatever the row shows** (ledger #3803): the title and
+/// body from the record already loaded (a row's `omit=body` blanks only what it renders), and
+/// the comments by one query per list of items that reads only the comments holding a term,
+/// under the same graph grant as the listing. So a row that leaves its body and comments out
+/// still says why it matched.
+pub(crate) async fn matches_for(
+    client: &StoreClient<'_, '_>,
+    filter: &Filter,
+    items: &[&Item],
+) -> Result<BTreeMap<String, Vec<Hit>>> {
+    let mut found: BTreeMap<String, Vec<Hit>> = BTreeMap::new();
+    if !filter.searches() || items.is_empty() {
+        return Ok(found);
+    }
+    let terms = filter.terms();
+    let whole_word = filter.search.whole_word;
+    let fields = filter.search.fields;
+    let hit = |field: &'static str, hay: &str| {
+        first_hit(hay, &terms, whole_word).map(|at| Hit {
+            field,
+            excerpt: excerpt(hay, at),
+        })
+    };
+    for item in items {
+        let hits = found.entry(item.iri.clone()).or_default();
+        if fields.title {
+            hits.extend(hit("title", &item.title));
+        }
+        if fields.body {
+            hits.extend(hit("body", &item.body));
+        }
+    }
+    if fields.comments {
+        let test = terms
+            .iter()
+            .map(|term| term_test("?body", term, whole_word))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let mut seen = BTreeSet::new();
+        for values in values_lists(items.iter().map(|i| i.iri.as_str()))? {
+            let query = format!(
+                "SELECT ?item ?body WHERE {{ {} }} ORDER BY ?item ?created ?comment",
+                client.in_graph(&format!(
+                    "VALUES ?item {{ {values} }}\n\
+                     ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
+                     FILTER({test})",
+                    on_item = v::ON_ITEM,
+                    body = v::BODY,
+                    created = v::ext::CREATED,
+                ))
+            );
+            for row in client.select(&query).await? {
+                let (Some(item), Some(body)) = (row.get("item"), row.get("body")) else {
+                    continue;
+                };
+                if seen.contains(&item.value) {
+                    continue;
+                }
+                if let Some(hit) = hit("comments", &body.value) {
+                    seen.insert(item.value.clone());
+                    found.entry(item.value.clone()).or_default().push(hit);
+                }
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// The properties an item must carry for anything here to read it.
@@ -1352,7 +1755,7 @@ pub async fn count_items(client: &StoreClient<'_, '_>, filter: &Filter) -> Resul
 fn count_subquery(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<String> {
     Ok(format!(
         "{{ SELECT (COUNT(DISTINCT ?item) AS ?listed) WHERE {{ {} }} }}",
-        client.in_graph(&format!("{}{}", listed_pattern(), filter_clauses(filter)?))
+        client.in_graph(&filtered(filter, &listed_pattern())?)
     ))
 }
 
@@ -1385,14 +1788,16 @@ fn page_pattern(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<String>
     Ok(format!(
         "{{ SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {page} }} \
          GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET {offset} }}",
-        page = client.in_graph(&format!(
-            "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
-             OPTIONAL {{ ?item <{modified}> ?modified }}\n{filters}",
-            listed_pattern(),
-            created = v::ext::CREATED,
-            modified = v::ext::MODIFIED,
-            filters = filter_clauses(filter)?,
-        )),
+        page = client.in_graph(&filtered(
+            filter,
+            &format!(
+                "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
+                 OPTIONAL {{ ?item <{modified}> ?modified }}\n",
+                listed_pattern(),
+                created = v::ext::CREATED,
+                modified = v::ext::MODIFIED,
+            )
+        )?),
         limit = page_limit(filter),
         offset = filter.offset,
     ))
@@ -1416,13 +1821,15 @@ pub async fn matching_iris(
 ) -> Result<BTreeSet<String>> {
     let query = format!(
         "SELECT DISTINCT ?item WHERE {{ {} }}",
-        client.in_graph(&format!(
-            "?item <{type_}> <{item_class}> ; <{title}> ?title .\n{filters}",
-            type_ = v::ext::TYPE,
-            item_class = v::ITEM_CLASS,
-            title = v::ext::TITLE,
-            filters = filter_clauses(filter)?,
-        ))
+        client.in_graph(&filtered(
+            filter,
+            &format!(
+                "?item <{type_}> <{item_class}> ; <{title}> ?title .\n",
+                type_ = v::ext::TYPE,
+                item_class = v::ITEM_CLASS,
+                title = v::ext::TITLE,
+            )
+        )?)
     );
     Ok(client
         .select(&query)
@@ -1458,7 +1865,17 @@ async fn load_counted(
     selection: ItemSelection<'_>,
     counted: bool,
 ) -> Result<(Vec<Item>, usize)> {
-    let filters = filter_clauses(filter)?;
+    // ★ A page's records are read for the items its page sub-select chose, which applied the
+    // whole filter; a text search is not run again over them (ledger #3803). `text=` over the
+    // title alone stays, as it always was: it is a `FILTER` on the `?title` read here anyway.
+    let (lead, filters) = if matches!(selection, ItemSelection::Page) && !filter.is_title_text() {
+        let mut records = filter.clone();
+        records.text = None;
+        records.search = Search::default();
+        (String::new(), filter_clauses(&records)?)
+    } else {
+        (search_lead(filter), filter_clauses(filter)?)
+    };
     let count = if counted {
         count_subquery(client, filter)?
     } else {
@@ -1480,7 +1897,7 @@ async fn load_counted(
          ?modifiedSource ?claimedModified{listed} WHERE {{ {count}{start}{page}{}{end} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
-            "{values}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
+            "{values}{lead}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
              <{status}> ?status .\n\
              OPTIONAL {{ ?item <{created}> ?created }}\n\
              OPTIONAL {{ ?item <{modified}> ?modified }}\n\
@@ -2936,6 +3353,60 @@ mod tests {
         assert!(clauses.contains("ledger#open"), "{clauses}");
         assert!(clauses.contains("NOT EXISTS"), "{clauses}");
         assert!(clauses.contains("\"rust\""), "{clauses}");
+    }
+
+    /// ★ `text=` alone is the clause it always was (ledger #3803): one `FILTER` on `?title`,
+    /// with no lead sub-select, so a caller passing none of the search's inputs is asked the
+    /// same query as before.
+    #[test]
+    fn a_title_text_search_is_the_query_it_always_was() {
+        let filter = Filter {
+            text: Some("Parser \"x\"".to_string()),
+            ..Filter::default()
+        };
+        assert_eq!(search_lead(&filter), "");
+        let clauses = filter_clauses(&filter).unwrap();
+        assert!(
+            clauses
+                .ends_with("FILTER(CONTAINS(LCASE(STR(?title)), LCASE(\"Parser \\\"x\\\"\")))\n"),
+            "{clauses}"
+        );
+        assert!(!clauses.contains("EXISTS"), "{clauses}");
+    }
+
+    /// ★ Over bodies and comments, the text pattern comes FIRST and the item pattern after,
+    /// and every later word is checked from the bound item.
+    #[test]
+    fn a_wider_search_starts_from_the_text() {
+        let mut filter = Filter {
+            text: Some("a".to_string()),
+            ..Filter::default()
+        };
+        filter.search.fields = Fields::parse(Some("body,comments")).unwrap();
+        filter.search.words = vec!["b".to_string()];
+        let query = filtered(&filter, &listed_pattern()).unwrap();
+        let lead = query.find("SELECT DISTINCT ?item").expect("a lead");
+        let listed = query.find(v::ITEM_CLASS).expect("the item pattern");
+        assert!(lead < listed, "{query}");
+        let exists = query.find("FILTER EXISTS").expect("the second word");
+        assert!(listed < exists, "{query}");
+        assert!(query[exists..].contains(&format!("?searchComment1 <{}> ?item", v::ON_ITEM)));
+    }
+
+    #[test]
+    fn a_hit_is_found_in_the_text_as_written() {
+        assert_eq!(
+            first_hit("say PARSER now", &["parser"], false),
+            Some((4, 10))
+        );
+        // A character whose lowercase is longer maps back to itself.
+        assert_eq!(first_hit("İx parser", &["parser"], false), Some((4, 10)));
+        assert_eq!(first_hit("ruler rule", &["rule"], true), Some((6, 10)));
+        assert_eq!(first_hit("b then a", &["a", "b"], false), Some((0, 1)));
+        assert_eq!(first_hit("nothing", &["x"], false), None);
+        assert_eq!(word_pattern("c++"), "\\bc\\+\\+");
+        assert_eq!(word_pattern("a.b"), "\\ba\\.b\\b");
+        assert_eq!(excerpt("one\n two", (0, 3)), "one two");
     }
 
     /// How many operands `body` puts into the main join, by the STORE'S OWN walk: pad the

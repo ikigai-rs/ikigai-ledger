@@ -244,7 +244,7 @@ async fn ready_inner(
         || !narrowing.without.is_empty()
         || narrowing.about.is_some()
         || narrowing.parent.is_some()
-        || narrowing.text.is_some();
+        || narrowing.searches();
     let admitted = if narrows {
         Some(model::matching_iris(client, &narrowing).await?)
     } else {

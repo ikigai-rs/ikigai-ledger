@@ -1866,6 +1866,24 @@ impl Endpoint for ItemsEndpoint {
                 .collect();
         }
         let (sources, mut items): (Vec<usize>, Vec<Item>) = entries.into_iter().unzip();
+        // Where each row matched a search of bodies or comments, for the plain face's
+        // `matched in` lines (ledger #3803), through each row's own graph client. A title is
+        // on the row's line already, so a search of titles alone adds no line.
+        let mut found = std::collections::BTreeMap::new();
+        let fields = filter.search.fields;
+        if want == PLAIN && filter.searches() && (fields.body || fields.comments) {
+            for (index, ledger) in ledgers.iter().enumerate() {
+                let group: Vec<&Item> = sources
+                    .iter()
+                    .zip(&items)
+                    .filter_map(|(source, item)| (*source == index).then_some(item))
+                    .collect();
+                if !group.is_empty() {
+                    let client = StoreClient::new(inv, ledger.clone());
+                    found.extend(model::matches_for(&client, &filter, &group).await?);
+                }
+            }
+        }
         // Decorate and render only this page, through each row's own graph client.
         let mut rendered = Vec::new();
         if want != PLAIN {
@@ -1889,7 +1907,7 @@ impl Endpoint for ItemsEndpoint {
                     rendered.extend(
                         positions
                             .into_iter()
-                            .zip(json::items(&client, &rows, shape).await?),
+                            .zip(json::items(&client, &rows, shape, &filter).await?),
                     );
                 }
             }
@@ -1944,7 +1962,22 @@ impl Endpoint for ItemsEndpoint {
         } else {
             let mut out: String = items
                 .iter()
-                .map(|item| format!("{}\n", item.line()))
+                .map(|item| {
+                    let mut lines = format!("{}\n", item.line());
+                    for hit in found.get(&item.iri).into_iter().flatten() {
+                        let place = match hit.field {
+                            "body" => "the body",
+                            "comments" => "a comment",
+                            _ => continue,
+                        };
+                        lines.push_str(&format!(
+                            "  {} matched in {place}: {}\n",
+                            item.short(),
+                            hit.excerpt
+                        ));
+                    }
+                    lines
+                })
                 .collect();
             // ★ Saturating (ledger #1420): `limit` and `offset` take any count, and the store
             // answers `LIMIT 18446744073709551615`, so an unchecked sum panicked in a debug
@@ -2157,10 +2190,10 @@ impl Endpoint for CountEndpoint {
 
 /// The filter's inputs, in the order `items` has always declared them: `status`, `kind`,
 /// `labels`, `without`, `priority`, `without_priority`, `about`, `parent` (0.12.0),
-/// `key`, `holder`, `deferred`, `text` — what
-/// [`listing_filter`] parses, declared once for `items` and `count`.
+/// `key`, `holder`, `deferred`, `text`, then `match`, `search`, `search_mode` and `whole_word`
+/// (ledger #3803) — what [`listing_filter`] parses, declared once for `items` and `count`.
 fn filter_inputs(desc: Description) -> Description {
-    desc.input(
+    search_inputs(desc.input(
         ArgSpec::new("status")
             .summary("Which items: open (the default), closed, or all.")
             .class(v::ext::XSD_STRING)
@@ -2249,12 +2282,18 @@ fn filter_inputs(desc: Description) -> Description {
             .default_value("include")
             .optional(),
     )
-    .input(
-        ArgSpec::new("text")
-            .summary("A case-insensitive substring of the title.")
-            .class(v::ext::XSD_STRING)
-            .optional(),
-    )
+    .input(text_arg()))
+}
+
+/// `text=`, on `items`, `count` and `next`.
+fn text_arg() -> ArgSpec {
+    ArgSpec::new("text")
+        .summary(
+            "A case-insensitive substring of the title, or of the fields `match` names. One \
+             substring, spaces and all: `search` takes several words.",
+        )
+        .class(v::ext::XSD_STRING)
+        .optional()
 }
 
 /// The filter `items` and `count` share — every argument but the page (`limit`, `offset`),
@@ -2316,9 +2355,88 @@ fn parsed_listing_filter(inv: &Invocation<'_>) -> Result<Filter> {
             }
         },
         text: inv.inline_str("text").ok().map(str::to_string),
+        search: parsed_search(inv)?,
         limit: 0,
         offset: 0,
     })
+}
+
+/// `match=`, `search=`, `search_mode=` and `whole_word=` (ledger #3803), shared by `items`,
+/// `count` and `next`, refused from the arguments before anything is read.
+fn parsed_search(inv: &Invocation<'_>) -> Result<model::Search> {
+    let fields = model::Fields::parse(present_str(inv, "match")?)?;
+    let words = present_str(inv, "search")?
+        .map(|words| words.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+    let any = match present_str(inv, "search_mode")?.map(str::trim) {
+        None | Some("all") => false,
+        Some("any") => true,
+        Some(other) => {
+            return Err(Error::InvalidArgument {
+                name: "search_mode".to_string(),
+                detail: format!(
+                    "`{other}` is not one of {} (default all: every word must match)",
+                    model::SEARCH_MODE_VALUES.join(", ")
+                ),
+            })
+        }
+    };
+    Ok(model::Search {
+        fields,
+        words,
+        any,
+        whole_word: parse_flag(inv, "whole_word")?,
+    })
+}
+
+/// The text search's inputs beside `text` (ledger #3803), declared once for `items`, `count`
+/// and `next`.
+fn search_inputs(desc: Description) -> Description {
+    desc.input(
+        ArgSpec::new("match")
+            .summary(
+                "Comma-separated fields `text` and `search` look in: title (the default), \
+                 body, comments (the body of any comment on the item). A term matches when \
+                 any named field holds it. Unknown or empty fields are refused.",
+            )
+            .class(v::ext::XSD_STRING)
+            .default_value("title")
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("search")
+            .summary(
+                "Space-separated words, each looked for as `text` is (case-insensitive, in \
+                 the `match` fields). Every word must match unless search_mode=any; \
+                 different words may match in different fields. `text` stays one \
+                 substring, spaces and all, and with both given both must match.",
+            )
+            .class(v::ext::XSD_STRING)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("search_mode")
+            .summary(
+                "all (the default): an item must match every `search` word. any: one \
+                 word is enough.",
+            )
+            .class(v::ext::XSD_STRING)
+            .one_of(model::SEARCH_MODE_VALUES)
+            .default_value(model::SEARCH_MODE_VALUES[0])
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("whole_word")
+            .summary(
+                "`true` to match `text` and `search` terms at word boundaries, so `rule` \
+                 no longer matches `ruler`. A term is matched literally, its characters \
+                 never read as a pattern. Default false: a substring.",
+            )
+            .class(v::ext::XSD_BOOLEAN)
+            .one_of(["true", "false"])
+            .default_value("false")
+            .optional(),
+    )
 }
 
 /// `limit=`, or `default` when absent — and **refused** when present but not a count,
@@ -2411,10 +2529,15 @@ impl Endpoint for ItemEndpoint {
                     let doc = json::ItemDocument {
                         schema: json::SCHEMA,
                         ledger: client.ledger().name().to_string(),
-                        item: json::items(&client, &[&item], json::Shape::default())
-                            .await?
-                            .pop()
-                            .expect("one rendered item"),
+                        item: json::items(
+                            &client,
+                            &[&item],
+                            json::Shape::default(),
+                            &Filter::default(),
+                        )
+                        .await?
+                        .pop()
+                        .expect("one rendered item"),
                     };
                     return Ok(json_face(json::render(&doc)?));
                 }
@@ -7263,6 +7386,8 @@ impl Endpoint for NextEndpoint {
             labels: split_labels(inv.inline_str("labels").ok()),
             without: split_labels(inv.inline_str("without").ok()),
             about: inv.inline_str("about").ok().map(str::to_string),
+            text: inv.inline_str("text").ok().map(str::to_string),
+            search: parsed_search(inv)?,
             ..Filter::default()
         };
         let limit = parse_limit(inv, 3)?;
@@ -7306,7 +7431,7 @@ impl Endpoint for NextEndpoint {
                 // two queries. Until 0.18.0 `next` rendered its items without them.
                 across::decorate_selection(inv, &client, &mut selection).await?;
                 json_repr(json::render(
-                    &json::next(&client, &selection, shape).await?,
+                    &json::next(&client, &selection, shape, &filter).await?,
                 )?)
             }
             _ => plain(selection.plain()),
@@ -7392,6 +7517,8 @@ impl Endpoint for NextEndpoint {
                     .class(v::ext::XSD_ANY_URI)
                     .optional(),
             )
+            .input(text_arg());
+        let described = search_inputs(described)
             .input(
                 ArgSpec::new("drain")
                     .summary(
