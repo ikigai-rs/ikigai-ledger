@@ -2654,6 +2654,19 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.24.0: text search over bodies and comments, several words, and where each row matched
+
+A minor release: four optional inputs and one new JSON field. A read that names none of them
+gets the answer it got before, byte for byte.
+
+- **`match=`, `search=`, `search_mode=` and `whole_word=` on `items`, `count` and `next`**
+  (ledger #3803), single-ledger and `ledgers=`: `text=` and the new several-word `search=` look
+  in the title (the default), the body and the comments, every word required unless
+  `search_mode=any`, optionally at word boundaries. `text=` is now declared on `next` too.
+  Each JSON row read with a search gains `matches`, `{field, excerpt}` per field that
+  matched, which holds under `omit=`; the plain `items` face adds a `matched in` line for a
+  body or comment hit. See "Searching bodies and comments, several words at once".
+
 ### 0.23.1: a list row can leave out bodies, comments and attribution
 
 A patch release: two optional inputs and one new JSON field; no existing answer changes shape.
