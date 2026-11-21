@@ -540,11 +540,14 @@ pub(crate) async fn require_importer(
             }
         }
     };
-    Err(Error::Denied(format!(
-        "only an import or sync principal may record past-dated history, and {why}. Write the \
-         change itself instead (claim, release, label, link, state, close, reopen), and the ledger \
-         records its event as it happens"
-    )))
+    Err(Error::Denied(
+        format!(
+            "only an import or sync principal may record past-dated history, and {why}. Write \
+             the change itself instead (claim, release, label, link, state, close, reopen), and \
+             the ledger records its event as it happens"
+        )
+        .into(),
+    ))
 }
 
 /// The explicit, one-time backfill of `ledger:handedBackBy` (ledger #2819), as two SPARQL
@@ -593,17 +596,23 @@ const HANDBACK_CLOSE: &str = "` handed this back";
 
 /// A refused author: the reason and the remedy, and the principal it was checked against.
 fn refused(name: &str, value: &str, committer: &str, why: &str, remedy: &str) -> Error {
-    Error::Denied(format!(
-        "`{name}={value}` refused for committer {committer}: {why}. To write anyway, {remedy}"
-    ))
+    Error::Denied(
+        format!(
+            "`{name}={value}` refused for committer {committer}: {why}. To write anyway, {remedy}"
+        )
+        .into(),
+    )
 }
 
 /// A refused authored date.
 fn refused_date(name: &str, value: &str, why: &str) -> Error {
-    Error::Denied(format!(
-        "`{name}={value}` refused: only an import or sync principal may claim an authored date, \
-         and {why}. Send it without `{name}`, and the ledger stamps the time itself"
-    ))
+    Error::Denied(
+        format!(
+            "`{name}={value}` refused: only an import or sync principal may claim an authored \
+             date, and {why}. Send it without `{name}`, and the ledger stamps the time itself"
+        )
+        .into(),
+    )
 }
 
 /// Whether the participants graph enrolls `committer` to act for `author` (an IRI term).

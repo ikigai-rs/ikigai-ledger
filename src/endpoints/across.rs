@@ -474,20 +474,23 @@ pub(super) async fn require_mirror_grants(
     if missing.is_empty() {
         return Ok(());
     }
-    Err(Error::Denied(format!(
-        "{} has links into other ledgers, and its status is mirrored there, so changing it \
-         also writes those ledgers' graphs. This capability does not hold {}. Nothing was \
-         changed. Add the grant, or remove the link first with \
-         `delete {} item={} content=<the other item> type=<the type>`",
-        subject.short(),
-        missing
-            .iter()
-            .map(|s| format!("`{s}`"))
-            .collect::<Vec<_>>()
-            .join(" or "),
-        client.ledger().resource("link"),
-        subject.short()
-    )))
+    Err(Error::Denied(
+        format!(
+            "{} has links into other ledgers, and its status is mirrored there, so changing it \
+             also writes those ledgers' graphs. This capability does not hold {}. Nothing was \
+             changed. Add the grant, or remove the link first with \
+             `delete {} item={} content=<the other item> type=<the type>`",
+            subject.short(),
+            missing
+                .iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(" or "),
+            client.ledger().resource("link"),
+            subject.short()
+        )
+        .into(),
+    ))
 }
 
 /// A delete's commit condition: no `blocks` or `parent` link into another ledger, since the
@@ -559,18 +562,21 @@ pub(super) async fn link(
             .filter(|scope| !inv.capability.allows(scope))
             .collect();
         if !missing.is_empty() {
-            return Err(Error::Denied(format!(
-                "{} a `{name}` link {} the ledger {} also writes its mirror in that ledger's \
-                 graph, and this capability does not hold {}. Nothing was changed",
-                if sink { "Adding" } else { "Removing" },
-                if sink { "into" } else { "from" },
-                there.name(),
-                missing
-                    .iter()
-                    .map(|s| format!("`{s}`"))
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "{} a `{name}` link {} the ledger {} also writes its mirror in that ledger's \
+                     graph, and this capability does not hold {}. Nothing was changed",
+                    if sink { "Adding" } else { "Removing" },
+                    if sink { "into" } else { "from" },
+                    there.name(),
+                    missing
+                        .iter()
+                        .map(|s| format!("`{s}`"))
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                )
+                .into(),
+            ));
         }
     }
     let target_client = StoreClient::new(inv, there.clone());

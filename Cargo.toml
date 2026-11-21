@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-ledger"
-version = "0.24.0"
+version = "0.25.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -27,7 +27,9 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 # Core 0.3.0 scopes held content to its deliverer and makes unscoped content-store
 # writes root-only (ledger #2965); all ikigai dependencies must share these core types.
 # Core 0.3.4 adds the resend safety declaration used by keyed writes.
-ikigai-core = "0.3.4"
+# Core 0.4.0 (scope opacity, structured denials; the cascade, ledger #3893, #3937). 0.4.1 is
+# the release every consumer in the cascade pins.
+ikigai-core = "0.4.1"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's
@@ -58,8 +60,9 @@ ikigai-core = "0.3.4"
 # 0.4.0 carries these fixes onto core 0.3.0 and its scoped content store (ledger #2965). 0.5.0
 # is the floor since ledger #2916: a read confined to named graphs depends on each graph's own
 # `graph_thread` (ledger #3322), so counts hangs on its ledger's thread and a write to another
-# ledger leaves it cached. It also binds `urn:iki:store:graph-written:{graph}`.
-ikigai-store = { version = "0.5.0", default-features = false }
+# ledger leaves it cached. It also binds `urn:iki:store:graph-written:{graph}`. 0.6.0 carries
+# these fixes onto core 0.4.0 (the cascade).
+ikigai-store = { version = "0.6.0", default-features = false }
 
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the vocabulary,
 # the policy registry, the short-id allocator), so they are `Endpoint` impls rather than
@@ -115,7 +118,8 @@ futures = "0.3"
 oxigraph = { version = "0.5.1", default-features = false }
 # The module recipe as one test. 0.14.0 shares core 0.3.0 (ledger #2965) and enables
 # DATATYPES and FAILURES by default; FAILURES probes declared failure classes.
-ikigai-conformance = "0.14.0"
+# 0.15.0 shares core 0.4.0 (the cascade).
+ikigai-conformance = "0.15.0"
 # The store this ledger is written against, with the durable backend ON — so
 # `tests/durable.rs` proves the composition over a real `DurableStore::open`, and not
 # only over the in-memory twin. ⚠ Cargo feature unification is global: this enables
@@ -123,15 +127,17 @@ ikigai-conformance = "0.14.0"
 # costs an `oxrocksdb-sys` compile once per cache. Since store 0.2.24:
 # `tests/conformance.rs` names the inherited store doors exactly, and 0.2.24 adds `store-graph-info`
 # and `store-dump` (ledger #2111). 0.4.0 shares core 0.3.0, with the fixes above; 0.5.0 adds
-# `store-graph-written` and per-graph freshness (ledger #2916).
-ikigai-store = { version = "0.5.0", features = ["persistent"] }
+# `store-graph-written` and per-graph freshness (ledger #2916); 0.6.0 shares core 0.4.0.
+ikigai-store = { version = "0.6.0", features = ["persistent"] }
 # `TurtleRenderer` for the `Meta` face. ⚠ Without a JSON meta renderer the engine's pipe
 # routing cannot be observed at all (it fails open onto an input named `in`), so the
 # conformance kernel is built with `Kernel::with_meta_renderer`, never `Kernel::new`.
 # 0.3.0 shares core 0.3.0 and its scoped content store (ledger #2965).
 # 0.3.4 projects resend declarations in the Turtle Meta face.
-ikigai-vocab = "0.3.4"
+# 0.4.1 shares core 0.4.0 (scope opacity, structured denials; the cascade).
+ikigai-vocab = "0.4.1"
 # `urn:shacl:validate` for `tests/write_shapes.rs` (ledger #3724): the write-shape hook issues
 # it through the kernel and links nothing of it. Default features off: the subset validator,
 # with no rudof and no network stack, which is all a `sh:minCount` shape needs.
-ikigai-shacl = { version = "0.6.1", default-features = false }
+# 0.7.0 shares core 0.4.0 (the cascade).
+ikigai-shacl = { version = "0.7.0", default-features = false }

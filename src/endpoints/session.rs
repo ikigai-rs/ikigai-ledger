@@ -64,17 +64,21 @@ pub(crate) fn require_session_graph(inv: &Invocation<'_>, write: bool, doing: &s
     if missing.is_empty() {
         return Ok(());
     }
-    Err(Error::Denied(format!(
-        "this capability does not hold {}. Since ledger #3661 a ledger's session summaries are in \
-         a graph of their own, `{graph}`, so {doing} needs that graph's store {} beside the \
-         ledger grant. A grant written before then, a worker's among them, lacks these lines: add them",
-        missing.join(" or "),
-        if write {
-            "read and write grants"
-        } else {
-            "read grant"
-        },
-    )))
+    Err(Error::Denied(
+        format!(
+            "this capability does not hold {}. Since ledger #3661 a ledger's session summaries \
+             are in a graph of their own, `{graph}`, so {doing} needs that graph's store {} \
+             beside the ledger grant. A grant written before then, a worker's among them, lacks \
+             these lines: add them",
+            missing.join(" or "),
+            if write {
+                "read and write grants"
+            } else {
+                "read grant"
+            },
+        )
+        .into(),
+    ))
 }
 
 const SH: &str = "http://www.w3.org/ns/shacl#";
