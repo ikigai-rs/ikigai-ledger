@@ -2654,6 +2654,14 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### 0.25.0: core 0.4 (ledger #3937)
+
+The public API now uses `ikigai-core` 0.4 types, so a consumer still on core 0.3 cannot mix
+them. Core 0.4 makes a scope opaque and a denial structured; this crate builds its refusals
+from the same messages as before, so every refusal reads the same. No behavior changes.
+Normal and test dependencies share core 0.4: store 0.6.0, vocab 0.4.1, conformance 0.15.0
+and shacl 0.7.0.
+
 ### 0.24.0: text search over bodies and comments, several words, and where each row matched
 
 A minor release: four optional inputs and one new JSON field. A read that names none of them

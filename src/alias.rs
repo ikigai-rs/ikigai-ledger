@@ -256,12 +256,15 @@ async fn select(inv: &Invocation<'_>, query: &str, what: &str) -> Result<Vec<spa
     sparql::select_in(inv, GRAPH, query)
         .await
         .map_err(|e| match e {
-            Error::Denied(_) => Error::Denied(format!(
-                "{what} is an alias, and aliases are read from the deployment's aliases graph \
-                 `{GRAPH}`, which this capability may not read: that takes \
-                 `urn:cap:store:read:graph:{GRAPH}`, a grant a host issues on purpose because \
-                 the graph shows which items exist"
-            )),
+            Error::Denied(_) => Error::Denied(
+                format!(
+                    "{what} is an alias, and aliases are read from the deployment's aliases graph \
+                     `{GRAPH}`, which this capability may not read: that takes \
+                     `urn:cap:store:read:graph:{GRAPH}`, a grant a host issues on purpose because \
+                     the graph shows which items exist"
+                )
+                .into(),
+            ),
             other => other,
         })
 }
@@ -271,10 +274,13 @@ async fn update(inv: &Invocation<'_>, update: &str) -> Result<()> {
     sparql::update_in(inv, GRAPH, update)
         .await
         .map_err(|e| match e {
-            Error::Denied(_) => Error::Denied(format!(
-                "this write goes into the deployment's aliases graph `{GRAPH}`, and this \
-                 capability may not write it: that takes `urn:cap:store:write:graph:{GRAPH}`"
-            )),
+            Error::Denied(_) => Error::Denied(
+                format!(
+                    "this write goes into the deployment's aliases graph `{GRAPH}`, and this \
+                     capability may not write it: that takes `urn:cap:store:write:graph:{GRAPH}`"
+                )
+                .into(),
+            ),
             other => other,
         })
 }
@@ -337,11 +343,14 @@ fn bound(inv: &Invocation<'_>) -> Result<(String, Option<String>)> {
 fn principal(inv: &Invocation<'_>, doing: &str) -> Result<String> {
     let who = Attribution::committer(inv)?;
     who.committer.ok_or_else(|| {
-        Error::Denied(format!(
-            "{doing} needs a capability that carries a principal (`urn:cap:principal:…`), \
-             because a scheme belongs to one principal and only it may add aliases in it; \
-             this one carries none"
-        ))
+        Error::Denied(
+            format!(
+                "{doing} needs a capability that carries a principal (`urn:cap:principal:…`), \
+                 because a scheme belongs to one principal and only it may add aliases in it; \
+                 this one carries none"
+            )
+            .into(),
+        )
     })
 }
 
@@ -377,10 +386,13 @@ fn unregistered(scheme: &str) -> Error {
 }
 
 fn not_owner(scheme: &str, owner: &str) -> Error {
-    Error::Denied(format!(
-        "the scheme `{scheme}` belongs to `{owner}`, and only its owner may add or remove \
-         aliases in it"
-    ))
+    Error::Denied(
+        format!(
+            "the scheme `{scheme}` belongs to `{owner}`, and only its owner may add or remove \
+             aliases in it"
+        )
+        .into(),
+    )
 }
 
 // ---------------------------------------------------------------------------- space
@@ -459,10 +471,13 @@ impl Endpoint for SchemeEndpoint {
             Verb::Sink => {
                 let grant = cap_scheme(&scheme);
                 if !inv.capability.allows(&grant) {
-                    return Err(Error::Denied(format!(
-                        "registering the scheme `{scheme}` takes `{grant}`, a grant per scheme, \
-                         and this capability does not hold it"
-                    )));
+                    return Err(Error::Denied(
+                        format!(
+                            "registering the scheme `{scheme}` takes `{grant}`, a grant per \
+                             scheme, and this capability does not hold it"
+                        )
+                        .into(),
+                    ));
                 }
                 let me = principal(inv, &format!("registering the scheme `{scheme}`"))?;
                 let now = now_ms(inv)?;

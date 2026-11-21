@@ -77,7 +77,8 @@ impl Endpoint for NoteEndpoint {
                 "a dispatch note needs a principal on the capability: an unattributed \
                  instruction is not a note. A host that wants this caller to dispatch gives it \
                  a principal"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             ));
         }
         let client = StoreClient::new(inv, ledger);
@@ -281,10 +282,13 @@ impl Endpoint for NotesEndpoint {
         // read by a capability acting as it.
         if let Some(principal) = item.claim_principal.as_deref() {
             if !inv.capability.acts_as(principal) {
-                return Err(Error::Denied(format!(
-                    "{short} is held by {holder} as {principal}, and this capability does not \
-                     act as that principal: a claim's notes are read by its holder"
-                )));
+                return Err(Error::Denied(
+                    format!(
+                        "{short} is held by {holder} as {principal}, and this capability does not \
+                         act as that principal: a claim's notes are read by its holder"
+                    )
+                    .into(),
+                ));
             }
         }
         let comments = model::load_comments(&client, &item.iri).await?;
@@ -489,12 +493,15 @@ pub(super) fn check_acker(inv: &Invocation<'_>, item: &Item, acks: &[String]) ->
         return Ok(());
     }
     match item.claim_principal.as_deref() {
-        Some(principal) if !inv.capability.acts_as(principal) => Err(Error::Denied(format!(
-            "{} is held by {} as {principal}, and this capability does not act as that \
-             principal: a claim's notes are acknowledged by its holder, so nothing was written",
-            item.short(),
-            item.claimed_by.as_deref().unwrap_or("nobody"),
-        ))),
+        Some(principal) if !inv.capability.acts_as(principal) => Err(Error::Denied(
+            format!(
+                "{} is held by {} as {principal}, and this capability does not act as that \
+                 principal: a claim's notes are acknowledged by its holder, so nothing was written",
+                item.short(),
+                item.claimed_by.as_deref().unwrap_or("nobody"),
+            )
+            .into(),
+        )),
         _ => Ok(()),
     }
 }

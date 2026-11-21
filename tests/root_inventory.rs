@@ -27,7 +27,9 @@ struct NoBroadDoor;
 impl Endpoint for NoBroadDoor {
     async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
         Err(Error::Denied(
-            "urn:iki:store:select was resolved: the inventory used the broad door".to_string(),
+            "urn:iki:store:select was resolved: the inventory used the broad door"
+                .to_string()
+                .into(),
         ))
     }
 

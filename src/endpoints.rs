@@ -343,18 +343,24 @@ pub(crate) fn grant_for(inv: &Invocation<'_>, ledger: Ledger, need: Need) -> Res
         if inv.capability.allows(&broader) {
             return Ok(ledger);
         }
-        return Err(Error::Denied(format!(
-            "this capability holds neither `{scope}` nor `{broader}`, and this resource takes \
-             either. A ledger grant names exactly one ledger, and a grant for another verb \
-             (a worker's claim and comment, say) does not reach this one"
-        )));
+        return Err(Error::Denied(
+            format!(
+                "this capability holds neither `{scope}` nor `{broader}`, and this resource takes \
+                 either. A ledger grant names exactly one ledger, and a grant for another verb \
+                 (a worker's claim and comment, say) does not reach this one"
+            )
+            .into(),
+        ));
     }
-    Err(Error::Denied(format!(
-        "this capability does not hold `{scope}`. A ledger grant names exactly one \
-         ledger — holding a grant over another ledger satisfies the declared family \
-         `{}` but not this resource, which is the point of naming them",
-        need.declared()
-    )))
+    Err(Error::Denied(
+        format!(
+            "this capability does not hold `{scope}`. A ledger grant names exactly one \
+             ledger — holding a grant over another ledger satisfies the declared family \
+             `{}` but not this resource, which is the point of naming them",
+            need.declared()
+        )
+        .into(),
+    ))
 }
 
 /// `text/plain` — the default face, and what "view ASAP" actually needs.
@@ -6132,17 +6138,20 @@ impl Endpoint for ClaimEndpoint {
                 // another worker spelling the holder's name, with `from=` or without it.
                 if let Some(recorded) = item.claim_principal.as_deref() {
                     if !dispatcher && !inv.capability.acts_as(recorded) {
-                        return Err(Error::Denied(format!(
-                            "{} is held by {}, and this capability acts as {}: a claim taken \
-                             as a principal is released by that principal, or by a dispatcher \
-                             holding `{}` or `{}` (the override). Naming the holder does not \
-                             make the claim yours",
-                            item.short(),
-                            holder_display(&item),
-                            caller.map_or("no principal".to_string(), |p| format!("`{p}`")),
-                            ledger.cap_close(),
-                            ledger.cap_write()
-                        )));
+                        return Err(Error::Denied(
+                            format!(
+                                "{} is held by {}, and this capability acts as {}: a claim taken \
+                                 as a principal is released by that principal, or by a dispatcher \
+                                 holding `{}` or `{}` (the override). Naming the holder does not \
+                                 make the claim yours",
+                                item.short(),
+                                holder_display(&item),
+                                caller.map_or("no principal".to_string(), |p| format!("`{p}`")),
+                                ledger.cap_close(),
+                                ledger.cap_write()
+                            )
+                            .into(),
+                        ));
                     }
                 }
                 // What the update must still find, so a release racing a takeover drops
@@ -7201,16 +7210,19 @@ impl Endpoint for PurgeEndpoint {
         .filter(|scope| !inv.capability.allows(scope))
         .collect();
         if !missing.is_empty() {
-            return Err(Error::Denied(format!(
-                "this capability does not hold {}. A purge reads and destroys in the \
-                 ledger's graveyard `{deleted}` as well as its live graph, so it needs the \
-                 graveyard's read AND write grants beside the live graph's",
-                missing
-                    .iter()
-                    .map(|s| format!("`{s}`"))
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "this capability does not hold {}. A purge reads and destroys in the \
+                     ledger's graveyard `{deleted}` as well as its live graph, so it needs the \
+                     graveyard's read AND write grants beside the live graph's",
+                    missing
+                        .iter()
+                        .map(|s| format!("`{s}`"))
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                )
+                .into(),
+            ));
         }
         session::require_session_graph(inv, true, "a purge, which destroys its summaries there,")?;
         let reference = inv.inline_str("content")?;
@@ -7767,18 +7779,21 @@ impl Endpoint for LedgersEndpoint {
                 // with a mechanical fix, and the message names the exact token.
                 let scope = ikigai_store::cap_read_graph(&ledger.graph());
                 if !inv.capability.allows(&scope) {
-                    return Err(Error::Denied(format!(
-                        "this capability holds `{}` but not `{scope}`, so the ledger `{}` can \
-                         be addressed here and not read in the store, and this listing would \
-                         have to omit it — which is indistinguishable from an empty ledger. \
-                         Grant the store scope too, or drop the ledger scope: a ledger needs \
-                         both halves, delete needs `{}` as well, and purge needs that and \
-                         `{}`",
-                        ledger.cap_read(),
-                        ledger.name(),
-                        ikigai_store::cap_write_graph(&ledger.deleted_graph()),
-                        ikigai_store::cap_read_graph(&ledger.deleted_graph()),
-                    )));
+                    return Err(Error::Denied(
+                        format!(
+                            "this capability holds `{}` but not `{scope}`, so the ledger `{}` can \
+                             be addressed here and not read in the store, and this listing would \
+                             have to omit it — which is indistinguishable from an empty ledger. \
+                             Grant the store scope too, or drop the ledger scope: a ledger needs \
+                             both halves, delete needs `{}` as well, and purge needs that and \
+                             `{}`",
+                            ledger.cap_read(),
+                            ledger.name(),
+                            ikigai_store::cap_write_graph(&ledger.deleted_graph()),
+                            ikigai_store::cap_read_graph(&ledger.deleted_graph()),
+                        )
+                        .into(),
+                    ));
                 }
             }
             granted
