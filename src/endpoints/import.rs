@@ -174,6 +174,7 @@ type Told = BTreeMap<String, Vec<Term>>;
 /// One event, valid, as the rows of the update that writes it.
 struct Event {
     key: String,
+    iri: String,
     /// Its triples, as an update's template.
     triples: String,
 }
@@ -468,6 +469,7 @@ fn validate(item: &Item, source: &str, told: &Told, who: &str, now: u64) -> Resu
             .into_iter()
             .map(|(predicate, term)| format!("<{event}> <{predicate}> {term} .\n"))
             .collect(),
+        iri: event,
     })
 }
 
@@ -487,6 +489,24 @@ async fn taken(client: &StoreClient<'_, '_>, keys: &[&str]) -> Result<HashSet<St
         .iter()
         .filter_map(|row| row.get("key").map(|key| key.value.clone()))
         .collect())
+}
+
+/// Count this call's minted events that survived the update's key guard.
+async fn recorded(client: &StoreClient<'_, '_>, events: &[Event]) -> Result<usize> {
+    let values: String = events
+        .iter()
+        .map(|event| format!("<{}> ", event.iri))
+        .collect();
+    let rows = client
+        .select(&format!(
+            "SELECT ?event WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "VALUES ?event {{ {values} }} ?event <{}> ?key .",
+                v::EVENT_KEY
+            ))
+        ))
+        .await?;
+    Ok(rows.len())
 }
 
 /// The one update that records `events` on `item`: an operation per event, since a store update
@@ -547,7 +567,7 @@ impl Endpoint for ImportEndpoint {
             .into_iter()
             .filter(|event| !held.contains(&event.key))
             .collect();
-        if !new.is_empty() {
+        let recorded = if !new.is_empty() {
             let update = update(&client, &item.iri, &new);
             if update.len() > ikigai_store::limits::MAX_SPARQL_BYTES {
                 return Err(refused_batch(format!(
@@ -560,8 +580,14 @@ impl Endpoint for ImportEndpoint {
                 )));
             }
             guarded_update(&client, &[&item.iri], &update).await?;
-        }
-        let (recorded, existing) = (new.len(), held.len());
+            let count = recorded(&client, &new).await?;
+            // A delete between the update and the count removes the events too.
+            still_live(&client, &item.iri).await?;
+            count
+        } else {
+            0
+        };
+        let existing = held.len() + new.len() - recorded;
         if want == JSON {
             let ledger = client.ledger();
             let mut answer = json::answer(
