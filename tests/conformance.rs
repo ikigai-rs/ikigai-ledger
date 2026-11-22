@@ -280,6 +280,13 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .arg("item", &item)
                 .arg("content", "a comment from the conformance walk"),
         )
+        .fixture(
+            Fixture::new("ledger-decision", Verb::Sink)
+                .arg("item", &item)
+                .arg("content", "a decision from the conformance walk")
+                .arg("decided-by", "urn:example:review-board")
+                .arg("decided-at", "2023-11-14T21:00:00Z"),
+        )
         .fixture(Fixture::new("ledger-close", Verb::Sink).arg("item", &item))
         .fixture(Fixture::new("ledger-reopen", Verb::Sink).arg("item", &item))
         .fixture(
@@ -402,6 +409,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-comment",
             "ledger-count",
             "ledger-counts",
+            "ledger-decision",
             "ledger-defer",
             "ledger-doctor",
             "ledger-history",

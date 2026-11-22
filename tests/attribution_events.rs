@@ -865,15 +865,15 @@ fn no_event_property_infers_an_item() {
 }
 
 /// `ns-drift` compares the published vocabulary's `owl:versionInfo` with this repository's,
-/// so the line must name this crate's version.
+/// so pin the independently versioned vocabulary document.
 #[test]
-fn the_vocabulary_names_this_version_for_ns_drift() {
-    let line = format!("    owl:versionInfo \"{}\" .", env!("CARGO_PKG_VERSION"));
+fn the_vocabulary_names_its_version_for_ns_drift() {
+    let line = "    owl:versionInfo \"0.26.0\" .";
     let found: Vec<&str> = ikigai_ledger::VOCABULARY_TTL
         .lines()
         .filter(|l| l.trim_start().starts_with("owl:versionInfo"))
         .collect();
-    assert_eq!(found, [line.as_str()]);
+    assert_eq!(found, [line]);
 }
 
 // ------------------------------------------------------------ concurrent claims

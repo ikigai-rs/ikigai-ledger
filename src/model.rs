@@ -768,8 +768,60 @@ pub struct Comment {
     /// What makes it a dispatch note, when it is one (ledger #3718): who it is for and at
     /// which claim epoch, and the grant that admitted it, as the write recorded them.
     pub note: Option<Note>,
+    /// The claimed decision facts, when the comment has the explicit decision type.
+    pub decision: Option<Decision>,
     /// The dispatch notes this comment acknowledges (`ledger:acks`, ledger #3718), sorted.
     pub acks: Vec<String>,
+}
+
+/// A typed decision's asserted facts. Out-of-band records may lack either fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    /// The claimed actor IRI, including a collective.
+    pub decided_by: Option<NamedNode>,
+    /// The claimed time, as a timezone-bearing xsd:dateTime lexical value.
+    pub decided_at: Option<String>,
+}
+
+/// Parse a decision time without supplying missing precision or a timezone.
+pub(crate) fn decision_time(value: &str) -> Option<oxsdatatypes::DateTime> {
+    let time: oxsdatatypes::DateTime = value.parse().ok()?;
+    time.timezone_offset()?;
+    Some(time)
+}
+
+const DECISION_COLUMNS: &str = "?decision ?decidedBy ?decidedAt";
+
+fn decision_optional(var: &str) -> String {
+    // A malformed graph may assert several values. Omit the ambiguous fact and keep the comment.
+    let fact = |predicate, binding| {
+        format!(
+            "OPTIONAL {{ {var} <{predicate}> {binding} . \
+             FILTER NOT EXISTS {{ {var} <{predicate}> ?other . FILTER(!sameTerm({binding}, ?other)) }} }}"
+        )
+    };
+    format!(
+        "OPTIONAL {{ {var} <{}> <{}> . BIND(true AS ?decision) {} {} }}",
+        v::ext::TYPE,
+        v::DECISION_CLASS,
+        fact(v::DECIDED_BY, "?decidedBy"),
+        fact(v::DECIDED_AT, "?decidedAt")
+    )
+}
+
+fn decision_of(row: &Row) -> Option<Decision> {
+    row.get("decision")?;
+    Some(Decision {
+        decided_by: row
+            .get("decidedBy")
+            .filter(|b| b.kind == "uri")
+            .and_then(|b| NamedNode::new(&b.value).ok()),
+        decided_at: row
+            .get("decidedAt")
+            .filter(|b| b.datatype.as_deref() == Some(v::ext::XSD_DATETIME))
+            .filter(|b| decision_time(&b.value).is_some())
+            .map(|b| b.value.clone()),
+    })
 }
 
 /// The facts a dispatch note carries beyond a comment's (ledger #3718), each read by the
@@ -874,9 +926,18 @@ impl Comment {
             .iter()
             .map(|acked| format!("  acknowledges note: {acked}\n"))
             .collect();
+        let mut decision = String::new();
+        if let Some(facts) = &self.decision {
+            if let Some(maker) = &facts.decided_by {
+                decision.push_str(&format!("  decision maker: {} (claimed)\n", maker.as_str()));
+            }
+            if let Some(time) = &facts.decided_at {
+                decision.push_str(&format!("  decision time: {time} (claimed)\n"));
+            }
+        }
         let rejects = format!("{rejects}{acks}");
         format!(
-            "  comment by {author}{committer} at {}{}:\n{rejects}{note}{}\n",
+            "  comment by {author}{committer} at {}{}:\n{rejects}{note}{decision}{}\n",
             sparql::iso8601(self.created),
             claimed_date(self.created_claimed),
             self.body
@@ -937,6 +998,15 @@ impl Comment {
             );
             if let Ok(grant) = NamedNode::new(&note.grant) {
                 push(v::NOTE_GRANT, grant.into());
+            }
+        }
+        if let Some(facts) = &self.decision {
+            push(v::ext::TYPE, named(v::DECISION_CLASS));
+            if let Some(maker) = &facts.decided_by {
+                push(v::DECIDED_BY, maker.clone().into());
+            }
+            if let Some(time) = &facts.decided_at {
+                push(v::DECIDED_AT, typed(time, v::ext::XSD_DATETIME));
             }
         }
         for acked in &self.acks {
@@ -2422,12 +2492,13 @@ pub async fn find_comment_by_key(
     key: &str,
 ) -> Result<Option<Comment>> {
     let query = format!(
-        "SELECT ?c ?item ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?noteEpoch ?noteHolder ?noteTo ?noteGrant WHERE {{ {} }} ORDER BY ?c LIMIT 1",
+        "SELECT ?c ?item ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?noteEpoch ?noteHolder ?noteTo ?noteGrant {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?c LIMIT 1",
         client.in_graph(&format!(
             "?c <{key_p}> {key} ; <{type_}> <{class}> ; <{on}> ?item ; <{body}> ?body ; \
              <{created}> ?created .\nOPTIONAL {{ ?c <{author}> ?author }}\n{provenance}\n\
              OPTIONAL {{ ?c <{note_epoch}> ?noteEpoch ; <{note_holder}> ?noteHolder ; \
-             <{note_to}> ?noteTo ; <{note_grant}> ?noteGrant }}",
+             <{note_to}> ?noteTo ; <{note_grant}> ?noteGrant }}\n{decision}",
+            decision = decision_optional("?c"),
             note_epoch = v::NOTE_EPOCH,
             note_holder = v::NOTE_HOLDER,
             note_to = v::NOTE_TO,
@@ -2456,6 +2527,7 @@ pub async fn find_comment_by_key(
             created_claimed: row.contains_key("createdSource"),
             rejects: Vec::new(),
             note: note_of(row),
+            decision: decision_of(row),
             acks: Vec::new(),
         })
     });
@@ -2551,13 +2623,14 @@ pub async fn load_comments_for(
     let mut rows = Vec::new();
     for values in values_lists(items)? {
         let query = format!(
-            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks WHERE {{ {} }} ORDER BY ?created ?comment",
+            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?created ?comment",
             client.in_graph(&format!(
                 "VALUES ?item {{ {values} }}\n\
                  ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
                  OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
-                 OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}",
+                 OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}\n{decision}",
                 note = note_optional("?comment"),
+                decision = decision_optional("?comment"),
                 provenance = comment_provenance("?comment"),
                 rejects = v::REJECTS,
                 on_item = v::ON_ITEM,
@@ -2596,6 +2669,7 @@ fn comment_on_item(row: &sparql::Row) -> Option<Comment> {
             .into_iter()
             .collect(),
         note: note_of(row),
+        decision: decision_of(row),
         acks: acks_of(row),
     })
 }
@@ -2621,7 +2695,7 @@ pub async fn load_last_comments_for(
     let mut rows = Vec::new();
     for values in values_lists(items)? {
         let query = format!(
-            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks ?count WHERE {{ {} }} ORDER BY ?item ?comment",
+            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks ?count {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?item ?comment",
             client.in_graph(&format!(
                 "{{ SELECT ?item ?count (MAX(STR(?atLatest)) AS ?latest) WHERE {{\n\
                  {{ SELECT ?item (MAX(?stamp) AS ?created) (COUNT(DISTINCT ?any) AS ?count) \
@@ -2633,8 +2707,9 @@ pub async fn load_last_comments_for(
                  BIND(IRI(?latest) AS ?comment)\n\
                  ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
                  OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
-                 OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}",
+                 OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}\n{decision}",
                 note = note_optional("?comment"),
+                decision = decision_optional("?comment"),
                 provenance = comment_provenance("?comment"),
                 rejects = v::REJECTS,
                 on_item = v::ON_ITEM,
@@ -2836,12 +2911,13 @@ pub async fn find_tombstone(
 /// `load_comments_for` breaks the tie the same way.
 pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Comment>> {
     let query = format!(
-        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks WHERE {{ {} }} ORDER BY ?created ?comment",
+        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?created ?comment",
         client.in_graph(&format!(
             "?comment <{on_item}> {subject} ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
              OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
-             OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}",
+             OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}\n{decision}",
             note = note_optional("?comment"),
+            decision = decision_optional("?comment"),
             provenance = comment_provenance("?comment"),
             rejects = v::REJECTS,
             on_item = v::ON_ITEM,
@@ -2869,6 +2945,7 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
                 .into_iter()
                 .collect(),
             note: note_of(row),
+            decision: decision_of(row),
             acks: acks_of(row),
         })
     });

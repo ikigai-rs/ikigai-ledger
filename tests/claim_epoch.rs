@@ -150,7 +150,7 @@ type Write = (
     Vec<(&'static str, String)>,
 );
 
-/// The five writes a holder makes about its item, each fenced with `epoch`.
+/// Writes a holder makes about its item, each fenced with `epoch`.
 fn fenced_writes(epoch: &str) -> Vec<Write> {
     let e = || ("epoch", epoch.to_string());
     vec![
@@ -159,6 +159,18 @@ fn fenced_writes(epoch: &str) -> Vec<Write> {
             Verb::Sink,
             "urn:iki:ledger:comment",
             vec![("item", "#1".into()), ("content", "progress".into()), e()],
+        ),
+        (
+            "decision",
+            Verb::Sink,
+            "urn:iki:ledger:decision",
+            vec![
+                ("item", "#1".into()),
+                ("content", "Stage the rollout".into()),
+                ("decided-by", "urn:example:review-board".into()),
+                ("decided-at", "2023-11-14T21:00:00Z".into()),
+                e(),
+            ],
         ),
         (
             "hand-back",
@@ -421,6 +433,10 @@ fn each_write_with_the_current_epoch_succeeds() {
         let json = item_json(&kernel);
         match what {
             "comment" => assert!(said.starts_with("commented on #1 ("), "{said}"),
+            "decision" => {
+                assert!(said.starts_with("recorded decision on #1 ("), "{said}");
+                assert_eq!(json["item"]["status"], "open");
+            }
             "hand-back" => {
                 assert!(said.ends_with(" awaiting-dispatcher\n"), "{said}");
                 assert_eq!(json["item"]["awaiting"], "dispatcher", "{json}");

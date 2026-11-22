@@ -233,7 +233,7 @@ pub struct Comment {
     /// other comment. Added for ledger #3071.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejects: Vec<String>,
-    /// `note` for a dispatch note, `comment` for any other comment. Added for ledger #3718.
+    /// `note` for a dispatch note, `decision` for a decision, or `comment`.
     #[serde(default = "comment_kind")]
     pub kind: String,
     /// Who a dispatch note is for: the holder label and, when the claim had one, its
@@ -246,6 +246,18 @@ pub struct Comment {
     /// The grant a dispatch note was admitted under. Missing on any other comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<String>,
+    /// The actor the filer claims made the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    /// The status of the decision maker assertion, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by_status: Option<String>,
+    /// The time the filer claims the decision was made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    /// The status of the decision time assertion, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at_status: Option<String>,
     /// The dispatch notes this comment acknowledges, sorted. Missing when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acks: Vec<String>,
@@ -1051,6 +1063,11 @@ pub(crate) fn item_ref(ledger: &Ledger, number: i64, iri: &str) -> ItemRef {
 
 /// A comment as this face carries it.
 pub(crate) fn comment(comment: &model::Comment) -> Comment {
+    let facts = comment.decision.as_ref();
+    let decided_by = facts
+        .and_then(|d| d.decided_by.as_ref())
+        .map(|maker| maker.as_str().to_string());
+    let decided_at = facts.and_then(|d| d.decided_at.clone());
     Comment {
         id: comment.iri.clone(),
         author: comment.author.clone(),
@@ -1066,6 +1083,8 @@ pub(crate) fn comment(comment: &model::Comment) -> Comment {
         rejects: comment.rejects.clone(),
         kind: if comment.note.is_some() {
             "note"
+        } else if facts.is_some() {
+            "decision"
         } else {
             "comment"
         }
@@ -1076,6 +1095,10 @@ pub(crate) fn comment(comment: &model::Comment) -> Comment {
         }),
         epoch: comment.note.as_ref().map(|note| note.epoch),
         grant: comment.note.as_ref().map(|note| note.grant.clone()),
+        decided_by_status: decided_by.as_ref().map(|_| "claimed".to_string()),
+        decided_at_status: decided_at.as_ref().map(|_| "claimed".to_string()),
+        decided_by,
+        decided_at,
         acks: comment.acks.clone(),
     }
 }

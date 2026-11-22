@@ -653,6 +653,15 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             CommentEndpoint {
                 participants: participants.clone(),
                 shapes: Arc::clone(&shapes),
+                decision: false,
+            },
+        )
+        .bind(
+            LedgerGrammar::action("decision"),
+            CommentEndpoint {
+                participants: participants.clone(),
+                shapes: Arc::clone(&shapes),
+                decision: true,
             },
         )
         .bind(
@@ -1348,10 +1357,10 @@ fn handback_update(
     }
 }
 
-/// What a comment carries beyond the common write (ledger #3718): a dispatch note's epoch
-/// and grant, or the notes an acknowledgment names at its epoch.
+/// What a comment carries beyond the common write.
 #[derive(Default)]
 pub(crate) struct CommentExtra<'a> {
+    decision: Option<&'a DecisionInput>,
     /// `(epoch, grant)` when the comment is a dispatch note.
     note: Option<(u64, &'a str)>,
     /// The notes this comment acknowledges, each checked at [`acks_epoch`](Self::acks_epoch).
@@ -1400,6 +1409,11 @@ async fn write_keyed_comment(
     );
     triples.push_str(&who.triples(&comment, now));
     triples.push_str(&who.date_sources(&comment));
+    if let Some(decision) = extra.decision {
+        for (predicate, object) in decision.facts() {
+            triples.push_str(&format!("\n<{comment}> {predicate} {object} ."));
+        }
+    }
     // ★ A dispatch note's recipient is the claim the fence found (ledger #3718), bound in the
     // same update: `?fenceHolder` is the holder at exactly the epoch named, and the principal
     // beside it, so no argument can address one.
@@ -1539,10 +1553,10 @@ async fn write_keyed_comment(
     Ok(comment)
 }
 
-/// The comment [`write_comment`] just wrote, as the JSON face carries it — built from what
+/// The comment [`write_comment`] just wrote — built from what
 /// was written rather than read back, because the write is the authority on what it said.
-fn written(iri: &str, item: &str, text: &str, who: &Attribution, now: u64) -> json::Comment {
-    json::comment(&model::Comment {
+fn written(iri: &str, item: &str, text: &str, who: &Attribution, now: u64) -> model::Comment {
+    model::Comment {
         iri: iri.to_string(),
         on_item: item.to_string(),
         body: text.to_string(),
@@ -1554,8 +1568,9 @@ fn written(iri: &str, item: &str, text: &str, who: &Attribution, now: u64) -> js
         created: who.created_or(now),
         rejects: Vec::new(),
         note: None,
+        decision: None,
         acks: Vec::new(),
-    })
+    }
 }
 
 /// Every scope an action that reads the ledger transitively needs: this module's own read
@@ -4201,23 +4216,87 @@ async fn comment_written(client: &StoreClient<'_, '_>, comment: &str) -> Result<
 
 // ------------------------------------------------------------------------- comment
 
+/// The two required facts of a new decision write.
+struct DecisionInput {
+    maker: oxrdf::NamedNode,
+    time: String,
+}
+
+impl DecisionInput {
+    fn parse(inv: &Invocation<'_>, now: u64) -> Result<Self> {
+        let actor = inv.inline_str("decided-by")?;
+        let maker = oxrdf::NamedNode::new(actor).map_err(|_| Error::InvalidArgument {
+            name: "decided-by".to_string(),
+            detail:
+                "supply one absolute IRI for the decision maker, such as urn:example:review-board"
+                    .to_string(),
+        })?;
+        let time = inv.inline_str("decided-at")?;
+        let parsed = model::decision_time(time).ok_or_else(|| Error::InvalidArgument {
+            name: "decided-at".to_string(),
+            detail: "supply an xsd:dateTime with a time and timezone, such as 2026-11-01T18:30:00Z"
+                .to_string(),
+        })?;
+        let now = sparql::iso8601(now);
+        let current = model::decision_time(&now).expect("the ledger clock renders a UTC dateTime");
+        if parsed > current {
+            return Err(Error::InvalidArgument {
+                name: "decided-at".to_string(),
+                detail: format!("the decision time must be at or before the ledger clock ({now})"),
+            });
+        }
+        Ok(Self {
+            maker,
+            time: parsed.to_string(),
+        })
+    }
+
+    fn facts(&self) -> [(oxrdf::NamedNode, oxrdf::Term); 3] {
+        [
+            (named(v::ext::TYPE), named(v::DECISION_CLASS).into()),
+            (named(v::DECIDED_BY), self.maker.clone().into()),
+            (
+                named(v::DECIDED_AT),
+                oxrdf::Literal::new_typed_literal(&self.time, named(v::ext::XSD_DATETIME)).into(),
+            ),
+        ]
+    }
+}
+
 #[derive(Clone)]
 struct CommentEndpoint {
     participants: Participants,
     shapes: crate::shapes::WriteShapes,
+    decision: bool,
 }
 
 #[async_trait]
 impl Endpoint for CommentEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         if inv.request.verb != Verb::Sink {
-            return Err(unsupported("ledger-comment", inv.request.verb));
+            return Err(unsupported(self.name(), inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Comment)?);
         // Every argument is checked before anything is written, the keyed append's rule.
+        if self.decision {
+            // The exact write grant is required even when a key replay skips the update.
+            let grant = ikigai_store::cap_write_graph(&client.ledger().graph());
+            if !inv.capability.allows(&grant) {
+                return Err(Error::Denied(
+                    format!("recording a decision requires the graph write grant `{grant}`").into(),
+                ));
+            }
+            // An argument supplied in the wrong representation must not become absent.
+            for name in ["as", "key", "epoch", "author", "created", "modified"] {
+                match inv.inline_str(name) {
+                    Ok(_) | Err(Error::MissingArgument(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         let want = wanted_face(inv, &WRITE_FACES)?;
-        let handback = parse_flag(inv, "handback")?;
-        let rejects = parse_flag(inv, "rejects")?;
+        let handback = !self.decision && parse_flag(inv, "handback")?;
+        let rejects = !self.decision && parse_flag(inv, "rejects")?;
         if handback && rejects {
             return Err(Error::InvalidArgument {
                 name: "rejects".to_string(),
@@ -4233,8 +4312,16 @@ impl Endpoint for CommentEndpoint {
             .map(model::parse_key)
             .transpose()?;
         let epoch = parse_epoch(inv)?;
-        let acks = note::parse_acks(inv, epoch)?;
+        let acks = if self.decision {
+            Vec::new()
+        } else {
+            note::parse_acks(inv, epoch)?
+        };
         let now = now_ms(inv)?;
+        let decision = self
+            .decision
+            .then(|| DecisionInput::parse(inv, now))
+            .transpose()?;
         let item = require_item(&client, inv.inline_str("item")?).await?;
         let text = inv.inline_str("content")?;
         if text.trim().is_empty() {
@@ -4297,7 +4384,7 @@ impl Endpoint for CommentEndpoint {
             &item.short(),
             || {
                 let comment = named(&format!("{}:comment:pending", item.iri));
-                crate::shapes::ntriples(&[
+                let mut triples = vec![
                     oxrdf::Triple::new(
                         comment.clone(),
                         named(v::ext::TYPE),
@@ -4305,11 +4392,17 @@ impl Endpoint for CommentEndpoint {
                     ),
                     oxrdf::Triple::new(comment.clone(), named(v::ON_ITEM), named(&item.iri)),
                     oxrdf::Triple::new(
-                        comment,
+                        comment.clone(),
                         named(v::BODY),
                         oxrdf::Literal::new_simple_literal(text.trim()),
                     ),
-                ])
+                ];
+                if let Some(decision) = &decision {
+                    triples.extend(decision.facts().map(|(predicate, object)| {
+                        oxrdf::Triple::new(comment.clone(), predicate, object)
+                    }));
+                }
+                crate::shapes::ntriples(&triples)
             },
         )
         .await?;
@@ -4333,6 +4426,7 @@ impl Endpoint for CommentEndpoint {
             change,
             &fence_clause(&item.iri, epoch),
             &CommentExtra {
+                decision: decision.as_ref(),
                 note: None,
                 acks: &acks,
                 acks_epoch: epoch.unwrap_or_default(),
@@ -4391,11 +4485,15 @@ impl Endpoint for CommentEndpoint {
                 json::item_ref(ledger, item.number, &item.iri),
             );
             let mut said = written(&comment, &item.iri, text.trim(), &who, now);
+            said.decision = decision.map(|input| model::Decision {
+                decided_by: Some(input.maker),
+                decided_at: Some(input.time),
+            });
             // What it rejected is what the update found, so only the store can say.
             if change == Handback::Clear && item.awaiting.is_some() {
                 said.rejects = model::load_rejects(&client, &comment).await?;
             }
-            answer.comment = Some(said);
+            answer.comment = Some(json::comment(&said));
             answer.key = key;
             answer.handback = match change {
                 Handback::Set => Some("set".to_string()),
@@ -4411,18 +4509,77 @@ impl Endpoint for CommentEndpoint {
             Handback::Clear if item.awaiting.is_some() => " cleared-awaiting",
             _ => "",
         };
+        let action = if self.decision {
+            "recorded decision"
+        } else {
+            "commented"
+        };
         Ok(plain(format!(
-            "commented on {} ({comment}){suffix}\n",
+            "{action} on {} ({comment}){suffix}\n",
             item.short()
         )))
     }
 
     fn name(&self) -> &str {
-        "ledger-comment"
+        if self.decision {
+            "ledger-decision"
+        } else {
+            "ledger-comment"
+        }
     }
 
     fn describe(&self) -> Description {
-        Description::new("ledger-comment")
+        if self.decision {
+            return Description::new(self.name())
+                .title("Record a decision on a ledger item")
+                .summary("Append a comment recording the filer’s claimed decision maker and time.")
+                .verb(Verb::Meta)
+                .action(write_scopes(
+                    ikigai_core::ActionSpec::new(Verb::Sink)
+                        .resend_safe_with_key("key")
+                        .input(ledger_arg("decision"))
+                        .input(item_arg("The item the decision is about."))
+                        .input(
+                            ArgSpec::new("decided-by")
+                                .summary("The claimed decision maker’s absolute IRI. It may name a collective.")
+                                .class(v::ext::XSD_STRING),
+                        )
+                        .input(
+                            ArgSpec::new("decided-at")
+                                .summary("The claimed decision time, with a timezone and no later than now.")
+                                .class(v::ext::XSD_DATETIME),
+                        )
+                        .input(
+                            ArgSpec::new("content")
+                                .summary("The decision text.")
+                                .class(v::ext::XSD_STRING),
+                        )
+                        .input(
+                            ArgSpec::new("author")
+                                .summary("The comment author, subject to the same attribution rules as comment.")
+                                .class(v::ext::XSD_STRING)
+                                .optional(),
+                        )
+                        .input(
+                            ArgSpec::new("created")
+                                .summary("The comment’s authored time, available to an import principal.")
+                                .class(v::ext::XSD_DATETIME)
+                                .optional(),
+                        )
+                        .input(
+                            ArgSpec::new("key")
+                                .summary("A key shared with the ledger’s comments. A replay returns the existing comment and its item.")
+                                .class(v::ext::XSD_STRING)
+                                .optional(),
+                        )
+                        .input(epoch_arg("the decision is recorded"))
+                        .input(as_arg(&WRITE_FACES))
+                        .output(PLAIN)
+                        .output(JSON),
+                    CAP_ANY,
+                ));
+        }
+        Description::new(self.name())
             .title("Comment on a ledger item")
             .summary(
                 "Append a comment. Comments are append-only — there is no edit and no \
@@ -4811,7 +4968,13 @@ impl Endpoint for CloseEndpoint {
         if let Ok(note) = inv.inline_str("content") {
             if !note.trim().is_empty() {
                 let comment = write_comment(&client, &item.iri, note.trim(), &who, now).await?;
-                note_written = Some(written(&comment, &item.iri, note.trim(), &who, now));
+                note_written = Some(json::comment(&written(
+                    &comment,
+                    &item.iri,
+                    note.trim(),
+                    &who,
+                    now,
+                )));
             }
         }
         if want == JSON {
