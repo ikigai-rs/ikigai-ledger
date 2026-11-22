@@ -34,7 +34,9 @@
 //! `dcterms:created` and `dcterms:modified` (so ranking, which reads `modified`, tie-breaks
 //! imported items as their source did), marked `ledger:createdSource` / `ledger:modifiedSource`
 //! `"import"`, beside the true `ledger:committedAt`. Any other caller that sends a date is
-//! refused.
+//! refused. A claimed date names its zone, and is no earlier than the item it dates: a
+//! `modified` sent without a `created` is before the filing it would precede, and is refused,
+//! as a comment dated before its item is (ledger #4010).
 //!
 //! ⚠ The participants graph is read through the store's narrow door with the CALLER's
 //! capability, as every read here is, so a delegate or an importer needs that graph's read
@@ -346,13 +348,7 @@ pub async fn resolve(
                 ),
             ));
         }
-        let millis = crate::model::millis(value).ok_or_else(|| Error::InvalidArgument {
-            name: name.to_string(),
-            detail: format!(
-                "`{value}` is not an xsd:dateTime; an authored date is written \
-                 2026-11-01T18:30:00Z, with a time and a zone"
-            ),
-        })?;
+        let millis = claimed_millis(name, value)?;
         if millis > now {
             return Err(Error::InvalidArgument {
                 name: name.to_string(),
@@ -376,6 +372,22 @@ pub async fn resolve(
                     "`{}` is before `created` ({}); an item cannot change before it was filed",
                     sparql::iso8601(modified),
                     sparql::iso8601(created)
+                ),
+            });
+        }
+    }
+    // A claimed `modified` alone is held to the filing it would precede (ledger #4010): with no
+    // claimed `created` the item is filed `now`, and a claimed `modified` is no later than that.
+    if let (None, Some(modified)) = (out.created, out.modified) {
+        if modified < now {
+            return Err(Error::InvalidArgument {
+                name: "modified".to_string(),
+                detail: format!(
+                    "`{}` is before `created` ({}, this filing, since no `created` was sent); \
+                     an item cannot change before it was filed. To file it with its source \
+                     dates, send the item's source `created` with it",
+                    sparql::iso8601(modified),
+                    sparql::iso8601(now)
                 ),
             });
         }
@@ -448,13 +460,7 @@ pub async fn resolve_claimed(
             ),
         ));
     }
-    let millis = crate::model::millis(value).ok_or_else(|| Error::InvalidArgument {
-        name: name.to_string(),
-        detail: format!(
-            "`{value}` is not an xsd:dateTime; an authored date is written \
-             2026-11-01T18:30:00Z, with a time and a zone"
-        ),
-    })?;
+    let millis = claimed_millis(name, value)?;
     if millis > now {
         return Err(Error::InvalidArgument {
             name: name.to_string(),
@@ -477,6 +483,56 @@ pub async fn resolve_claimed(
         ),
     )?;
     Ok(Some(millis))
+}
+
+/// A claimed `created` on an entry that belongs to an item (a comment, a note; ledger #4010),
+/// held to `filed`, the item's `dcterms:created`, by the rule [`resolve_claimed`] holds a
+/// link or a state move to: nothing is recorded on an item before it was filed.
+pub fn claimed_not_before_filing(name: &str, claimed: u64, filed: u64) -> Result<()> {
+    not_before(
+        name,
+        &sparql::iso8601(claimed),
+        claimed,
+        filed,
+        "the item was filed",
+        &format!(
+            "a comment cannot come before the item it is on. Send the item's source dates when \
+             filing it, or a later `{name}`"
+        ),
+    )
+}
+
+/// A claimed date's milliseconds, or the refusal that says how one is written. Stricter than
+/// [`crate::model::millis`], which reads whatever the store gives back: a claimed date names its
+/// zone, `Z` or `±HH:MM` and nothing after it (ledger #4010). A local time would be read as
+/// UTC, an instant the caller never said.
+fn claimed_millis(name: &str, value: &str) -> Result<u64> {
+    let text = value.trim();
+    let zone = text.get(19..).map(|rest| {
+        let rest = match rest.strip_prefix('.') {
+            Some(after) => after.trim_start_matches(|c: char| c.is_ascii_digit()),
+            None => rest,
+        };
+        let b = rest.as_bytes();
+        rest == "Z"
+            || (b.len() == 6
+                && (b[0] == b'+' || b[0] == b'-')
+                && b[1].is_ascii_digit()
+                && b[2].is_ascii_digit()
+                && b[3] == b':'
+                && b[4].is_ascii_digit()
+                && b[5].is_ascii_digit())
+    });
+    match (zone, crate::model::millis(text)) {
+        (Some(true), Some(millis)) => Ok(millis),
+        _ => Err(Error::InvalidArgument {
+            name: name.to_string(),
+            detail: format!(
+                "`{value}` is not an xsd:dateTime with a zone; an authored date is written \
+                 2026-11-01T18:30:00Z, with a time and a zone (`Z` or an offset like +05:30)"
+            ),
+        }),
+    }
 }
 
 /// A dated link's other end (ledger #2939): `claimed`, which [`resolve_claimed`] already held
