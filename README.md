@@ -2677,7 +2677,15 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
-### Unreleased
+### 0.26.0: decision records, claimed dates held to their item, and exact counts for racing imports
+
+#### Decision records (ikigai-ledger PR 137)
+
+`urn:iki:ledger:{ledger}:decision` records a decision as a typed comment: the filer asserts who decided
+(`decided-by=`, an actor IRI that may name a collective) and when (`decided-at=`, with an explicit zone), and the
+record carries both `ledger:Comment` and `ledger:Decision`. The vocabulary adds `ledger:Decision`,
+`ledger:decidedBy`, `ledger:decidedAt` and a closed `ledger:DecisionShape`; it is now versioned independently
+of the crate (0.26.0 here). It takes the comment grant. See "Decision comments" above. Redeploy /ns/ledger.
 
 #### Claimed dates held to the item they date (ledger #4010)
 
