@@ -2677,6 +2677,23 @@ alias resources of `alias::space()` (`tests/alias_conformance.rs`).
 `ikigai-store`'s space — store first, ledger second, behind a `Fallback` — and the store's
 `DurableStore::open` is what names the dataset on disk. See "Composition" above.
 
+### Unreleased
+
+#### Claimed dates held to the item they date (ledger #4010)
+
+Three claimed dates an import principal could send were accepted and
+recorded wrong; each is now refused, with the reason and what to send instead. Nothing a
+caller without a claimed date writes changes.
+
+- **A claimed `modified` without a claimed `created`** is refused. The filing is stamped now,
+  so the item was recorded as changed before it was filed. Send the item's source `created`
+  with it.
+- **A comment's or a note's claimed `created` before the item was filed** is refused, as a
+  link's, a state move's and a close's already were.
+- **A claimed date with no zone, or with text after its offset**, is refused. A local time
+  was read as UTC, and anything after an offset's `±HH:MM` was ignored. A claimed date names
+  its zone: `Z` or `±HH:MM`.
+
 ### 0.25.0: core 0.4 (ledger #3937)
 
 The public API now uses `ikigai-core` 0.4 types, so a consumer still on core 0.3 cannot mix

@@ -283,7 +283,10 @@ fn a_later_write_ends_a_claimed_modified() {
     file(
         &kernel,
         &writer(IMPORTER),
-        &[("modified", "2020-02-03T04:05:06Z")],
+        &[
+            ("created", "2020-01-01T00:00:00Z"),
+            ("modified", "2020-02-03T04:05:06Z"),
+        ],
     )
     .unwrap();
     sink(
@@ -292,10 +295,15 @@ fn a_later_write_ends_a_claimed_modified() {
         &[("item", "1"), ("content", "triage")],
     );
     let (plain, json, turtle) = faces(&kernel);
-    lacks(&plain, "(claimed)");
+    // The claimed `created` stands; only the claimed `modified` ends.
+    let updated = plain
+        .lines()
+        .find(|line| line.starts_with("  updated:"))
+        .expect("an updated line");
+    lacks(updated, "(claimed)");
     assert_eq!(
         json["item"]["attribution"]["claimed_dates"],
-        serde_json::json!([])
+        serde_json::json!(["created"])
     );
     lacks(&turtle, "modifiedSource");
 }
@@ -525,7 +533,10 @@ fn a_write_without_a_claimed_date_still_stamps_now() {
     file(
         &kernel,
         &writer(IMPORTER),
-        &[("modified", "2020-02-03T04:05:06Z")],
+        &[
+            ("created", "2020-01-01T00:00:00Z"),
+            ("modified", "2020-02-03T04:05:06Z"),
+        ],
     )
     .unwrap();
     comment(&kernel, &writer(IMPORTER), &[]).unwrap();
@@ -534,12 +545,15 @@ fn a_write_without_a_claimed_date_still_stamps_now() {
         when.starts_with("2026-"),
         "the importer's undated write: {when}"
     );
-    assert_eq!(claimed, serde_json::json!([]));
+    assert_eq!(claimed, serde_json::json!(["created"]));
 
     file(
         &kernel,
         &writer(IMPORTER),
-        &[("modified", "2020-02-03T04:05:06Z")],
+        &[
+            ("created", "2020-01-01T00:00:00Z"),
+            ("modified", "2020-02-03T04:05:06Z"),
+        ],
     )
     .unwrap();
     try_as(
@@ -555,7 +569,7 @@ fn a_write_without_a_claimed_date_still_stamps_now() {
         when.starts_with("2026-"),
         "an ordinary principal's write: {when}"
     );
-    assert_eq!(claimed, serde_json::json!([]));
+    assert_eq!(claimed, serde_json::json!(["created"]));
 }
 
 /// ★ The reproduction (ledger #2932): a claimed date between the filing's commit and now. The
@@ -628,7 +642,11 @@ fn next_ranks_an_imported_set_as_the_source_did() {
             &importer,
             Verb::Sink,
             &at("append"),
-            &[("content", title), ("modified", when)],
+            &[
+                ("content", title),
+                ("created", "2019-01-01T00:00:00Z"),
+                ("modified", when),
+            ],
         )
         .unwrap();
     }
@@ -638,4 +656,85 @@ fn next_ranks_an_imported_set_as_the_source_did() {
     let newer = next.find("Newer at the source").expect(&next);
     let older = next.find("Older at the source").expect(&next);
     assert!(newer < older, "the source's order: {next}");
+}
+
+// ------------------------------------------- claimed dates held to the item (ledger #4010)
+
+/// ★ The reproduction (ledger #4010): a claimed `modified` sent without a claimed `created`.
+/// The filing is stamped now, so until 0.25.1 the item was recorded as changed years before
+/// it was filed. The rule a claimed `created` and `modified` together are held to holds for
+/// `modified` alone: it is refused, and nothing is filed.
+#[test]
+fn a_claimed_modified_alone_cannot_be_before_the_filing() {
+    let kernel = kernel();
+    match file(
+        &kernel,
+        &writer(IMPORTER),
+        &[("modified", "2020-02-03T04:05:06Z")],
+    ) {
+        Err(Error::InvalidArgument { name, detail }) => {
+            assert_eq!(name, "modified");
+            has(&detail, "is before `created`");
+            has(&detail, "send the item's source `created` with it");
+        }
+        other => panic!("a modified before the filing was not refused: {other:?}"),
+    }
+    nothing_filed(&kernel);
+}
+
+/// ★ The reproduction (ledger #4010): an importer's comment dated before its item was filed.
+/// A link, a state move and a close are held to the item's `dcterms:created`; until 0.25.1 a
+/// comment and a note were not, so a replay could record a comment on an item that did not
+/// exist yet.
+#[test]
+fn an_importers_comment_cannot_be_dated_before_its_item() {
+    let kernel = kernel();
+    let importer = writer(IMPORTER);
+    file(&kernel, &importer, &[("created", "2020-01-02T03:04:05Z")]).unwrap();
+    match comment(&kernel, &importer, &[("created", "2019-12-31T00:00:00Z")]) {
+        Err(Error::InvalidArgument { name, detail }) => {
+            assert_eq!(name, "created");
+            has(
+                &detail,
+                "is before the item was filed (2020-01-02T03:04:05.000Z)",
+            );
+        }
+        other => panic!("a comment before its item was not refused: {other:?}"),
+    }
+    let (_, json, _) = faces(&kernel);
+    assert_eq!(json["item"]["comments"], serde_json::json!([]));
+    // The filing's own moment is not before it.
+    comment(&kernel, &importer, &[("created", "2020-01-02T03:04:05Z")]).unwrap();
+}
+
+/// ★ The reproduction (ledger #4010): a claimed date with no zone, or with text after its
+/// offset. The refusal for a bad date says an authored date has "a time and a zone", and until
+/// 0.25.1 both were accepted anyway: a local time was silently read as UTC, and anything after
+/// `±HH:MM`'s first five characters was ignored.
+#[test]
+fn a_claimed_date_must_name_its_zone_exactly() {
+    let kernel = kernel();
+    for date in [
+        "2020-01-01T00:00:00",
+        "2020-01-01T00:00:00+05:00junk",
+        "2020-01-01T00:00:00+05x30",
+    ] {
+        match file(&kernel, &writer(IMPORTER), &[("created", date)]) {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "created");
+                has(&detail, "is not an xsd:dateTime");
+            }
+            other => panic!("{date} was not refused: {other:?}"),
+        }
+    }
+    nothing_filed(&kernel);
+    // A zone, given as an offset, is read as one.
+    file(
+        &kernel,
+        &writer(IMPORTER),
+        &[("created", "2020-01-01T05:30:00+05:30")],
+    )
+    .unwrap();
+    let (_, json, _) = faces(&kernel);
+    assert_eq!(json["item"]["created"], "2020-01-01T00:00:00.000Z");
 }

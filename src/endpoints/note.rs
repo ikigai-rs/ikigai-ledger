@@ -123,6 +123,10 @@ impl Endpoint for NoteEndpoint {
             now,
         )
         .await?;
+        // A claimed `created` is held to the item's filing, as a link's is (ledger #4010).
+        if let Some(claimed) = who.created {
+            attribution::claimed_not_before_filing("created", claimed, item.created)?;
+        }
         if let Some(key) = &key {
             if let Some(found) = model::find_comment_by_key(&client, key).await? {
                 return existing_comment(&client, want, &found, key).await;

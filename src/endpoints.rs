@@ -4344,6 +4344,10 @@ impl Endpoint for CommentEndpoint {
             now,
         )
         .await?;
+        // A claimed `created` is held to the item's filing, as a link's is (ledger #4010).
+        if let Some(claimed) = who.created {
+            attribution::claimed_not_before_filing("created", claimed, item.created)?;
+        }
         // ★ A hand-back asks the dispatcher to check work that is still open; closed work
         // awaits nobody (ledger #1418). Until 0.11.1 this wrote `awaiting` on a closed item,
         // the state the doctor's `awaiting-closed` says only a write around the ledger leaves.
