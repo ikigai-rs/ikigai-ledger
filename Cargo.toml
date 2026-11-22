@@ -74,6 +74,8 @@ async-trait = "0.1"
 # ledger content, and `oxrdfio`'s serializer is the only thing here that is not guessing.
 # The same pair ikigai-log and ikigai-sign parse with, and pure Rust.
 oxrdf = "0.3"
+# Validate and compare decision timestamps with explicit timezones.
+oxsdatatypes = "0.2"
 oxrdfio = "0.2"
 
 # SPARQL SELECT results arrive as `application/sparql-results+json` from

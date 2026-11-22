@@ -236,6 +236,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}` | Source · Sink · Delete · Exists | one item, edit it, delete it | `read` / `write` / `delete` of `{ledger}` |
 | `…:{ledger}:append` | Sink | file a new item | `write:{ledger}` |
 | `…:{ledger}:comment` | Sink | append a comment, optionally under your own key | `comment:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:decision` | Sink | record a decision as a typed comment | `comment:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:note` | Sink | a dispatch note to the holder of the item's current claim, at exactly the epoch named | `close:{ledger}` or `write:{ledger}`, with a principal |
 | `…:{ledger}:item:{id}:notes` | Source | the dispatch notes to the caller's current claim, oldest first | `read:{ledger}`, acting as the claim's principal |
 | `…:{ledger}:close` | Sink | close with a reason and any evidence, releasing any claim | `close:{ledger}` or `write:{ledger}` |
@@ -474,9 +475,30 @@ commented on #12 (urn:iki:ledger:default:comment:01m4…) existing
   comments, keys and all, to the graveyard; a replay naming the deleted item is refused as not
   found, but one naming a different live item would write. Comments have no tombstones.
 
+### Decision comments
+
+`urn:iki:ledger:{ledger}:decision` takes `item=`, `decided-by=`, `decided-at=`, and the
+decision text as `content`. Use an absolute actor IRI, which can name a collective, and
+an `xsd:dateTime` with a timezone, such as `2026-11-01T18:30:00Z`. The ledger refuses
+date-only values and times later than its clock.
+
+The write records both `ledger:Comment` and `ledger:Decision` types and uses the comment
+grant and the ledger's graph grants. The filer asserts the decision maker and time.
+Standard author, committer, and creation fields record the filing separately. Decisions
+follow ordinary comment rules for configured write shapes, hand-back clearing by a
+dispatcher, shared comment keys, and optional claim epoch fences. Recording a decision
+leaves the item's open or closed status as it was.
+
+Item detail shows labeled decision maker and decision time lines with `(claimed)`.
+JSON includes `kind: "decision"` and, for each present fact, `decided_by` or `decided_at`
+with a matching `_status` of `"claimed"`. Turtle uses `ledger:decidedBy` and
+`ledger:decidedAt`, whose vocabulary definitions identify them as assertions by the filer.
+Readers omit missing, malformed, or ambiguous decision facts. Existing comments retain
+their fields and need no migration.
+
 ### Resending writes after a lost answer
 
-The action contracts declare `resend_safe_with_key("key")` on `append` and `comment`:
+The action contracts declare `resend_safe_with_key("key")` on `append`, `comment`, and `decision`:
 a client may resend the same request with a nonblank `key`. A replay writes nothing and
 answers `existing` in plain text or `"outcome": "existing"` in JSON. Without `key`, these
 writes have no resend safety declaration. `item=key:…` only selects an item; it does not
@@ -2349,7 +2371,7 @@ worker can be handed the work without the verdict on it:
 | grant | reaches | and nothing else |
 | --- | --- | --- |
 | `urn:cap:ledger:claim:{ledger}` | `claim` Sink (take, renew, take over) and Delete (release) | |
-| `urn:cap:ledger:comment:{ledger}` | `comment`, keyed or not | |
+| `urn:cap:ledger:comment:{ledger}` | `comment` and `decision`, keyed or not | |
 | `urn:cap:ledger:close:{ledger}` | `close` and `reopen` | |
 | `urn:cap:ledger:about:{ledger}` (0.10.0) | `item:{id}:about` Sink (add) and Delete (remove) | not the item Sink's own `about=`, which is the edit door |
 | `urn:cap:ledger:alias:{ledger}` (0.15.0) | giving one of this ledger's items an alias, in a scheme the caller owns | see "Aliases" |
@@ -2596,7 +2618,8 @@ control, cfg'd on that feature, shows raw oxigraph really fetching in that build
 ## The vocabulary
 
 `https://ikigai-rs.dev/ns/ledger#`, self-contained in `src/vocabulary.ttl` (the `sig:` and
-`log:` precedent), so nothing here waits on a manual `/ns` deploy. Reused where a term
+`log:` precedent). The public `/ns/ledger` copy is deployed by hand from this file after
+releases that change the vocabulary. Its version is independent of the crate version. Reused where a term
 already exists: `dcterms:title` / `created` / `modified`, `prov:Entity` / `Activity` /
 `generatedAtTime` / `invalidatedAtTime`, and `sig:contentHash` for the tombstone digest —
 the same predicate `ikigai-sign` and `ikigai-log` write, so the three join in a query

@@ -248,6 +248,29 @@ fn a_hand_back_is_checked_as_a_report_and_a_plain_comment_is_not() {
 }
 
 #[test]
+fn decisions_are_checked_against_configured_comment_shapes() {
+    let kernel = kernel_with(SpaceConfig::default().write_shape(
+        "default",
+        HANDBACK_SHAPE,
+        &[WriteKind::Comment],
+        ShapeOutcome::Refuse,
+    ));
+    let number = append(&kernel, "Fix the thing", &[]);
+    let before = source(&kernel, "urn:iki:ledger:item:1", &[]);
+    let mut args = [
+        ("item", number.as_str()),
+        ("decided-by", "urn:example:review-board"),
+        ("decided-at", "2023-11-14T21:00:00Z"),
+        ("content", "Stage the rollout"),
+    ];
+    let (result, _) = traced(&kernel, "urn:iki:ledger:decision", &args);
+    assert!(matches!(result, Err(Error::Conflict(_))), "{result:?}");
+    assert_eq!(source(&kernel, "urn:iki:ledger:item:1", &[]), before);
+    args[3].1 = "Stage the rollout from https://github.com/o/r/pull/9";
+    sink(&kernel, "urn:iki:ledger:decision", &args);
+}
+
+#[test]
 fn a_ledger_without_shapes_behaves_as_today() {
     // A shape on ANOTHER ledger governs nothing here.
     let kernel = kernel_with(SpaceConfig::default().write_shape(

@@ -170,6 +170,12 @@ term! {
     ITEM_CLASS => "Item";
     /// `ledger:Comment`
     COMMENT_CLASS => "Comment";
+    /// `ledger:Decision` — a comment recording a claimed decision.
+    DECISION_CLASS => "Decision";
+    /// `ledger:decidedBy` — the claimed decision maker.
+    DECIDED_BY => "decidedBy";
+    /// `ledger:decidedAt` — the claimed decision time.
+    DECIDED_AT => "decidedAt";
     /// `ledger:DispatchNote` — a comment from the dispatcher to a claim's holder (ledger #3718).
     DISPATCH_NOTE_CLASS => "DispatchNote";
     /// `ledger:Tombstone`

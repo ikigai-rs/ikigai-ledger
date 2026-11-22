@@ -28,6 +28,8 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   kind of comment it is, who it is for and under which grant; a comment that acknowledges a
   note has an `acknowledges note:` line naming it. Whether an author or a date is verified or claimed is said in words in
   parentheses (`(verified)`, `(claimed by a delegate)`, `(claimed)`), never by a sign alone.
+  Under a decision comment's stamp, `decision maker:` and `decision time:` each name the
+  relationship in words and end with `(claimed)` when that fact is present.
 - **Dispatch notes** (`src/endpoints/note.rs`): sending one answers `note to worker-1 at epoch 2,
   sent under the dispatcher grant on acme#12 (<iri>)`. A refused note names the item, the epoch
   asked for and the current claim, and says that the note was not sent (`acme#12 is held by
@@ -179,7 +181,8 @@ Assistive technology effects below are potential barriers, not observed results:
 - **Long identifiers**: write answers and the `iri:` line carry the item's full IRI, whose
   opaque id can be cumbersome to hear or navigate; the short
   `#12` beside it is the readable handle.
-- Times are UTC timestamps with milliseconds; a reader converts to local time themselves.
+- Ledger clock times are UTC timestamps with milliseconds. Claimed decision times can carry
+  a numeric timezone offset. Readers convert these times to their local zone.
 - Every message is English only.
 
 ## Contributing

@@ -219,6 +219,17 @@ fn script() -> Vec<Step> {
             at("comment"),
             &[("item", "#1"), ("content", "A note on it.")],
         ),
+        step(
+            "ledger-decision",
+            Verb::Sink,
+            at("decision"),
+            &[
+                ("item", "#1"),
+                ("content", "Stage the rollout"),
+                ("decided-by", "urn:example:review-board"),
+                ("decided-at", "2023-11-14T21:00:00Z"),
+            ],
+        ),
         // A hand-back and the session summary recorded on it (ledger #3022).
         step(
             "ledger-comment",

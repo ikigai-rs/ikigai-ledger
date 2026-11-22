@@ -142,9 +142,7 @@ impl Endpoint for NoteEndpoint {
             &fence_clause(&item.iri, Some(epoch)),
             &CommentExtra {
                 note: Some((epoch, &grant)),
-                acks: &[],
-                acks_epoch: 0,
-                acker: Acker::Anyone,
+                ..CommentExtra::default()
             },
         )
         .await?;
@@ -174,14 +172,8 @@ impl Endpoint for NoteEndpoint {
                 json::item_ref(ledger, item.number, &item.iri),
             );
             let mut said = written(&comment, &item.iri, text.trim(), &who, now);
-            said.kind = "note".to_string();
-            said.to = Some(json::NoteTo {
-                holder: note.holder.clone(),
-                principal: note.principal.clone(),
-            });
-            said.epoch = Some(epoch);
-            said.grant = Some(grant);
-            answer.comment = Some(said);
+            said.note = Some(note);
+            answer.comment = Some(json::comment(&said));
             answer.key = key;
             return Ok(json_repr(json::render(&answer)?));
         }
