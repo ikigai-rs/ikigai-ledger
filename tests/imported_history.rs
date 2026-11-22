@@ -426,7 +426,7 @@ fn concurrent_re_sends_record_each_event_once() {
             .with_arg("item", ArgRef::Inline(b"1".to_vec()))
             .with_arg("content", ArgRef::Inline(batch.clone().into_bytes())),
     );
-    send(
+    let answer = send(
         &kernel,
         &importer(),
         "1",
@@ -442,6 +442,54 @@ fn concurrent_re_sends_record_each_event_once() {
         .len(),
         1,
     );
+    assert!(
+        answer.contains("recorded 0, already recorded 1"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn racing_partial_batch_reports_committed_counts_in_json() {
+    let (kernel, racer) = racing_kernel();
+    let event = |id: &str, kind: &str| {
+        format!(
+            "<urn:src:{id}> a ledger:EditEvent ; \
+             dcterms:created \"2020-02-01T00:00:00Z\"^^xsd:dateTime ; \
+             ledger:editKind \"{kind}\" .\n"
+        )
+    };
+    import(&kernel, &event("held", "defer"));
+    let raced = format!("{PREFIXES}{}", event("raced", "defer"));
+    *racer.lock().unwrap() = Some(
+        Request::new(Verb::Sink, Iri::parse(at("history")).unwrap())
+            .with_arg("item", ArgRef::Inline(b"1".to_vec()))
+            .with_arg("content", ArgRef::Inline(raced.into_bytes())),
+    );
+    let content = format!(
+        "{PREFIXES}{}{}{}",
+        event("held", "defer"),
+        event("raced", "defer"),
+        event("new", "resume")
+    );
+    let answer: serde_json::Value = serde_json::from_str(
+        &try_as(
+            &kernel,
+            &importer(),
+            Verb::Sink,
+            &at("history"),
+            &[
+                ("item", "1"),
+                ("content", &content),
+                ("as", "application/json"),
+            ],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(racer.lock().unwrap().is_none());
+    assert_eq!(answer["outcome"], "imported");
+    assert_eq!(answer["recorded"], 1);
+    assert_eq!(answer["already_recorded"], 2);
 }
 
 /// What runs ahead of a kernel's next ledger update, once.

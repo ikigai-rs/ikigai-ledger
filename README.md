@@ -2694,6 +2694,12 @@ caller without a claimed date writes changes.
   was read as UTC, and anything after an offset's `±HH:MM` was ignored. A claimed date names
   its zone: `Z` or `±HH:MM`.
 
+#### Racing history imports (ledger #3984)
+
+A history import reports how many of its own
+events were recorded even when a concurrent re-send records some of the same source IDs
+before its update. Both the plain and JSON answers count those events as already recorded.
+
 ### 0.25.0: core 0.4 (ledger #3937)
 
 The public API now uses `ikigai-core` 0.4 types, so a consumer still on core 0.3 cannot mix
