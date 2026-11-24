@@ -261,6 +261,17 @@ pub struct Comment {
     /// The dispatch notes this comment acknowledges, sorted. Missing when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acks: Vec<String>,
+    /// Its place in its item's commit order (`ledger:itemRevision`, ledger #4199), which the
+    /// store allocated in the write: what this list is ordered by. Per item, never a clock:
+    /// do not compare two items' revisions. Missing on a record written before ledger #4199,
+    /// and on a write's own answer, rendered before the store allocates it. Added for ledger #4199.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_revision: Option<u64>,
+    /// `approximate` on a record read back with no `item_revision`: written before ledger
+    /// #4199, it keeps the old order (time, then IRI) ahead of every record that has one, and
+    /// that order may not be the order it was committed in. Missing otherwise. Added for ledger #4199.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
 }
 
 fn comment_kind() -> String {
@@ -917,6 +928,17 @@ pub struct HistoryEvent {
     /// sweep noticed it (ledger #3709).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lapsed: Option<String>,
+    /// Its place in its item's commit order (`ledger:itemRevision`, ledger #4199), which the
+    /// store allocated in the write: what this list is ordered by. Per item, never a clock:
+    /// do not compare two items' revisions. Missing on a record written before ledger #4199,
+    /// and on a write's own answer, rendered before the store allocates it. Added for ledger #4199.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_revision: Option<u64>,
+    /// `approximate` on a record read back with no `item_revision`: written before ledger
+    /// #4199, it keeps the old order (time, then IRI) ahead of every record that has one, and
+    /// that order may not be the order it was committed in. Missing otherwise. Added for ledger #4199.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
 }
 
 /// A field that is there is `Some`, even as `null`; `default` covers one that is not.
@@ -1109,8 +1131,19 @@ pub(crate) fn comment(comment: &model::Comment) -> Comment {
         decided_by,
         decided_at,
         acks: comment.acks.clone(),
+        item_revision: comment.revision,
+        order: None,
     }
 }
+
+/// What [`Comment::order`] and [`HistoryEvent::order`] say of a record READ BACK with
+/// `revision` (ledger #4199): `approximate` when it has none.
+pub(crate) fn order_of(revision: Option<u64>) -> Option<String> {
+    revision.is_none().then(|| APPROXIMATE.to_string())
+}
+
+/// The value of `order` on a legacy record (ledger #4199).
+pub const APPROXIMATE: &str = "approximate";
 
 /// An item as this face carries it. `numbers` names the link targets (from
 /// [`model::numbers_of`]); a target missing from it is a reference without a number.
@@ -1201,6 +1234,8 @@ pub(crate) fn item(
                 if shape.attribution {
                     comment.attribution = None;
                 }
+                // Read back: one with no revision is legacy, in approximate order.
+                comment.order = order_of(comment.item_revision);
                 comment
             })
             .collect(),

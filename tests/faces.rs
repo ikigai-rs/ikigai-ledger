@@ -312,7 +312,8 @@ fn the_json_item_document_is_schema_1() {
           "committed": "2026-09-15T00:00:00.000Z",
           "claimed_dates": []
         },
-        "kind": "comment"
+        "kind": "comment",
+        "item_revision": 3
       }
     ],
     "defects": [],
@@ -405,7 +406,8 @@ fn the_json_items_document_is_schema_1() {
           "author": null,
           "time": "2026-09-15T00:00:00.000Z",
           "text": "not worth it",
-          "kind": "comment"
+          "kind": "comment",
+          "item_revision": 2
         }
       ],
       "defects": [],
@@ -604,7 +606,8 @@ fn the_json_next_document_is_schema_1() {
               "committed": "2026-09-15T00:00:00.000Z",
               "claimed_dates": []
             },
-            "kind": "comment"
+            "kind": "comment",
+            "item_revision": 3
           }
         ],
         "defects": [],

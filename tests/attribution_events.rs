@@ -204,6 +204,7 @@ fn a_first_claim_records_one_claim_event() {
             "committedAt",
             "committer",
             "created",
+            "itemRevision",
             "onItem",
             "type"
         ]
@@ -278,6 +279,7 @@ fn a_takeover_records_a_claim_from_and_a_release() {
             "committedAt",
             "committer",
             "created",
+            "itemRevision",
             "onItem",
             "takeoverFrom",
             "type"
@@ -326,6 +328,7 @@ fn a_release_by_the_holder_records_the_claim_it_released() {
             "committedAt",
             "committer",
             "created",
+            "itemRevision",
             "onItem",
             "releaseReason",
             "type"
@@ -576,6 +579,7 @@ fn every_edit_that_creates_no_node_records_its_committer() {
                 "committer",
                 "created",
                 "editKind",
+                "itemRevision",
                 "onItem",
                 "type"
             ]

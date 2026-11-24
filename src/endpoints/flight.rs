@@ -660,9 +660,11 @@ impl StateEndpoint {
                 event.push_str(&token.triples(&answer, now));
             }
             client
-                .update(&cas(
-                    client, &item.iri, from, to, &receipt, &event, claimed, now,
-                ))
+                .update(&super::batch(&[
+                    cas(client, &item.iri, from, to, &receipt, &event, claimed, now),
+                    // The move's item revision (ledger #4199), once its event is in.
+                    super::revise(client, &item.iri, &node),
+                ]))
                 .await?;
             let after = read_state(client, &item.iri).await?;
             if after.tokens != [receipt.clone()] {

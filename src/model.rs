@@ -793,6 +793,12 @@ pub struct Comment {
     pub decision: Option<Decision>,
     /// The dispatch notes this comment acknowledges (`ledger:acks`, ledger #3718), sorted.
     pub acks: Vec<String>,
+    /// Its place in its item's commit order (`ledger:itemRevision`, ledger #4199), allocated
+    /// by the store in the update that wrote it. `None` on a comment written before that, whose
+    /// place is approximate (created, then IRI, ahead of every comment with a revision), and on
+    /// a write's own answer, rendered before the store allocates it. Per item: never compare
+    /// two items' revisions.
+    pub revision: Option<u64>,
 }
 
 /// A typed decision's asserted facts. Out-of-band records may lack either fact.
@@ -2615,7 +2621,7 @@ pub async fn find_comment_by_key(
     key: &str,
 ) -> Result<Option<Comment>> {
     let query = format!(
-        "SELECT ?c ?item ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?noteEpoch ?noteHolder ?noteTo ?noteGrant {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?c LIMIT 1",
+        "SELECT ?c ?item ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?itemRevision ?noteEpoch ?noteHolder ?noteTo ?noteGrant {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?c LIMIT 1",
         client.in_graph(&format!(
             "?c <{key_p}> {key} ; <{type_}> <{class}> ; <{on}> ?item ; <{body}> ?body ; \
              <{created}> ?created .\nOPTIONAL {{ ?c <{author}> ?author }}\n{provenance}\n\
@@ -2652,6 +2658,7 @@ pub async fn find_comment_by_key(
             note: note_of(row),
             decision: decision_of(row),
             acks: Vec::new(),
+            revision: revision_of(row),
         })
     });
     let Some(mut found) = found else {
@@ -2746,7 +2753,7 @@ pub async fn load_comments_for(
     let mut rows = Vec::new();
     for values in values_lists(items)? {
         let query = format!(
-            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?created ?comment",
+            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?itemRevision ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY {order}",
             client.in_graph(&format!(
                 "VALUES ?item {{ {values} }}\n\
                  ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
@@ -2760,7 +2767,8 @@ pub async fn load_comments_for(
                 body = v::BODY,
                 created = v::ext::CREATED,
                 author = v::AUTHOR,
-            ))
+            )),
+            order = commit_order("?comment"),
         );
         rows.extend(client.select(&query).await?);
     }
@@ -2794,11 +2802,17 @@ fn comment_on_item(row: &sparql::Row) -> Option<Comment> {
         note: note_of(row),
         decision: decision_of(row),
         acks: acks_of(row),
+        revision: revision_of(row),
     })
 }
 
 /// The most recent comment on each of several items, and whether the item has any other —
 /// `comments=last` on `items` and `next` (ledger #3781). One query for a whole page.
+///
+/// ★ **The most recent is the last committed** (ledger #4199): the comment with the item's
+/// highest `ledger:itemRevision`, so a later write from a host whose clock runs slow is still
+/// the last. An item none of whose comments has a revision (all written before ledger #4199)
+/// falls back to the legacy pick below, which is approximate.
 ///
 /// ★ **Bounded in the query, not after it**: the latest comment per item is chosen by two
 /// grouped sub-selects — the item's latest `dcterms:created` (and how many comments it has),
@@ -2818,16 +2832,20 @@ pub async fn load_last_comments_for(
     let mut rows = Vec::new();
     for values in values_lists(items)? {
         let query = format!(
-            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks ?count {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?item ?comment",
+            "SELECT ?item ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?itemRevision ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks ?count {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?item ?comment",
             client.in_graph(&format!(
-                "{{ SELECT ?item ?count (MAX(STR(?atLatest)) AS ?latest) WHERE {{\n\
-                 {{ SELECT ?item (MAX(?stamp) AS ?created) (COUNT(DISTINCT ?any) AS ?count) \
+                "{{ SELECT ?item ?count ?top (MAX(STR(?atLatest)) AS ?latest) WHERE {{\n\
+                 {{ SELECT ?item (MAX(?stamp) AS ?created) (MAX(?revision) AS ?top) \
+                 (COUNT(DISTINCT ?any) AS ?count) \
                  WHERE {{ VALUES ?item {{ {values} }}\n\
-                 ?any <{on_item}> ?item ; <{body}> ?anyBody ; <{created}> ?stamp . }} \
+                 ?any <{on_item}> ?item ; <{body}> ?anyBody ; <{created}> ?stamp . \
+                 OPTIONAL {{ ?any <{item_revision}> ?revision }} }} \
                  GROUP BY ?item }}\n\
                  ?atLatest <{on_item}> ?item ; <{body}> ?latestBody ; <{created}> ?created . \
-                 }} GROUP BY ?item ?count ?created }}\n\
-                 BIND(IRI(?latest) AS ?comment)\n\
+                 }} GROUP BY ?item ?count ?top ?created }}\n\
+                 OPTIONAL {{ ?revised <{on_item}> ?item ; <{body}> ?revisedBody ; \
+                 <{item_revision}> ?top }}\n\
+                 BIND(COALESCE(?revised, IRI(?latest)) AS ?comment)\n\
                  ?comment <{on_item}> ?item ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
                  OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
                  OPTIONAL {{ ?comment <{rejects}> ?rejects }}\n{note}\n{decision}",
@@ -2839,6 +2857,7 @@ pub async fn load_last_comments_for(
                 body = v::BODY,
                 created = v::ext::CREATED,
                 author = v::AUTHOR,
+                item_revision = v::ITEM_REVISION,
             ))
         );
         rows.extend(client.select(&query).await?);
@@ -3034,7 +3053,7 @@ pub async fn find_tombstone(
 /// `load_comments_for` breaks the tie the same way.
 pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<Comment>> {
     let query = format!(
-        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY ?created ?comment",
+        "SELECT ?comment ?body ?author ?created ?authorSource ?committer ?committedAt ?createdSource ?itemRevision ?rejects ?noteEpoch ?noteHolder ?noteTo ?noteGrant ?acks {DECISION_COLUMNS} WHERE {{ {} }} ORDER BY {order}",
         client.in_graph(&format!(
             "?comment <{on_item}> {subject} ;\n  <{body}> ?body ;\n  <{created}> ?created .\n\
              OPTIONAL {{ ?comment <{author}> ?author }}\n{provenance}\n\
@@ -3048,7 +3067,8 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
             body = v::BODY,
             created = v::ext::CREATED,
             author = v::AUTHOR,
-        ))
+        )),
+        order = commit_order("?comment"),
     );
     let rows = client.select(&query).await?;
     let found = rows.iter().filter_map(|row| {
@@ -3070,6 +3090,7 @@ pub async fn load_comments(client: &StoreClient<'_, '_>, item: &str) -> Result<V
             note: note_of(row),
             decision: decision_of(row),
             acks: acks_of(row),
+            revision: revision_of(row),
         })
     });
     let mut comments = Vec::new();
@@ -3086,12 +3107,28 @@ fn comment_provenance(var: &str) -> String {
         "OPTIONAL {{ {var} <{}> ?authorSource }}\n\
          OPTIONAL {{ {var} <{}> ?committer }}\n\
          OPTIONAL {{ {var} <{}> ?committedAt }}\n\
-         OPTIONAL {{ {var} <{}> ?createdSource }}",
+         OPTIONAL {{ {var} <{}> ?createdSource }}\n\
+         OPTIONAL {{ {var} <{}> ?itemRevision }}",
         v::AUTHOR_SOURCE,
         v::COMMITTER,
         v::COMMITTED_AT,
-        v::CREATED_SOURCE
+        v::CREATED_SOURCE,
+        v::ITEM_REVISION
     )
+}
+
+/// A row's `?itemRevision` (ledger #4199), when the record has one.
+pub(crate) fn revision_of(row: &sparql::Row) -> Option<u64> {
+    row.get("itemRevision")?.value.parse().ok()
+}
+
+/// The `ORDER BY` keys of an item's commit order (ledger #4199), over a record variable `var`
+/// whose `?itemRevision` and `?created` are bound as [`comment_provenance`] binds them: records
+/// with no revision first (`BOUND` is false), in the legacy order, created then IRI, which is
+/// approximate; then every record with one, by revision. A legacy record was committed before
+/// any revision was allocated on its item, so the two groups keep commit order between them.
+pub(crate) fn commit_order(var: &str) -> String {
+    format!("(BOUND(?itemRevision)) ?itemRevision ?created {var}")
 }
 
 /// Fill in labels, about, blocks, parent, related and the children for a loaded set.
