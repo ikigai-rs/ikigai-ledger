@@ -535,14 +535,16 @@ Claims remain undeclared. Repeating a same-holder claim preserves its epoch and 
 no second claim event, but renews its lease from the new request time. It can also take a
 new claim after a release. A lost answer is therefore not permission to resend a claim.
 
-State moves remain undeclared too. A replay after a successful move still answers Conflict;
-read the state and history before deciding what to do. `from=` is a state precondition,
-not a request ID: after a cycle back to that state, an identical request can move again.
-The current state token is minted by the server, not supplied by the caller, and callers
-without a principal are supported. Neither a matching target state nor an earlier event
-establishes that this request was already applied by this caller. An unambiguous replay
-answer requires a durable caller-supplied move identity; declaring `from` as a resend key
-would promise safety the endpoint does not provide.
+A state move (`item:{id}:state`) takes `idempotency-key=` too (ledger #4061): that token is
+the durable, caller-supplied move identity the compare-and-set lacked. Without one, a resend
+after a successful move still answers Conflict: `from=` is a state precondition, not a request
+ID, and after a cycle back to that state an identical request can move again, so `from` is
+never a resend key. Under a token, a retry from the same principal answers the first
+transition byte for byte (`#1 queued (was filed)`) and writes nothing. A different caller, or
+the same caller under another token, still meets the Conflict, so "already there" never hides
+a real racer. The record is in the compare-and-set's own update: the move and its record land
+together or not at all. A move's `content=` note is written after the move, so if that write
+fails, a retry answers the move and does not post the note.
 
 ### Handing back: an item awaiting its dispatcher
 
@@ -2821,7 +2823,7 @@ same update there.
 
 A patch; no answer changes shape.
 
-- **Resend declarations** (ledger #3382, on ikigai-core 0.3.4's `ActionSpec.resend`): `append` and `comment` declare a resend safe when it carries `key` (a replay answers `existing` and writes nothing); history imports declare it safe outright (every accepted event has a stable source id). Claims and `from=` moves stay undeclared: a same-holder claim replay extends the lease, and `from=` is a precondition rather than a request identity. See "Resending writes after a lost answer".
+- **Resend declarations** (ledger #3382, on ikigai-core 0.3.4's `ActionSpec.resend`): `append` and `comment` declare a resend safe when it carries `key` (a replay answers `existing` and writes nothing); history imports declare it safe outright (every accepted event has a stable source id). Claims and untokened `from=` moves stay undeclared: a same-holder claim replay extends the lease, and `from=` is a precondition rather than a request identity (a state move takes `idempotency-key=` since ledger #4061). See "Resending writes after a lost answer".
 
 ### 0.21.1: daily counts stay cached across ledgers, on ikigai-store 0.5.0
 

@@ -1,6 +1,7 @@
 //! **Request tokens** (ledger #4059, from the research note `docs/research/sink-idempotency.md`
 //! in ikigai-core, section 5.2): `idempotency-key=` on `comment`, `note`, `decision`, `close`,
-//! `reopen`, `defer` and `claim`'s release.
+//! `reopen`, `defer` and `claim`'s release, and (ledger #4061) the state compare-and-set,
+//! `item:{id}:state`, whose record rides in the compare-and-set's own update.
 //!
 //! A client that sent one of these writes and does not know whether it landed (a timeout, a
 //! dropped connection) sends it again under the same token. The retry is answered with the

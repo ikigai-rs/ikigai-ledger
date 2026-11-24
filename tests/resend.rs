@@ -62,7 +62,7 @@ fn only_writes_with_replay_identity_declare_safe_resends() {
         }
     }
     assert!(keyed >= 1);
-    assert!(tokened >= 7);
+    assert!(tokened >= 8);
 }
 
 fn graph(kernel: &ikigai_core::Kernel) -> String {
@@ -177,8 +177,9 @@ fn turtle_meta_exposes_resend_safety_to_clients() {
     }
     let meta = ok(&kernel, Verb::Meta, "urn:iki:ledger:history", &[]);
     assert!(meta.contains("ik:resendSafe true"), "{meta}");
-    // A state move is undeclared; a claim's Sink is too, and only its release takes a token.
+    // A state move is resend safe only under its request token (ledger #4061), never `from=`.
     let meta = ok(&kernel, Verb::Meta, "urn:iki:ledger:item:1:state", &[]);
-    assert!(!meta.contains("ik:resendKey <"));
+    assert!(meta.contains(":input:idempotency-key>"), "{meta}");
+    assert!(!meta.contains(":input:from> ik:resend"), "{meta}");
     assert!(!meta.contains("ik:resendSafe true"));
 }
