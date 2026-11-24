@@ -1626,12 +1626,14 @@ $ sink urn:iki:ledger:claim item=12 takeover=true from=kata-ship/0abc1234 <<< "k
   two claimants racing for one item, exactly one holds it and the other gets a `Conflict`
   naming them. Claiming again as the same holder renews the claim and its lease.
 - **`lease=`** (`90s`, `30m`, `2h`, `1d`, or an `xsd:duration` like `PT30M`) records
-  `ledger:leaseExpires` from the **kernel's** clock, so a test pins expiry without sleeping and
-  an as-of corridor can ask who held what when. Omit it for a claim held until released.
+  `ledger:leaseExpires` from the **store host's** clock. Omit it for a claim held until released.
+  Remote readers use the store's verdict, not their own clock. If they cannot reach the store,
+  lease status is unknown. See [the lease time design](docs/design/lease-time-authority.md)
+  for partition behavior, fencing, and how to cut over existing leases.
 - ★ **An expired lease is never silently free.** The claim stays. `next` excludes the item with
-  `why: "lease-expired"`, the holder and the expiry, and a cached `next` (and doctor) holds
-  only until the earliest running lease ends, because that moment changes the answer with
-  nothing written. A plain claim on it is a `Conflict` that says how to take it, and the only
+  `why: "lease-expired"`, the holder and the expiry. Lease-sensitive `next` answers and
+  doctor checks are not cached against the reader's clock. A plain claim on an expired lease
+  is a `Conflict` that says how to take it, and the only
   way to take it is **`takeover=true from=<holder>`**: a compare-and-set against that holder,
   so of two takers exactly one wins. A live lease, or a claim with no lease, is never taken
   over; it is released (`delete …:claim`), which is the deliberate act.
@@ -1926,8 +1928,8 @@ $ source urn:iki:ledger:item:12:history
   and not handed back to its dispatcher (`ledger:awaiting`), the lease that ran out first
   leading, with the holder, its epoch, when the lease ended, and whether the lapse is recorded
   yet. It is computed from the claims as they stand, so an item is listed from the moment its
-  lease ends, swept or not, and its cached answer holds only until the earliest running lease
-  ends, as the doctor's does. `as=application/json` gives `{schema, ledger, checked_at,
+  lease ends on the store clock, swept or not. The answer is not cached.
+  `as=application/json` gives `{schema, ledger, checked_at,
   stalled: [{item, title, holder, principal, kind, epoch, lapsed, recorded}]}`.
 - **`…:{ledger}:lapse`** (Sink, the dispatcher's `close:{ledger}` or `write:{ledger}`) records
   each lapse not recorded yet as a `ledger:LapseEvent` on its item (see the table below), and
@@ -2332,7 +2334,7 @@ ledger's lifecycle filled in as terms:
 | --- | --- |
 | `orphaned` | a machine's or an agent's claim (or one with no recorded kind) on an item whose state is not in flight; the detail names the kind |
 | `abandoned` | an item in an in-flight state that nobody holds and that is not awaiting its dispatcher (a hand-back is waiting, not abandoned) |
-| `lease-expired` | a claim whose lease ran out, judged on the kernel's clock |
+| `lease-expired` | a claim whose lease ran out, judged on the store host's clock |
 | `unknown-state` | a `ledger:state` the ledger's lifecycle does not declare (a hand edit, an import, a ledger whose lifecycle changed) |
 | `two-states` | an item holding more than one state, which only a raw store write can produce |
 | `awaiting-closed` | a closed item still marked `ledger:awaiting` (since 0.8.0): a close clears a hand-back, so only a raw store write leaves one |
@@ -2340,9 +2342,9 @@ ledger's lifecycle filled in as terms:
 
 `source urn:iki:ledger:doctor awaiting-age=3d` changes the wait threshold. It accepts
 positive durations (`30m`, `24h`, `3d`, `PT24H`) up to 366 days, like `lease=`. The age
-comes from `ledger:awaitingAt`, written with the hand-back; ordinary worker comments,
-claim releases and other item edits do not reset it. A new hand-back does. A keyed replay
-does not. The cache expires when a wait crosses the threshold even with no intervening write.
+comes from `ledger:awaitingAt`, stamped by the store clock with a new hand-back. Ordinary
+worker comments, claim releases, other item edits, and keyed replays do not reset it. The
+doctor checks the store clock each time. Older timestamps from a writer's clock are approximate.
 
 For older awaiting markers without a timestamp, the newest comment's time is a conservative
 lower bound. For an unmarked item, a newest comment beginning `Evidence:` (the old worker

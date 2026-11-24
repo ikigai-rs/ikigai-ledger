@@ -1633,6 +1633,11 @@ async fn write_keyed_comment(
     // The stamp and the hand-back first: once the comment is in, the key is taken and the
     // guard is false, so a replay changes neither.
     let stamp = stamp_terms(item, now, who.created);
+    let awaiting_at = if handback == Handback::Set {
+        client.authority_now().await?
+    } else {
+        now
+    };
     client
         .update(&batch(&[
             format!(
@@ -1654,7 +1659,7 @@ async fn write_keyed_comment(
                     stamp.filter
                 )),
             ),
-            handback_update(client, item, &comment, handback, &free, now),
+            handback_update(client, item, &comment, handback, &free, awaiting_at),
             format!(
                 "INSERT {{ {} }} WHERE {{ {free} {holder} {note_where} }}",
                 client.in_graph(&triples)
@@ -6122,7 +6127,7 @@ fn claim_update(
     principal: Option<&str>,
     purpose: Option<&str>,
     kind: crate::claim::ClaimKind,
-    lease: Option<&crate::claim::Lease>,
+    lease: Option<(&crate::claim::Lease, u64)>,
     who: &Attribution,
     now: u64,
 ) -> Result<String> {
@@ -6206,14 +6211,14 @@ fn claim_update(
             v::CLAIM_PRINCIPAL
         ));
     }
-    if let Some(lease) = lease {
+    if let Some((lease, expires)) = lease {
         insert.push_str(&format!(
             "\n<{item}> <{}> {} ; <{}> {} .",
             v::LEASE,
             ikigai_store::sparql::typed_literal(&lease.duration, v::ext::XSD_DURATION, "lease")
                 .expect("a constant datatype IRI"),
             v::LEASE_EXPIRES,
-            datetime(now + lease.millis),
+            datetime(expires),
         ));
     }
     // ★ Only an OPEN item (ledger #1419): the endpoint refuses a closed one before writing,
@@ -6400,7 +6405,22 @@ impl Endpoint for ClaimEndpoint {
                 // A fenced claim (ledger #3205) names the epoch it renews or takes over.
                 check_fence(&item, epoch)?;
                 let resource = client.ledger().resource("claim");
-                let expired = item.lease_expires.is_some_and(|ends| ends <= now);
+                let lease_now = if lease.is_some()
+                    || (item.lease_expires.is_some()
+                        && (takeover || item.claimed_by.as_deref() != Some(holder.as_str())))
+                {
+                    Some(client.authority_now().await?)
+                } else {
+                    None
+                };
+                let timed_lease = lease
+                    .as_ref()
+                    .zip(lease_now)
+                    .map(|(lease, now)| (lease, now + lease.millis));
+                let expired = item
+                    .lease_expires
+                    .zip(lease_now)
+                    .filter(|(ends, now)| ends <= now);
                 // ★ The claimant's principal, from the capability its door minted — never an
                 // argument (ledger #1199). `None` on a host without principals and for root.
                 let caller = inv.capability.principal();
@@ -6439,7 +6459,7 @@ impl Endpoint for ClaimEndpoint {
                                 item.short()
                             )))
                         }
-                        Some(_) if !expired => {
+                        Some(_) if expired.is_none() => {
                             return Err(Error::Conflict(match item.lease_expires {
                                 Some(ends) => format!(
                                     "{}'s lease for {from} runs until {}; only an expired lease \
@@ -6456,7 +6476,9 @@ impl Endpoint for ClaimEndpoint {
                                 ),
                             }))
                         }
-                        Some(_) => Guard::ExpiredFrom(from, now),
+                        Some(_) => {
+                            Guard::ExpiredFrom(from, expired.expect("expiry checked above").1)
+                        }
                     }
                 } else if renew {
                     // ★ A renewal names a claim this holder HOLDS. A worker whose claim was
@@ -6489,13 +6511,13 @@ impl Endpoint for ClaimEndpoint {
                         Some(held) if held != &holder => {
                             // ★ `Conflict`, not `Unavailable`: the request is fine and the
                             // state does not permit it, which no retry changes.
-                            return Err(Error::Conflict(if expired {
+                            return Err(Error::Conflict(if let Some((ends, _)) = expired {
                                 format!(
                                     "{}'s lease for {held} expired at {}, and an expired lease \
                                      is never silently free: take it with `sink {resource} \
                                      item={} takeover=true from={held}`",
                                     item.short(),
-                                    sparql::iso8601(item.lease_expires.unwrap_or(now)),
+                                    sparql::iso8601(ends),
                                     item.number
                                 )
                             } else {
@@ -6526,7 +6548,7 @@ impl Endpoint for ClaimEndpoint {
                         caller_term.as_deref(),
                         purpose,
                         kind,
-                        lease.as_ref(),
+                        timed_lease,
                         &Attribution::committer(inv)?,
                         now,
                     )?)
@@ -6583,9 +6605,8 @@ impl Endpoint for ClaimEndpoint {
                     .claim_epoch
                     .map(|epoch| format!(" at epoch {epoch}"))
                     .unwrap_or_default();
-                let until = lease
-                    .as_ref()
-                    .map(|l| format!(" until {}", sparql::iso8601(now + l.millis)))
+                let until = timed_lease
+                    .map(|(_, expires)| format!(" until {}", sparql::iso8601(expires)))
                     .unwrap_or_default();
                 Ok(plain(if takeover {
                     format!(
@@ -6841,7 +6862,7 @@ impl ClaimEndpoint {
                         ArgSpec::new("lease")
                             .summary(
                                 "How long the claim holds: `90s`, `30m`, `2h`, `1d`, or an \
-                                 xsd:duration (`PT30M`). The expiry is taken from the kernel's \
+                                 xsd:duration (`PT30M`). The expiry is set using the store host's \
                                  clock. Omit it for a claim held until released.",
                             )
                             .class(v::ext::XSD_STRING)
@@ -7962,9 +7983,9 @@ impl Endpoint for NextEndpoint {
         let limit = parse_limit(inv, 3)?;
         // ★ Slim records unless the face shows every excluded item whole (ledger #3257).
         let mut set = if want == JSON {
-            select::ready_full_at(&client, &filter, now).await?
+            select::ready_full(&client, &filter).await?
         } else {
-            select::ready_at(&client, &filter, now).await?
+            select::ready(&client, &filter).await?
         };
         // ★ After the ready set, like `labels=`: blocked, the cycle check and leverage have been
         // computed over the whole ledger, so these only choose which items are being asked about.
@@ -7975,16 +7996,8 @@ impl Endpoint for NextEndpoint {
                     && state.is_none_or(|state| held.name == state.name)
             });
         }
-        // ★ A lease running out changes this answer with nothing written — an exclusion's
-        // `claimed` becomes `lease-expired` — so the answer holds only until the earliest
-        // running lease ends, whatever the policy says. Same trap as leverage's age points.
-        let valid_until = match (
-            select::valid_until(&set, policy.as_ref(), now),
-            select::next_lease_expiry(&set, now),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let lease_sensitive = select::classify_leases(&client, &mut set).await?;
+        let valid_until = select::valid_until(&set, policy.as_ref(), now);
         let mut selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
         if want != JSON {
             select::complete(&client, &mut selection).await?;
@@ -8015,12 +8028,17 @@ impl Endpoint for NextEndpoint {
         // ⚠ The Turtle face's `prov:generatedAtTime` is the moment the cached answer was
         // COMPUTED, which stays true of it: within the horizon the ranking is the one a fresh
         // computation would give, and the selection's IRI is a digest of what it says.
-        let repr = match valid_until {
-            None => repr.cacheable(),
-            Some(deadline) if deadline > now => {
-                repr.cacheable_until(ikigai_core::Time::from_millis(deadline))
+        let repr = if lease_sensitive {
+            // The caller's cache clock cannot enforce a store-clock deadline.
+            repr.with_uncached_reason(ikigai_core::UncachedReason::Declared)
+        } else {
+            match valid_until {
+                None => repr.cacheable(),
+                Some(deadline) if deadline > now => {
+                    repr.cacheable_until(ikigai_core::Time::from_millis(deadline))
+                }
+                Some(_) => repr,
             }
-            Some(_) => repr,
         };
         Ok(repr
             .depends_on(ikigai_store::UPDATE_THREAD)

@@ -299,7 +299,7 @@ pub struct Item {
     /// held until released.
     pub lease: Option<String>,
     /// When the lease runs out (ms since the epoch). Expired is `lease_expires <= now` on the
-    /// kernel's clock, and an expired lease is still a claim: never silently free.
+    /// store clock, and an expired lease is still a claim: never silently free.
     pub lease_expires: Option<u64>,
     /// The principal the claim was taken AS (`ledger:claimPrincipal`): the one principal the
     /// claimant's capability carried, beside [`claimed_by`](Item::claimed_by), the holder's

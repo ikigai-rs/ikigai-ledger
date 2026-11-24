@@ -22,8 +22,8 @@
 //!
 //! # A lease is observable, never silent
 //!
-//! `lease=30m` records `ledger:leaseExpires` from the KERNEL clock (so a test pins expiry
-//! without sleeping, and an as-of corridor can ask who held what when). An expired lease does
+//! `lease=30m` records `ledger:leaseExpires` from the store host's clock.
+//! An expired lease does
 //! **not** free the item: `next` excludes it with `why: "lease-expired"`, naming the holder
 //! and the expiry, and the only way to take it is `claim takeover=true from=<holder>` — a
 //! compare-and-set against that holder.

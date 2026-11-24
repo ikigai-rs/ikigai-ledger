@@ -264,6 +264,18 @@ impl<'a, 'i> StoreClient<'a, 'i> {
         format!("GRAPH <{}> {{ {body} }}", self.ledger.session_graph())
     }
 
+    /// Sample the lease authority on the store host, not the invoking kernel.
+    /// Store 0.6.1 never caches a query that calls NOW().
+    pub(crate) async fn authority_now(&self) -> Result<u64> {
+        self.select("SELECT (NOW() AS ?authorityNow) WHERE {}")
+            .await?
+            .first()
+            .and_then(|row| row.get("authorityNow"))
+            .filter(|b| b.datatype.as_deref() == Some(crate::vocabulary::ext::XSD_DATETIME))
+            .and_then(|binding| crate::model::millis(&binding.value))
+            .ok_or_else(|| Error::Endpoint("the store did not return its lease clock time".into()))
+    }
+
     /// Evaluate a SPARQL SELECT over this ledger's graph and return its rows.
     pub async fn select(&self, query: &str) -> Result<Vec<Row>> {
         let bytes = self

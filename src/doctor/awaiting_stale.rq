@@ -1,5 +1,4 @@
-# Candidates for AWAITING-STALE. Rust compares age to the requested duration and
-# uses younger candidates to bound the cache at the moment they become stale.
+# Candidates for AWAITING-STALE. Rust compares age to the requested duration.
 PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
 PREFIX dcterms: <http://purl.org/dc/terms/>
 SELECT ?item ?number ?since ?inferred WHERE {

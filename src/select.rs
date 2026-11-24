@@ -185,7 +185,7 @@ pub async fn ready(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<Read
     ready_inner(client, filter, None, false).await
 }
 
-/// [`ready`], judging leases at `now` (ms since the epoch, from the kernel's clock): a claim
+/// [`ready`], judging leases at `now` (ms since the epoch, from the lease authority): a claim
 /// whose lease has run out is excluded as [`Excluded::LeaseExpired`] rather than
 /// [`Excluded::Claimed`]. It is excluded either way — an expired lease is never free.
 pub async fn ready_at(client: &StoreClient<'_, '_>, filter: &Filter, now: u64) -> Result<ReadySet> {
@@ -203,9 +203,39 @@ pub async fn ready_full_at(
     ready_inner(client, filter, Some(now), true).await
 }
 
-/// The earliest lease, among the items `set` excluded as claimed, that is still running at
-/// `now` — the moment a ranking of `set` stops being true even if nothing is written,
-/// because that exclusion's reason turns into `lease-expired`.
+/// Load full records without yet deciding lease expiry.
+pub(crate) async fn ready_full(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<ReadySet> {
+    ready_inner(client, filter, None, true).await
+}
+
+/// Classify the visible leased claims using one store-clock sample. The caller must not
+/// cache a lease-sensitive result against its own clock, even if every lease is expired.
+pub(crate) async fn classify_leases(
+    client: &StoreClient<'_, '_>,
+    set: &mut ReadySet,
+) -> Result<bool> {
+    if !set
+        .excluded
+        .iter()
+        .any(|(item, why)| matches!(why, Excluded::Claimed(_)) && item.lease_expires.is_some())
+    {
+        return Ok(false);
+    }
+    let now = client.authority_now().await?;
+    for (item, why) in &mut set.excluded {
+        if let (Excluded::Claimed(holder), Some(expires)) = (&*why, item.lease_expires) {
+            if expires <= now {
+                *why = Excluded::LeaseExpired {
+                    holder: holder.clone(),
+                    expires,
+                };
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// The earliest running lease in a ready set judged at a caller-supplied authority time.
 pub fn next_lease_expiry(set: &ReadySet, now: u64) -> Option<u64> {
     set.excluded
         .iter()

@@ -29,7 +29,7 @@ impl Clock for Frozen {
 
 fn frozen() -> Kernel {
     let space = Fallback::new(vec![
-        Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>,
+        store_with_clock(DurableStore::in_memory().unwrap(), Arc::new(Frozen)),
         Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
     ]);
     Kernel::with_meta_renderer(Arc::new(space), Arc::new(ikigai_vocab::TurtleRenderer))
