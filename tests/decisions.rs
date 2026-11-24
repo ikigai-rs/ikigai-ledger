@@ -235,10 +235,10 @@ fn fences_and_shared_keys_preserve_the_original_comment_and_item() {
     assert_eq!(replay["outcome"], "existing");
     // The read carries the comment's revision (ledger #4199); a write's answer, which a
     // replay repeats, never does, since the store allocates it after the answer is rendered.
-    let mut read = comments(&kernel)[0].clone();
-    assert!(read["item_revision"].is_u64(), "{read}");
-    read.as_object_mut().unwrap().remove("item_revision");
-    assert_eq!(replay["comment"], read);
+    let mut read_back = comments(&kernel)[0].clone();
+    assert!(read_back["item_revision"].is_u64(), "{read_back}");
+    read_back.as_object_mut().unwrap().remove("item_revision");
+    assert_eq!(replay["comment"], read_back);
     assert_eq!(replay["comment"]["text"], "Stage the rollout");
     assert_eq!(replay["comment"]["decided_by"], MAKER);
     let ordinary = decision(
