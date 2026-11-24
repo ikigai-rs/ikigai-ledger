@@ -240,6 +240,11 @@ ledger:key a rdf:Property ;
     rdfs:label "key" ;
     rdfs:comment "The CALLER'S name for an item: unique per ledger, chosen by whoever files it (`append key=`), and the thing a keyed append checks before it files. Its first use is idempotence (a hook re-run, two hooks racing) and its second is lookup by a foreign id (`urn:iki:ledger:item:key:{key}`, `items key=`) — a roborev finding, a kata issue — which is why it is called a key and not an idempotency key. A literal, not an IRI, so any caller's identifier fits; its shape is fixed (ASCII letters, digits, `-`, `.`, `_`, `~` and `:`, at most 256 characters) so it stays a legal IRI segment and survives a URL path. Compared exactly; never rewritten after filing. ⚠ No domain, for the ledger:number reason: an item AND the tombstone it leaves both carry it, so a deleted item's key stays TAKEN — a replayed request must not resurrect what someone deliberately deleted — and rdfs:domain ledger:Item would make every tombstone an inferred item to a reasoning consumer. ⚠ A key is a NAME, kept on the tombstone through a purge like the number is: it is not content, so do not put content in it." .
 
+ledger:keyFingerprint a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "key fingerprint" ;
+    rdfs:comment "What a keyed append FILED, beside its ledger:key (ledger #4058): `sha256:` and 64 lowercase hex digits over the title, the body and the set of labels the append set, each as the append stored it. A later append under the same key compares its own fingerprint with this one and answers `existing <status>` on a match and `existing <status> differs` on a mismatch, `\"differs\": true` in JSON; it is never refused, since a re-sync that edits a title upstream is legitimate. Written once and never rewritten: it records the FILING, not the item's content today, so an edit in the ledger does not change it. Moved onto the tombstone with the key when the item is deleted. An item filed before ledger #4058 has none, and a key without one is not compared. No domain, for the ledger:key reason." .
+
 ledger:eventKey a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "event key" ;

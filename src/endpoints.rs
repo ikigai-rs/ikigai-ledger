@@ -3649,6 +3649,19 @@ async fn delete_item(
         // well — it is a name, like the number, not content.
         if let Some(key) = &item.key {
             triples.push_str(&format!("\n<{tombstone}> <{}> {} .", v::KEY, literal(key)));
+            // The filing's fingerprint goes with it (ledger #4058), so a keyed append replayed
+            // after a delete still says whether it brought the same filing.
+            if let Some(fingerprint) = model::find_by_key(client, key)
+                .await?
+                .filter(|found| found.item == item.iri)
+                .and_then(|found| found.fingerprint)
+            {
+                triples.push_str(&format!(
+                    "\n<{tombstone}> <{}> {} .",
+                    v::KEY_FINGERPRINT,
+                    literal(&fingerprint)
+                ));
+            }
         }
         // Step 2 of 2 — the live graph, which IS the commit point. Removing the item's quads
         // and writing its tombstone are one scoped update and therefore atomic: there is no
@@ -4016,9 +4029,17 @@ impl Endpoint for AppendEndpoint {
         // no number spent. The store holds its write lock across one update's evaluation
         // AND its insert, so two keyed appends cannot both see the key free; the gonk
         // bridges' read-then-append could, and filed twice (`tests/keyed_append.rs`).
+        // ★ What this append files, fingerprinted beside the key (ledger #4058), so a later
+        // append under a taken key can say whether it brought the same filing or another.
+        let fingerprint = model::filing_fingerprint(&title, &body, &labels);
         let key_guard = match &key {
             Some(key) => {
                 triples.push_str(&format!("\n<{iri}> <{}> {} .", v::KEY, literal(key)));
+                triples.push_str(&format!(
+                    "\n<{iri}> <{}> {} .",
+                    v::KEY_FINGERPRINT,
+                    literal(&fingerprint)
+                ));
                 format!(
                     "\n  FILTER NOT EXISTS {{ {} }}",
                     client.in_graph(&format!("?taken <{}> {}", v::KEY, literal(key)))
@@ -4045,7 +4066,7 @@ impl Endpoint for AppendEndpoint {
         // `tests/noop_keyed_append.rs` keeps both halves.
         if let Some(key) = &key {
             if let Some(found) = model::find_by_key(&client, key).await? {
-                return existing_answer(&client, want, &found, key).await;
+                return existing_answer(&client, want, &found, key, &fingerprint).await;
             }
         }
 
@@ -4090,7 +4111,7 @@ impl Endpoint for AppendEndpoint {
                 ))
             })?;
             if found.item != iri {
-                return existing_answer(&client, want, &found, key).await;
+                return existing_answer(&client, want, &found, key, &fingerprint).await;
             }
         }
 
@@ -4108,6 +4129,7 @@ impl Endpoint for AppendEndpoint {
             item.number,
             &item.iri,
             key.as_deref(),
+            false,
         )
     }
 
@@ -4225,7 +4247,9 @@ impl Endpoint for AppendEndpoint {
                              issue id — unique in this ledger. If an item already carries it \
                              (or carried it and was deleted), NOTHING is filed and the answer \
                              names that item, marked `existing`: `#12 <iri> existing open` in \
-                             text, `\"outcome\": \"existing\"` in JSON. The check and the \
+                             text, `\"outcome\": \"existing\"` in JSON, and a fourth word \
+                             `differs` (`\"differs\": true`) when that item was filed with \
+                             another title, body or labels. The check and the \
                              filing are one store update, so concurrent appends with one key \
                              file one item. ASCII letters, digits, `-` `.` `_` `~` `:`, at \
                              most 256; find it later at `urn:iki:ledger:item:key:{key}`.",
@@ -4250,13 +4274,21 @@ impl Endpoint for AppendEndpoint {
 }
 
 /// The keyed append's "nothing was filed": the item the key already names, with its
-/// status — `deleted` when the key is on a tombstone, else whether the item is open.
+/// status — `deleted` when the key is on a tombstone, else whether the item is open — and
+/// whether it was filed with other content than `fingerprint`, this append's (ledger #4058).
+/// A key with no fingerprint, filed before ledger #4058, is not compared: what it was filed with is
+/// not known, and the item's content today may be edits made since.
 async fn existing_answer(
     client: &StoreClient<'_, '_>,
     want: &str,
     found: &model::Keyed,
     key: &str,
+    fingerprint: &str,
 ) -> Result<Representation> {
+    let differs = found
+        .fingerprint
+        .as_deref()
+        .is_some_and(|filed| filed != fingerprint);
     let status = match &found.tombstone {
         Some(_) => "deleted",
         None => match model::load_item(client, &found.item).await? {
@@ -4272,6 +4304,7 @@ async fn existing_answer(
         found.number,
         &found.item,
         Some(key),
+        differs,
     )
 }
 
@@ -4280,7 +4313,10 @@ async fn existing_answer(
 /// The plain face is `#12 <iri>` for a filing — byte for byte what 0.3.0 answered, so a
 /// caller reading the first two words is unaffected — and `#12 <iri> existing <status>`
 /// when a key named an item already there: the marker is a third word that a filing never
-/// has, so it cannot be mistaken for one.
+/// has, so it cannot be mistaken for one. When that item was filed with another title, body
+/// or labels, a fourth word says so, `#12 <iri> existing <status> differs` (ledger #4058);
+/// a caller reading three words still reads `existing` and the status.
+#[allow(clippy::too_many_arguments)]
 fn append_answer(
     client: &StoreClient<'_, '_>,
     want: &str,
@@ -4289,16 +4325,23 @@ fn append_answer(
     number: i64,
     iri: &str,
     key: Option<&str>,
+    differs: bool,
 ) -> Result<Representation> {
     let ledger = client.ledger();
     if want == JSON {
         let mut answer = json::answer(ledger, outcome, json::item_ref(ledger, number, iri));
         answer.status = Some(status.to_string());
         answer.key = key.map(str::to_string);
+        answer.differs = differs.then_some(true);
         return Ok(json_repr(json::render(&answer)?));
     }
     Ok(plain(if outcome == "filed" {
         format!("{} {iri}\n", ledger.number(number))
+    } else if differs {
+        format!(
+            "{} {iri} {outcome} {status} differs\n",
+            ledger.number(number)
+        )
     } else {
         format!("{} {iri} {outcome} {status}\n", ledger.number(number))
     }))

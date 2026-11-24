@@ -385,13 +385,28 @@ the key, **nothing is filed** and the answer names that item, marked:
 ```text
 $ sink urn:iki:ledger:append key=urn:kata:issue:01JZ <<< "Port the importer"
 #7 urn:iki:ledger:default:item:01m4a2…
-$ sink urn:iki:ledger:append key=urn:kata:issue:01JZ <<< "Port the importer (re-run)"
+$ sink urn:iki:ledger:append key=urn:kata:issue:01JZ <<< "Port the importer"
 #7 urn:iki:ledger:default:item:01m4a2… existing open
+$ sink urn:iki:ledger:append key=urn:kata:issue:01JZ <<< "Port the importer (re-run)"
+#7 urn:iki:ledger:default:item:01m4a2… existing open differs
 ```
 
 A filing answers exactly as before, `#N <iri>`; `existing` is a third word a filing never
 has, followed by the item's status (`open`, `closed` or `deleted`). In the JSON face it is
 `"outcome": "existing"`.
+
+**`differs`** (ledger #4058). A keyed append stores a fingerprint of what it filed beside the
+key (`ledger:keyFingerprint`: a `sha256:` digest of the title, the body and the set of labels
+it set, as stored). A later append under the same key compares its own: on a match the
+answer is `existing <status>` as above, and on a mismatch a fourth word says so,
+`existing <status> differs`, `"differs": true` in JSON (missing otherwise). Nothing is filed
+either way, and a mismatch is not refused, because a re-sync that edits a title upstream is
+legitimate; the flag is what lets a fan-out reusing fixed keys across waves see that it
+landed on last wave's closed item. Label order and repeats are not a difference. The
+fingerprint records the filing, not the item's content today, so an edit made in the ledger
+does not make a faithful replay differ. A delete and a purge keep it on the tombstone with
+the key. A key filed before ledger #4058 has no fingerprint and is not compared: it answers
+`existing <status>` whatever the content.
 
 ★ **The check and the filing are one store update.** The append's SPARQL carries
 `FILTER NOT EXISTS { ?taken ledger:key "<k>" }` beside the counter's allocation, so when the

@@ -651,7 +651,7 @@ fn the_json_write_answers_are_schema_1() {
     assert_eq!(
         answer(
             "urn:iki:ledger:append",
-            &[("content", "x"), ("key", "urn:kata:issue:01JZ")]
+            &[("content", "Keyed"), ("key", "urn:kata:issue:01JZ")]
         ),
         r##"{
   "schema": 1,
@@ -664,6 +664,26 @@ fn the_json_write_answers_are_schema_1() {
   },
   "status": "open",
   "key": "urn:kata:issue:01JZ"
+}"##
+    );
+    // The same key with other content (ledger #4058): still `existing`, plus `differs`.
+    assert_eq!(
+        answer(
+            "urn:iki:ledger:append",
+            &[("content", "x"), ("key", "urn:kata:issue:01JZ")]
+        ),
+        r##"{
+  "schema": 1,
+  "ledger": "default",
+  "outcome": "existing",
+  "item": {
+    "number": 4,
+    "display": "#4",
+    "iri": "urn:iki:ledger:default:item:{a}"
+  },
+  "status": "open",
+  "key": "urn:kata:issue:01JZ",
+  "differs": true
 }"##
     );
     assert_eq!(

@@ -114,7 +114,8 @@ fn keyed(kernel: &ikigai_core::Kernel, iri: &str, content: &str, key: &str) -> S
 }
 
 /// The second append with a key files nothing, spends no number, ignores its own content,
-/// and names the first — with a marker a filing never carries.
+/// and names the first — with a marker a filing never carries. Its content differs from the
+/// first's, so since ledger #4058 a fourth word says so (ledger #4058, `tests/keyed_differs.rs`).
 #[test]
 fn a_second_append_with_the_same_key_answers_the_first() {
     let kernel = kernel();
@@ -132,7 +133,7 @@ fn a_second_append_with_the_same_key_answers_the_first() {
             "A replay, worded differently",
             KEY
         ),
-        format!("#1 {iri} existing open\n")
+        format!("#1 {iri} existing open differs\n")
     );
     assert_eq!(item_count(&kernel), 1);
     // The replay's content went nowhere, and no number was spent on it.
@@ -151,7 +152,7 @@ fn a_closed_item_still_holds_its_key() {
     sink(&kernel, "urn:iki:ledger:close", &[("item", "#1")]);
     assert_eq!(
         keyed(&kernel, "urn:iki:ledger:append", "Again", KEY),
-        format!("#1 {iri} existing closed\n")
+        format!("#1 {iri} existing closed differs\n")
     );
     assert_eq!(item_count(&kernel), 1);
 }
@@ -172,7 +173,7 @@ fn a_deleted_items_key_stays_taken_through_delete_and_purge() {
     delete(&kernel, &format!("urn:iki:ledger:item:key:{KEY}"), &[]);
     assert_eq!(
         keyed(&kernel, "urn:iki:ledger:append", "Junk, replayed", KEY),
-        format!("#1 {iri} existing deleted\n")
+        format!("#1 {iri} existing deleted differs\n")
     );
     assert_eq!(
         item_count(&kernel),
@@ -210,7 +211,7 @@ fn a_deleted_items_key_stays_taken_through_delete_and_purge() {
             "Junk, replayed again",
             KEY
         ),
-        format!("#1 {iri} existing deleted\n")
+        format!("#1 {iri} existing deleted differs\n")
     );
 }
 
