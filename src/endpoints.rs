@@ -119,6 +119,7 @@ use crate::model::{self, Deferred, Filter, Holder, Item, Status};
 use crate::policy::{OrderingPolicy, Policies};
 use crate::select;
 use crate::sparql::{self, boolean, datetime, integer, literal, StoreClient};
+use crate::text_index;
 use crate::vocabulary as v;
 
 /// Reading a ledger, as **declared**: the family, meaning "holds some ledger read grant".
@@ -1926,11 +1927,18 @@ impl Endpoint for ItemsEndpoint {
         let bound = Ledger::from_bindings(inv.bindings)?;
         let want = wanted_face(inv, &READ_FACES)?;
         let shape = listing_shape(inv, want)?;
-        let sort = listing_sort::Sort::parse(inv.inline_str("sort").ok())?;
+        let order = inv.inline_str("sort").ok();
+        let relevance = order.is_some_and(|order| order.trim() == "relevance");
+        let sort = listing_sort::Sort::parse(order.filter(|_| !relevance))?;
         let mut filter = parsed_listing_filter(inv)?;
         filter.limit = parse_limit(inv, 50)?;
         filter.offset = parse_count(inv, "offset", 0)?;
         let limit = model::page_limit(&filter);
+        let scores = if relevance {
+            Some(text_index::relevance(inv, &ledgers, &bound, &filter).await?)
+        } else {
+            None
+        };
         let mut entries = Vec::new();
         let mut total = 0usize;
         let mut broken = Vec::new();
@@ -1946,11 +1954,17 @@ impl Endpoint for ItemsEndpoint {
             // ★ The rows and the total come from ONE store query (ledger #1741): counted
             // apart, an append landing between the two reads answered a total no page of
             // this answer could reach.
-            let (mut matching, counted) = if sort.is_default() {
-                model::load_page(&client, &local).await?
-            } else {
-                model::load_matching_items(&client, &local).await?
-            };
+            let client_ref = &client;
+            let page = sort.is_default() && !relevance;
+            let (mut matching, counted) =
+                text_index::narrowed(&client, local, |local| async move {
+                    if page {
+                        model::load_page(client_ref, &local).await
+                    } else {
+                        model::load_matching_items(client_ref, &local).await
+                    }
+                })
+                .await?;
             if sort.has_landing() {
                 // Cross-ledger edges are link records in the source graph, not direct
                 // blocks triples. Read only the already authorized graph; the sorter
@@ -1976,7 +1990,7 @@ impl Endpoint for ItemsEndpoint {
                 }
             }
         }
-        if !sort.is_default() {
+        if relevance || !sort.is_default() {
             sort.apply(&mut entries, &ledgers)?;
         } else if union {
             // Each graph contributes its first offset + limit items. No later item can
@@ -1990,7 +2004,12 @@ impl Endpoint for ItemsEndpoint {
                     .then(a.iri.cmp(&b.iri))
             });
         }
-        if union || !sort.is_default() {
+        if let Some(scores) = &scores {
+            entries.sort_by(|(ai, a), (bi, b)| {
+                text_index::score(scores, *bi, b).total_cmp(&text_index::score(scores, *ai, a))
+            });
+        }
+        if union || relevance || !sort.is_default() {
             entries = entries
                 .into_iter()
                 .skip(filter.offset)
@@ -2036,11 +2055,17 @@ impl Endpoint for ItemsEndpoint {
                 }
                 if want == JSON {
                     let rows: Vec<&Item> = positions.iter().map(|p| &items[*p]).collect();
-                    rendered.extend(
-                        positions
-                            .into_iter()
-                            .zip(json::items(&client, &rows, shape, &filter).await?),
-                    );
+                    let mut rows = json::items(&client, &rows, shape, &filter).await?;
+                    if let Some(scores) = &scores {
+                        for (row, position) in rows.iter_mut().zip(&positions) {
+                            row.score = serde_json::Number::from_f64(text_index::score(
+                                scores,
+                                index,
+                                &items[*position],
+                            ));
+                        }
+                    }
+                    rendered.extend(positions.into_iter().zip(rows));
                 }
             }
         }
@@ -2135,6 +2160,9 @@ impl Endpoint for ItemsEndpoint {
             }
             out
         };
+        if relevance {
+            text.push_str("Most relevant items first.\n");
+        }
         // ★ The corpus check, on the read side. Anyone holding the store's write scope can
         // change this graph without passing through a ledger Sink — an editor, a merge, a
         // bulk load — and that is a supported path, not corruption. What is NOT supported
@@ -2201,7 +2229,10 @@ impl Endpoint for ItemsEndpoint {
                          key with - for descending order. Default -modified. Unset priority is \
                          always last. Landing orders the matching readable blocks graph before \
                          paging, with priority, ledger and number ties; a cycle is refused. \
-                         Other ties use descending number, ledger and IRI.",
+                         Other ties use descending number, ledger and IRI. Use relevance by \
+                         itself with text, search or phrase and a ready text index. Relevance \
+                         uses the highest document score per item, with titles weighted twice \
+                         as much, and the default order breaks ties.",
                 )
                 .class(v::ext::XSD_STRING)
                 .default_value("-modified")
@@ -2282,7 +2313,12 @@ impl Endpoint for CountEndpoint {
         for ledger in &ledgers {
             let client = StoreClient::new(inv, ledger.clone());
             let filter = listing_filter(inv, &client).await?;
-            total = total.saturating_add(model::count_items(&client, &filter).await?);
+            let client_ref = &client;
+            let count = text_index::narrowed(&client, filter, |filter| async move {
+                model::count_items(client_ref, &filter).await
+            })
+            .await?;
+            total = total.saturating_add(count);
         }
         if want == JSON {
             let doc = json::render(&json::CountDocument {
@@ -2523,7 +2559,20 @@ fn parsed_search(inv: &Invocation<'_>) -> Result<model::Search> {
             })
         }
     };
+    let phrase = present_str(inv, "phrase")?.map(str::to_string);
+    if phrase
+        .as_deref()
+        .is_some_and(|phrase| model::text_words(phrase).next().is_none())
+    {
+        return Err(Error::InvalidArgument {
+            name: "phrase".to_string(),
+            detail: "Give phrase= with at least one letter or number to search for adjacent words"
+                .to_string(),
+        });
+    }
     Ok(model::Search {
+        phrase,
+        candidates: None,
         fields,
         words,
         any,
@@ -2577,6 +2626,12 @@ fn search_inputs(desc: Description) -> Description {
             .class(v::ext::XSD_BOOLEAN)
             .one_of(["true", "false"])
             .default_value("false")
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("phrase")
+            .summary("Case-insensitive adjacent words, in order, within one selected field.")
+            .class(v::ext::XSD_STRING)
             .optional(),
     )
 }
@@ -7739,6 +7794,7 @@ impl Endpoint for PurgeEndpoint {
                 return Err(Error::NotFound(absent));
             };
             let archived = purge_archived(client, &found, reason, author, now).await?;
+            text_index::compact(client).await?;
             Ok(plain(format!(
                 "purged {} {} (deleted earlier)\n  {archived} archived quad(s) destroyed, \
                  NOT recoverable\n  tombstone: {}\n",
@@ -7758,6 +7814,7 @@ impl Endpoint for PurgeEndpoint {
         let Some(removed) = delete_item(client, &item, reason, author, now, true).await? else {
             return deleted_earlier(format!("no ledger item at `{}`", item.iri)).await;
         };
+        text_index::compact(client).await?;
         Ok(plain(format!(
             "purged {} {}\n  {} quad(s) destroyed, NOT recoverable{}\n  tombstone: {}\n",
             item.short(),

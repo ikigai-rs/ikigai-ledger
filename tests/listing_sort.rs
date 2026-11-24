@@ -252,7 +252,7 @@ fn the_unknown_sort_refusal_is_a_sentence_with_the_remedy() {
         panic!("{error}");
     };
     assert_eq!(name, "sort");
-    assert_eq!(detail, "`title` is not one of priority, created, modified, number, landing; use a comma-separated list with - before a key for descending order");
+    assert_eq!(detail, "`title` is not one of priority, created, modified, number, landing; use a comma-separated list with - before a key for descending order, or relevance by itself");
 }
 
 #[test]

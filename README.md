@@ -1086,10 +1086,10 @@ an item without one; so a shape that leaves anything out is refused on either fa
 `text=` matched a case-insensitive substring of the title, and only the title. A collaborator
 whose agents search items by what they say ran their own SPARQL instead, one call per ledger
 per word, and intersected the words client-side: about 1.1 s on a 3,682-item ledger (ledger
-#3803). `items` (single-ledger and `ledgers=`), `count` and `next` take four more inputs:
+#3803). `items` (single-ledger and `ledgers=`), `count` and `next` take these search inputs:
 
 - `match=` a comma-separated subset of `title`, `body` and `comments` (the body of any
-  comment on the item): the fields `text=` and `search=` look in. The default is `title`,
+  comment on the item): the fields `text=`, `search=` and `phrase=` look in. The default is `title`,
   so a caller that does not name it gets today's answer. Anything else is refused.
 - `search=` space-separated words, each looked for as `text=` is. Every word must match,
   each in any of the `match=` fields (two words may match in two fields), unless
@@ -1100,6 +1100,10 @@ per word, and intersected the words client-side: about 1.1 s on a 3,682-item led
   longer matches `ruler`. A term is regex-escaped first: its characters are matched as
   written (`c++`, `a.b`), never read as a pattern.
 
+- `phrase=` requires adjacent words in order within one selected title, body, or comment.
+  Letter and number runs form words, punctuation and whitespace separate them, and matching
+  ignores case. A phrase can be combined with `text=` and `search=`.
+
 ```text
 source urn:iki:ledger:items text=parser match=body,comments omit=body,comments as=application/json
 source urn:iki:ledger:items ledgers=alpha,beta search="parser panic" match=title,body,comments labels=bug
@@ -1109,6 +1113,16 @@ source urn:iki:ledger:next search="lexer aarch64" search_mode=any match=title,co
 These are filters, so they compose with every other one (`labels`, `without`, `parent`,
 `about`, `status`, `sort`, the page) and with `omit=` and `comments=`. Comments are read
 from the ledger's own graph under the store read grant every listing already needs.
+
+**Indexed search and relevance.** A host can enable the `ikigai-store` `text-index` feature
+and enroll the ledger's live graph, `dcterms:title` and `ledger:body`. The ledger checks
+index candidates against RDF and uses the scan whenever it cannot use the index.
+`items sort=relevance` requires a text, word or phrase query and a ready index for the
+selected graphs. It orders matching items by the highest document BM25 score, with titles
+weighted 2x and the default listing order breaking ties. A substring match with no indexed
+word hit scores zero. Only relevance listings include a numeric `score` in JSON. The
+plain footer names the order. Text and phrase filters on `next` leave its policy in charge
+of ranking. A purge waits for its enrolled graphs to compact before returning success.
 
 **Where each row matched.** Every JSON row read with a text search gains `matches`, one
 `{field, excerpt}` per field that holds a term, in the order title, body, comments: the

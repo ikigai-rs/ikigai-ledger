@@ -80,6 +80,10 @@ pub struct Search {
     pub any: bool,
     /// Match at word boundaries, through `REGEX` with `\b`, rather than as a substring.
     pub whole_word: bool,
+    /// Adjacent words, in order, within one of the selected fields.
+    pub phrase: Option<String>,
+    // Validated RDF terms for the subjects that could satisfy the lead search group.
+    pub(crate) candidates: Option<String>,
 }
 
 /// The fields a [`Search`] looks in: `match=`, a comma-separated subset of `title`, `body`
@@ -160,7 +164,7 @@ pub const SEARCH_MODE_VALUES: [&str; 2] = ["all", "any"];
 impl Filter {
     /// Whether this filter searches text at all: `text` or any word.
     pub fn searches(&self) -> bool {
-        self.text.is_some() || !self.search.words.is_empty()
+        self.text.is_some() || !self.search.words.is_empty() || self.search.phrase.is_some()
     }
 
     /// The search as groups that must ALL match, each matched by ANY of its terms: `text` is
@@ -182,12 +186,29 @@ impl Filter {
     fn is_title_text(&self) -> bool {
         self.search.words.is_empty()
             && !self.search.whole_word
+            && self.search.phrase.is_none()
             && self.search.fields == Fields::default()
     }
 
     /// Every term searched for, `text` first, for finding where a row matched.
     pub(crate) fn terms(&self) -> Vec<&str> {
         self.groups().into_iter().flatten().collect()
+    }
+
+    /// Whether a single RDF value contributes a hit or a score to this item search.
+    pub(crate) fn hit_test(&self, hay: &str) -> String {
+        let terms = self.terms();
+        [
+            (!terms.is_empty()).then(|| terms_test(hay, &terms, self.search.whole_word)),
+            self.search
+                .phrase
+                .as_ref()
+                .map(|phrase| phrase_test(hay, &phrase_pattern(phrase))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" || ")
     }
 }
 
@@ -1284,10 +1305,17 @@ fn filter_clauses(filter: &Filter) -> Result<String> {
     } else {
         // The first group is the lead ([`search_lead`]); every other one is checked against
         // the items it admitted, each with the item already bound.
-        for (n, group) in filter.groups().iter().enumerate().skip(1) {
+        for (n, group) in filter
+            .groups()
+            .iter()
+            .enumerate()
+            .skip(usize::from(filter.search.phrase.is_none()))
+        {
             clauses.push_str(&format!(
                 "FILTER EXISTS {{ {} }}\n",
-                search_branches(&filter.search, group, n, false)
+                search_branches(filter.search.fields, n, false, None, |hay| {
+                    terms_test(hay, group, filter.search.whole_word)
+                })
             ));
         }
     }
@@ -1321,44 +1349,63 @@ fn search_lead(filter: &Filter) -> String {
     if filter.is_title_text() {
         return String::new();
     }
-    match filter.groups().first() {
-        None => String::new(),
-        Some(group) => format!(
-            "{{ SELECT DISTINCT ?item WHERE {{ {} }} }}\n",
-            search_branches(&filter.search, group, 0, true)
-        ),
-    }
+    let fields = filter.search.fields;
+    let candidates = filter.search.candidates.as_deref();
+    let lead = if let Some(phrase) = &filter.search.phrase {
+        search_branches(fields, 1 + filter.groups().len(), true, candidates, |hay| {
+            phrase_test(hay, &phrase_pattern(phrase))
+        })
+    } else if let Some(group) = filter.groups().first() {
+        search_branches(fields, 0, true, candidates, |hay| {
+            terms_test(hay, group, filter.search.whole_word)
+        })
+    } else {
+        return String::new();
+    };
+    format!("{{ SELECT DISTINCT ?item WHERE {{ {lead} }} }}\n")
 }
 
-/// One group of a search over its fields, a `UNION` of one branch per field (variables
-/// suffixed with `n`, so no two groups share one, nor any with the listing). As the `lead`,
-/// each branch starts from the field's literals and ends at `?item`; otherwise `?item` is
-/// bound already and each starts from it.
-fn search_branches(search: &Search, terms: &[&str], n: usize, lead: bool) -> String {
+/// One search group across its fields. Each branch starts at its text when leading the
+/// query, or at the item when the surrounding query has already selected an item.
+fn search_branches(
+    fields: Fields,
+    n: usize,
+    lead: bool,
+    candidates: Option<&str>,
+    test: impl FnOnce(&str) -> String,
+) -> String {
     let hay = format!("?searchHay{n}");
-    let test = terms
-        .iter()
-        .map(|term| term_test(&hay, term, search.whole_word))
-        .collect::<Vec<_>>()
-        .join(" || ");
+    let test = test(&hay);
     let (title, body, on_item) = (v::ext::TITLE, v::BODY, v::ON_ITEM);
+    let values = |subject| {
+        candidates
+            .map(|list| format!("VALUES {subject} {{ {list} }} "))
+            .unwrap_or_default()
+    };
+    let item_values = values("?item");
     let mut branches = Vec::new();
-    if search.fields.title {
-        branches.push(format!("{{ ?item <{title}> {hay} . FILTER({test}) }}"));
+    if fields.title {
+        branches.push(format!(
+            "{{ {item_values}?item <{title}> {hay} . FILTER({test}) }}"
+        ));
     }
-    match (search.fields.body, search.fields.comments, lead) {
+    match (fields.body, fields.comments, lead) {
         (true, true, true) => branches.push(format!(
-            "{{ {{ ?searchSubject{n} <{body}> {hay} . FILTER({test}) }}\n  \
+            "{{ {{ {}?searchSubject{n} <{body}> {hay} . FILTER({test}) }}\n  \
              OPTIONAL {{ ?searchSubject{n} <{on_item}> ?searchOn{n} }}\n  \
-             BIND(COALESCE(?searchOn{n}, ?searchSubject{n}) AS ?item) }}"
+             BIND(COALESCE(?searchOn{n}, ?searchSubject{n}) AS ?item) }}",
+            values(&format!("?searchSubject{n}"))
         )),
         (false, true, true) => branches.push(format!(
-            "{{ {{ ?searchComment{n} <{body}> {hay} . FILTER({test}) }}\n  \
-             ?searchComment{n} <{on_item}> ?item . }}"
+            "{{ {{ {}?searchComment{n} <{body}> {hay} . FILTER({test}) }}\n  \
+             ?searchComment{n} <{on_item}> ?item . }}",
+            values(&format!("?searchComment{n}"))
         )),
         (in_body, in_comments, _) => {
             if in_body {
-                branches.push(format!("{{ ?item <{body}> {hay} . FILTER({test}) }}"));
+                branches.push(format!(
+                    "{{ {item_values}?item <{body}> {hay} . FILTER({test}) }}"
+                ));
             }
             if in_comments {
                 branches.push(format!(
@@ -1368,6 +1415,36 @@ fn search_branches(search: &Search, terms: &[&str], n: usize, lead: bool) -> Str
         }
     }
     branches.join("\n  UNION ")
+}
+
+pub(crate) fn text_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+}
+
+fn phrase_pattern(phrase: &str) -> String {
+    let word = r"\p{Alphabetic}\p{Number}";
+    let separator = format!("[^{word}]");
+    let tokens = text_words(phrase)
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join(&format!("{separator}+"));
+    format!("(?:^|{separator})({tokens})(?:{separator}|$)")
+}
+
+fn phrase_test(hay: &str, pattern: &str) -> String {
+    format!(
+        "isLiteral({hay}) && REGEX(STR({hay}), {}, \"i\")",
+        literal(pattern)
+    )
+}
+
+fn terms_test(hay: &str, terms: &[&str], whole_word: bool) -> String {
+    terms
+        .iter()
+        .map(|term| term_test(hay, term, whole_word))
+        .collect::<Vec<_>>()
+        .join(" || ")
 }
 
 /// Whether the literal in `hay` holds `term`: case-insensitively as a substring, the test
@@ -1506,11 +1583,27 @@ pub(crate) async fn matches_for(
     let terms = filter.terms();
     let whole_word = filter.search.whole_word;
     let fields = filter.search.fields;
+    let phrase = filter.search.phrase.as_deref().map(phrase_pattern);
+    let phrase_match = phrase.as_ref().and_then(|pattern| {
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .ok()
+    });
     let hit = |field: &'static str, hay: &str| {
-        first_hit(hay, &terms, whole_word).map(|at| Hit {
-            field,
-            excerpt: excerpt(hay, at),
-        })
+        let phrase_hit = phrase_match
+            .as_ref()
+            .and_then(|pattern| pattern.captures(hay))
+            .and_then(|groups| groups.get(1))
+            .map(|m| (m.start(), m.end()));
+        first_hit(hay, &terms, whole_word)
+            .into_iter()
+            .chain(phrase_hit)
+            .min()
+            .map(|at| Hit {
+                field,
+                excerpt: excerpt(hay, at),
+            })
     };
     for item in items {
         let hits = found.entry(item.iri.clone()).or_default();
@@ -1522,11 +1615,7 @@ pub(crate) async fn matches_for(
         }
     }
     if fields.comments {
-        let test = terms
-            .iter()
-            .map(|term| term_test("?body", term, whole_word))
-            .collect::<Vec<_>>()
-            .join(" || ");
+        let test = filter.hit_test("?body");
         let mut seen = BTreeSet::new();
         for values in values_lists(items.iter().map(|i| i.iri.as_str()))? {
             let query = format!(

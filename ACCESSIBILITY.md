@@ -46,7 +46,8 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   into one filtered page, keeping each row's existing `alpha#12` display (`#12` for
   `default`) and the same page and total footer. Unreadable ledgers are omitted silently;
   no names or warnings for them are emitted. `sort` orders the same rows before paging;
-  `landing` places blockers first. The row shape and footer are unchanged. A text search of
+  `landing` places blockers first. A relevance listing adds the footer sentence
+  `Most relevant items first.` A text search of
   bodies or comments (`match=body,comments`, ledger #3803) adds a line under an item for each
   of those fields that matched, naming the item and the field in words and quoting an excerpt
   on one line (`  #1 matched in the body: …the parser panics…`, `  #2 matched in a comment:
@@ -108,9 +109,13 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   a label outside `A-Z a-z 0-9 . _ : -` names the character in words (`` `a b` contains a space, and a
   label may hold only … Add each word as its own label ``),
   an unknown or empty `sort` key names all accepted keys (`priority`, `created`, `modified`,
-  `number`, `landing`) and explains commas and descending `-` in words. A landing cycle
+  `number`, `landing`, `relevance`) and explains commas and descending `-` in words. A landing cycle
   names the items in or depending on it and says to remove a blocks link or select another
-  sort. `NotFound` for an unknown item, and errors that name what is missing (a store, a clock).
+  sort. When the text index cannot answer relevance, one sentence starts with the remedy
+  (`Choose another sort or narrow your search`), names the ledger and says nothing was listed.
+  Relevance without a search starts with `Give text=, search= or phrase=`. A phrase without
+  a word starts with `Give phrase= with at least one letter or number`.
+  `NotFound` names an unknown item, and errors name a missing store or clock.
   A write fenced with an `epoch=` that is not current is a `Conflict` sentence naming who holds
   the item now and at which epoch, and saying nothing was written (`` #1 is held by worker-2 at
   epoch 2, not epoch 1: a write fenced with `epoch=` lands only while that claim is current, so
