@@ -2433,6 +2433,35 @@ pub struct Keyed {
     pub number: i64,
     /// The tombstone's IRI when the item was deleted; `None` while it is live.
     pub tombstone: Option<String>,
+    /// What the keyed append filed, as [`filing_fingerprint`] spells it (ledger #4058);
+    /// `None` for a key filed before ledger #4058, which is not compared.
+    pub fingerprint: Option<String>,
+}
+
+/// The fingerprint a keyed append stores beside its key (`ledger:keyFingerprint`, ledger
+/// #4058): `sha256:` and 64 lowercase hex digits over the title, the body and the labels, each
+/// as the append stores it.
+///
+/// ★ Labels are a SET in the graph, so they are sorted and repeats dropped first: `bug,import`
+/// and `import,bug,bug` file the same item and fingerprint the same. Each field is preceded by
+/// its length in bytes, so no title and body can run together into another pair's bytes.
+pub fn filing_fingerprint(title: &str, body: &str, labels: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    let mut hasher = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    };
+    field(b"ledger:keyFingerprint:1");
+    field(title.as_bytes());
+    field(body.as_bytes());
+    for label in labels {
+        field(label.as_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 /// The item (or the deleted item's tombstone) carrying `key` in this client's ledger.
@@ -2442,12 +2471,14 @@ pub struct Keyed {
 /// the answer is at least the same one every time.
 pub async fn find_by_key(client: &StoreClient<'_, '_>, key: &str) -> Result<Option<Keyed>> {
     let query = format!(
-        "SELECT ?s ?class ?number ?deleted WHERE {{ {} }} ORDER BY ?class ?s LIMIT 1",
+        "SELECT ?s ?class ?number ?deleted ?fingerprint WHERE {{ {} }} ORDER BY ?class ?s LIMIT 1",
         client.in_graph(&format!(
             "?s <{key_p}> {key} ; <{type_}> ?class ; <{number}> ?number .\n\
              VALUES ?class {{ <{item}> <{tombstone}> }}\n\
-             OPTIONAL {{ ?s <{deleted}> ?deleted }}",
+             OPTIONAL {{ ?s <{deleted}> ?deleted }}\n\
+             OPTIONAL {{ ?s <{fingerprint_p}> ?fingerprint }}",
             key_p = v::KEY,
+            fingerprint_p = v::KEY_FINGERPRINT,
             key = literal(key),
             type_ = v::ext::TYPE,
             number = v::NUMBER,
@@ -2459,17 +2490,20 @@ pub async fn find_by_key(client: &StoreClient<'_, '_>, key: &str) -> Result<Opti
     Ok(client.select(&query).await?.first().and_then(|row| {
         let subject = row.get("s")?.value.clone();
         let number = row.get("number")?.as_i64()?;
+        let fingerprint = row.get("fingerprint").map(|f| f.value.clone());
         if row.get("class")?.value == v::TOMBSTONE_CLASS {
             Some(Keyed {
                 item: row.get("deleted")?.value.clone(),
                 number,
                 tombstone: Some(subject),
+                fingerprint,
             })
         } else {
             Some(Keyed {
                 item: subject,
                 number,
                 tombstone: None,
+                fingerprint,
             })
         }
     }))

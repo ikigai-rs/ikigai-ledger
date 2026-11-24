@@ -713,7 +713,7 @@ pub struct NextDocument {
 /// | `outcome` | also carries |
 /// | --- | --- |
 /// | `filed` | `status` (`open`), and `key` when the append carried one |
-/// | `existing` (an append) | `status` (`open`, `closed` or `deleted`), `key` |
+/// | `existing` (an append) | `status` (`open`, `closed` or `deleted`), `key`; `differs` (`true`) when the item was filed with other content |
 /// | `existing` (a keyed comment) | `comment` (the one the key names), `key` |
 /// | `commented` | `comment`; `key` when the comment carried one; `handback` when it set or cleared a hand-back |
 /// | `closed` | `reason`; `comment` when a note was given; `released` when it was claimed; `already_closed` when it only edited the verdict |
@@ -783,6 +783,12 @@ pub struct Answer {
     /// only). Added in 0.18.0 (ledger #2843).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub already_recorded: Option<usize>,
+    /// `true` when a keyed append found its key taken by an item filed with a different
+    /// title, body or labels (`existing` from an append only, and only then; missing
+    /// otherwise, and for a key filed before ledger #4058, which is not compared). Nothing was
+    /// filed either way. Added by ledger #4058.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub differs: Option<bool>,
 }
 
 /// `…:item:{id}:state` — read, or the answer of a transition.
@@ -1379,5 +1385,6 @@ pub(crate) fn answer(ledger: &Ledger, outcome: &str, item: ItemRef) -> Answer {
         targets: Vec::new(),
         recorded: None,
         already_recorded: None,
+        differs: None,
     }
 }

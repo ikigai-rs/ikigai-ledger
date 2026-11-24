@@ -234,6 +234,8 @@ term! {
     RAISED => "raised";
     /// `ledger:key` — the caller's own name for an item, unique per ledger.
     KEY => "key";
+    /// `ledger:keyFingerprint` — a keyed append's filing as a `sha256:` digest (ledger #4058).
+    KEY_FINGERPRINT => "keyFingerprint";
     /// `ledger:commentKey` — the caller's own name for a comment, apart from `ledger:key`.
     COMMENT_KEY => "commentKey";
     /// `ledger:eventKey` — an imported event's id at its source, unique per ledger.
