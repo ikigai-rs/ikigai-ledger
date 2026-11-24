@@ -152,6 +152,7 @@ pub mod policy;
 pub mod select;
 pub mod shapes;
 pub mod sparql;
+mod text_index;
 pub mod vocabulary;
 
 pub use endpoints::{

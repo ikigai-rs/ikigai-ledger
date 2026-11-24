@@ -834,3 +834,285 @@ fn a_search_of_bodies_and_comments_stays_well_inside_the_budget_at_scale() {
     assert_eq!(doc["ready"], 13);
     assert!(took.as_secs_f64() < 2.5, "next took {took:?}");
 }
+
+#[test]
+fn phrase_requires_words_in_order_and_adjacent() {
+    let kernel = kernel();
+    append(&kernel, "Lease ran out", &[]);
+    append(&kernel, "Lease nearly ran out", &[]);
+    append(&kernel, "Ran out of the lease", &[]);
+    assert_eq!(
+        titles(&items(&kernel, &[("phrase", "lease ran out")])),
+        ["Lease ran out"]
+    );
+}
+
+#[test]
+fn relevance_requires_a_ready_text_index() {
+    let kernel = seeded();
+    let result = try_verb(
+        &kernel,
+        Verb::Source,
+        "urn:iki:ledger:items",
+        &[("sort", "relevance"), ("text", "parser")],
+    );
+    match result {
+        Err(Error::Unavailable(detail)) => assert_eq!(
+            detail,
+            "Choose another sort or narrow your search because the text index cannot rank this search in default, where nothing was listed"
+        ),
+        other => panic!("expected the relevance refusal, got {other:?}"),
+    }
+    assert_eq!(
+        refused(&kernel, "urn:iki:ledger:items", &[("sort", "relevance")]),
+        ("sort".into(), "Give text=, search= or phrase= to sort by relevance in default, where nothing was listed".into())
+    );
+}
+
+const DEFAULT_GRAPH: &str = "urn:iki:ledger:graph:default";
+const INDEX_STATUS: &str = "urn:iki:store:text-index:graph:urn%3Aiki%3Aledger%3Agraph%3Adefault";
+const GRAPH_TEXT: &str = "urn:iki:store:graph-text";
+
+fn indexed(store: ikigai_store::DurableStore) -> Kernel {
+    use ikigai_ledger::vocabulary as v;
+    kernel_over(
+        store
+            .with_text_index(
+                ikigai_store::TextEnrollment::new()
+                    .graph(DEFAULT_GRAPH)
+                    .predicate_weighted(v::ext::TITLE, 2.0)
+                    .predicate(v::BODY),
+            )
+            .unwrap(),
+    )
+}
+
+fn wait_for_index(kernel: &Kernel) {
+    let until = Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = source(kernel, INDEX_STATUS, &[]);
+        if status.lines().any(|line| line == "state: ready") {
+            break;
+        }
+        assert!(Instant::now() < until, "{status}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn commit_index(kernel: &Kernel, documents: usize) {
+    let until = Instant::now() + std::time::Duration::from_secs(5);
+    let expected = format!("documents: {documents}\n");
+    loop {
+        source(
+            kernel,
+            GRAPH_TEXT,
+            &[("graph", DEFAULT_GRAPH), ("words", "indexwarmup")],
+        );
+        let status = source(kernel, INDEX_STATUS, &[]);
+        if status.contains(&expected) && status.contains("pending: 0\n") {
+            return;
+        }
+        assert!(Instant::now() < until, "{status}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn indexed_and_scanned_searches_agree() {
+    let scan = kernel();
+    let index = indexed(ikigai_store::DurableStore::in_memory().unwrap());
+    wait_for_index(&index);
+    for kernel in [&scan, &index] {
+        append(kernel, "Lease ran out", &[("priority", "3")]);
+        append(kernel, "Lease nearly ran out\n\nA parser module", &[]);
+        append(kernel, "ParserCode\n\nLease ran out", &[("priority", "0")]);
+        append(kernel, "Leaſe and parser", &[]);
+        append(kernel, "parser_module", &[]);
+        comment(kernel, "default", "4", "The lease—ran out yesterday");
+    }
+    commit_index(&index, 8);
+    let cases: &[&[(&str, &str)]] = &[
+        &[("text", "parser")],
+        &[("text", "lease"), ("whole_word", "true")],
+        &[
+            ("search", "lease parser"),
+            ("whole_word", "true"),
+            ("match", "title,body,comments"),
+        ],
+        &[
+            ("search", "lease parser"),
+            ("search_mode", "any"),
+            ("whole_word", "true"),
+        ],
+        &[("search", "lease parser"), ("search_mode", "any")],
+        &[
+            ("phrase", "lease ran out"),
+            ("match", "title,body,comments"),
+        ],
+        &[
+            ("phrase", "lease ran out"),
+            ("text", "parser"),
+            ("match", "title,body,comments"),
+        ],
+        &[("phrase", "lease ran out"), ("match", "comments")],
+        &[("phrase", "no matches")],
+    ];
+    for args in cases {
+        for endpoint in ["urn:iki:ledger:items", "urn:iki:ledger:count"] {
+            assert_eq!(
+                source(&scan, endpoint, args),
+                source(&index, endpoint, args),
+                "{endpoint} {args:?}"
+            );
+        }
+        let scan_next = read(&scan, "urn:iki:ledger:next", args);
+        let index_next = read(&index, "urn:iki:ledger:next", args);
+        let ranking = |doc: Value| {
+            doc["ranking"]
+                .as_array()
+                .expect("next ranking")
+                .iter()
+                .map(|entry| entry["item"]["number"].as_i64().expect("item number"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ranking(scan_next), ranking(index_next), "{args:?}");
+    }
+
+    // The equality checks include queries that must scan. Verify one supported phrase
+    // actually ran the RDF check over index candidates.
+    use ikigai_core::{ArgRef, TraceEvent, Tracer};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Trace(Mutex<Vec<TraceEvent>>);
+    impl Tracer for Trace {
+        fn record(&self, event: TraceEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    let trace = Arc::new(Trace::default());
+    let request = Request::new(Verb::Source, Iri::parse("urn:iki:ledger:count").unwrap())
+        .with_arg("phrase", ArgRef::Inline(b"lease ran out".to_vec()));
+    futures::executor::block_on(index.issue_traced(request, &Capability::root(), trace.clone()))
+        .unwrap();
+    assert!(trace.0.lock().unwrap().iter().any(|event| {
+        event
+            .notes
+            .iter()
+            .any(|(name, value)| name == "text-index" && value == "checked candidates")
+    }));
+}
+
+#[test]
+fn relevance_uses_the_best_document_with_double_weight_for_title() {
+    let kernel = indexed(ikigai_store::DurableStore::in_memory().unwrap());
+    wait_for_index(&kernel);
+    append(&kernel, "Marker", &[("priority", "4")]);
+    append(&kernel, "Newer\n\nMarker", &[("priority", "0")]);
+    comment(&kernel, "default", "2", "Marker");
+    append(&kernel, "MarkerCode", &[]);
+    commit_index(&kernel, 5);
+
+    let search = [("text", "marker"), ("match", "title,body,comments")];
+    let mut ranked = search.to_vec();
+    ranked.push(("sort", "relevance"));
+    let doc = items(&kernel, &ranked);
+    let rows = doc["items"].as_array().unwrap();
+    assert_eq!(doc["total"], 3);
+    assert_eq!(rows[0]["number"], 1);
+    assert_eq!(rows[1]["number"], 2);
+    let title = rows[0]["score"].as_f64().unwrap();
+    let body = rows[1]["score"].as_f64().unwrap();
+    assert!(body > 0.0);
+    assert_eq!(title, 2.0 * body);
+    assert_eq!(rows[2]["score"], 0.0);
+    assert!(
+        source(&kernel, "urn:iki:ledger:items", &ranked).ends_with("Most relevant items first.\n")
+    );
+    assert!(items(&kernel, &search)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row.get("score").is_none()));
+    assert_eq!(
+        source(&kernel, "urn:iki:ledger:next", &ranked),
+        source(&kernel, "urn:iki:ledger:next", &search)
+    );
+}
+
+#[test]
+fn purge_waits_for_on_disk_compaction_of_live_and_earlier_deleted_text() {
+    let dir =
+        std::env::temp_dir().join(format!("ikigai-ledger-index-purge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    {
+        let kernel = indexed(ikigai_store::DurableStore::open(&dir).unwrap());
+        wait_for_index(&kernel);
+        for (item, secret, recoverable) in [
+            ("2", "zqxjvsecretword", false),
+            ("4", "obscureindexmarker", true),
+        ] {
+            append(&kernel, "Keep another document alive", &[]);
+            append(&kernel, &format!("Keep another document\n\n{secret}"), &[]);
+            commit_index(&kernel, if recoverable { 4 } else { 3 });
+            let args = [("graph", DEFAULT_GRAPH), ("words", secret)];
+            let result: Value = read(&kernel, GRAPH_TEXT, &args);
+            assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+            let terms_before = term_files(&dir.join("text-index"));
+            assert!(!terms_before.is_empty());
+            if recoverable {
+                delete(&kernel, &format!("urn:iki:ledger:item:{item}"), &[]);
+            }
+            delete(&kernel, "urn:iki:ledger:purge", &[("content", item)]);
+            let terms_after = term_files(&dir.join("text-index"));
+            assert!(
+                terms_before.iter().all(|file| !terms_after.contains(file)),
+                "old term dictionaries survived compaction: {terms_before:?} and {terms_after:?}"
+            );
+            assert!(
+                !files_contain(&dir.join("text-index"), secret.as_bytes()),
+                "{secret} still appears in an index file after purge"
+            );
+            assert_eq!(read(&kernel, GRAPH_TEXT, &args)["hits"], json!([]));
+            let status = source(&kernel, INDEX_STATUS, &[]);
+            assert!(
+                status.contains("deleted documents awaiting compaction: 0\n"),
+                "{status}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn files_contain(dir: &std::path::Path, needle: &[u8]) -> bool {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                files_contain(&path, needle)
+            } else {
+                std::fs::read(path)
+                    .is_ok_and(|bytes| bytes.windows(needle.len()).any(|chunk| chunk == needle))
+            }
+        })
+}
+
+fn term_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .flat_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                term_files(&path)
+            } else if path.extension().is_some_and(|ext| ext == "term") {
+                vec![path]
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}

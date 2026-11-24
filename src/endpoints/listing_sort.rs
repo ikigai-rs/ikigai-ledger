@@ -34,7 +34,7 @@ impl Sort {
                 "landing" => Key::Landing,
                 _ => return Err(Error::InvalidArgument {
                     name: "sort".to_string(),
-                    detail: format!("`{part}` is not one of priority, created, modified, number, landing; use a comma-separated list with - before a key for descending order"),
+                    detail: format!("`{part}` is not one of priority, created, modified, number, landing; use a comma-separated list with - before a key for descending order, or relevance by itself"),
                 }),
             };
             keys.push((key, descending));

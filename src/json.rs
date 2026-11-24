@@ -385,6 +385,9 @@ pub struct Item {
     /// place; `#[serde(default)]`, so an earlier document reads with `[]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub matches: Vec<Match>,
+    /// The best weighted BM25 score in an `items sort=relevance` response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<serde_json::Number>,
 }
 
 /// One field a row matched a text search in, and a short window of its text around the first
@@ -1238,6 +1241,7 @@ pub(crate) fn item(
                 excerpt: hit.excerpt,
             })
             .collect(),
+        score: None,
     }
 }
 

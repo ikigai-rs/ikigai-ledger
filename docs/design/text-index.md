@@ -1,8 +1,7 @@
 # Design: a full-text index for ledger item search
 
-Status: **proposed** (ledger #3804). This is a design only: nothing here is built, and no
-dependency has been added. Brian decides whether and how to implement it. The decisions he
-needs to make are listed at the end.
+Status: **building** (ledger #3804 and #4129). Store 0.6.1 ships the text-index resources.
+This document records the original design and the decisions for the first implementation.
 
 Related: PR #130 (ledger #3803), which extends today's scan to item bodies and comments with
 `match=`, `search=`, `search_mode=`, `whole_word=` and a per-row `matches` excerpt. This design
@@ -284,13 +283,13 @@ order, with the same bytes, whether the index is there or not.
 
 | argument | meaning, unchanged by the index | how the index helps |
 | --- | --- | --- |
-| `text=` | one case-insensitive substring | trigram candidates, then the existing filter on those only |
-| `search=`, `search_mode=all\|any` | several substrings, all or any | one trigram candidate query per word, intersected or united, then the existing filter |
-| `whole_word=true` | REGEX `\b…\b` | word candidates (the term's tokens as a phrase), then the existing REGEX filter |
+| `text=` | one case-insensitive substring | the first release scans substrings |
+| `search=`, `search_mode=all\|any` | several substrings, all or any | the first release scans substrings |
+| `whole_word=true` | REGEX `\b…\b` | word candidates where the index can cover the term, then the existing REGEX filter |
 | `match=title,body,comments` | which fields | restricts the `predicate` field; comments are `ledger:body` on a subject with `ledger:onItem` |
 
-A term shorter than three characters, or one with no word characters (`++`), has no useful
-candidates, so it scans, as today.
+The ledger scans when it cannot establish that the index covers the query, including
+whole-word terms whose punctuation or Unicode word boundaries cannot be represented reliably.
 
 **Why the index never answers alone.** The index's idea of a word is not the same as a
 substring, and not quite the same as a regex `\b`. On the measured corpus below, a word search
@@ -304,8 +303,7 @@ decides where to look.
 
 - **`sort=relevance`**: a new value for the existing `sort`. It orders the checked rows by
   score, with the current default order as the tie-break.
-  - An item's score is its best document's BM25 score, with a title match weighted higher
-    (the weight is a decision below).
+  - An item's score is its best document's BM25 score, with a title match weighted 2x.
   - It is refused without `text=`, `search=` or `phrase=`, and it is refused when the
     ledger's index is missing or still building. In both cases the refusal is one sentence
     that names the ledger and says that nothing was listed. That follows this crate's rule
@@ -316,14 +314,14 @@ decides where to look.
   over quoting inside `search=` because PR #130 treats a quote in `search=` as an ordinary
   character. Giving it a new meaning would change the results for a caller who already sends
   one.
-  - With the index, it is a phrase query on `word`.
-  - Without the index, it is a REGEX built from the same tokens.
+  - The existing fields are checked by a REGEX built from the phrase's words. An index
+    word hit can narrow that check, and a ranked phrase query uses positions for its score.
   - Tests must check that both paths give the same answer on the same corpus.
   - It combines with the other arguments like any filter.
 - **`score`** in JSON: a number on each row, present only under `sort=relevance`, and left
   out of the bytes otherwise, the way `matches` is when there is no search.
 - **Plain face:** rows are unchanged. Under `sort=relevance`, the footer says the order in
-  words: `40 item(s), most relevant to "parser" first`. Order is never shown only by position
+  words: `Most relevant items first.` Order is never shown only by position
   (ACCESSIBILITY.md).
 - **`next`:** text arguments filter the ready set, as in PR #130. Relevance never changes
   `next`'s ranking, which stays its policy's, so `sort=relevance` is not offered there.
@@ -429,33 +427,27 @@ that graph and predicate, and gets search under its own graph's read token.
 So the recommendation is a generic store feature, used first and only by the ledger, with
 enrollment as the line between them.
 
-## Decisions for Brian
+## Decisions
 
-1. **Where it lives.** A feature of `ikigai-store` (recommended), or one of the two rejected
-   options. Building it in the store is a store release first, and then a ledger release that
-   needs that store version.
-2. **tantivy as a dependency.** 116 crates under a feature that is off by default. The browser
-   build keeps the scan. tantivy compiles there, but its writer needs threads, and I did not
-   try running it.
-3. **The trigram field.** Index substrings (34 MiB on the measured corpus) so `text=` and
-   `search=` get faster, or index only words (22 MiB) and leave substring searches on the
-   scan.
-4. **Durability of the index directory.** Commit without `fsync` (about 5 ms) and rebuild after
-   an unclean shutdown (recommended, since the index is derived), or `fsync` every commit
-   (141 ms here).
-5. **The commit timer.** How long the pending set may grow before a commit (one second is
-   proposed), given that a ranked query commits first anyway.
-6. **Ranking.** BM25 per document. Whether an item's score is its best document's score or a
-   sum, how much a title match weighs more, and whether to stem English words for ranking
-   only.
-7. **The new names.** `sort=relevance`, `phrase=`, the JSON `score`, and the five store
-   resources in section 5.
-8. **Ranked reads without an index.** Refuse `sort=relevance` (recommended, and consistent
-   with this crate's refusals), or answer in the default order and say so.
-9. **Compaction on purge.** An explicit `compact` call that a purge waits for (recommended), or
-   a store that compacts on every removal of indexed text.
-10. **Invalidation granularity.** The per-graph threads that exist today (recommended), or
-    per-term threads.
-11. **The broad doors.** After a broad `urn:iki:store:update`, mark every enrolled graph stale
-    and rebuild it (recommended), or teach the broad door to compute a difference.
-12. **Order of work.** This builds on PR #130's arguments, so that PR lands first, unchanged.
+Brian approved these decisions on 2026-11-23.
+
+1. Build the index inside `ikigai-store`.
+2. Use tantivy behind a feature that is off by default. The browser build keeps the scan.
+3. Index words with positions in the first release. Substring searches keep the scan.
+4. Commit without fsync. Rebuild the derived index after an unclean shutdown.
+5. Commit on a one-second timer. A ranked query commits pending writes first.
+6. Rank an item by its best document's BM25 score. Weight title hits 2x and leave stemming off.
+7. Use `sort=relevance`, `phrase=`, the JSON `score` and the store resources in section 5.
+8. Refuse relevance ordering when the index cannot answer.
+9. Compact explicitly and have purge wait for completion.
+10. Invalidate through the existing per-graph threads.
+11. Mark all enrolled graphs stale and rebuild after a broad `urn:iki:store:update` or
+    `urn:iki:store:load`.
+12. Release the store before integrating the ledger, after the search arguments from PR #130.
+
+The store 0.6.1 text door ranks each query and commits pending writes before answering.
+It returns up to 1,000 documents without a continuation. The ledger scans when it cannot
+establish a complete candidate set and refuses relevance if the score response may be
+truncated. Substring matches that have no matching indexed word carry a score of zero.
+The released enrollment and status doors are uncached. Reads that need those checks inherit
+that freshness, while the candidate search and RDF reads still use the store's graph threads.

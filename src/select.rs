@@ -246,7 +246,12 @@ async fn ready_inner(
         || narrowing.parent.is_some()
         || narrowing.searches();
     let admitted = if narrows {
-        Some(model::matching_iris(client, &narrowing).await?)
+        Some(
+            crate::text_index::narrowed(client, narrowing, |filter| async move {
+                model::matching_iris(client, &filter).await
+            })
+            .await?,
+        )
     } else {
         None
     };
