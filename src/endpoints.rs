@@ -105,8 +105,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, Iri,
-    ListSeparator, ReprType, Representation, Result, UriTemplate, Verb,
+    space_iri, ActionSpec, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
+    Iri, ListSeparator, ReprType, Representation, Result, UriTemplate, Verb,
 };
 use oxrdf::Graph;
 use sha2::{Digest, Sha256};
@@ -379,6 +379,24 @@ const READ_FACES: [&str; 3] = [PLAIN, TURTLE, JSON];
 /// answer is a receipt, not a graph, and the graph is one read away.
 const WRITE_FACES: [&str; 2] = [PLAIN, JSON];
 
+/// Answer from a request token's record, or run the write and settle its record (ledger #4059).
+///
+/// `$run` is the write, an expression over `token: Option<&replay::Token>`.
+macro_rules! under_token {
+    ($inv:expr, $client:expr, $endpoint:expr, $tokens:expr, |$token:ident| $run:expr) => {{
+        let held = match replay::begin($inv, $client, $endpoint, $tokens).await? {
+            replay::Begin::Answered(answer) => return answer,
+            replay::Begin::Run(held) => held,
+        };
+        let $token = held.as_ref();
+        let result = $run;
+        if let Some(held) = held {
+            held.settle($client, &result, now_ms($inv)?).await;
+        }
+        result
+    }};
+}
+
 mod across;
 mod counts;
 mod evidence;
@@ -387,6 +405,7 @@ mod history;
 mod import;
 mod lapse;
 mod note;
+mod replay;
 mod session;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
@@ -421,6 +440,7 @@ pub struct SpaceConfig {
     participants: Option<String>,
     lapse_routes: std::collections::BTreeMap<String, String>,
     write_shapes: Vec<crate::shapes::WriteShape>,
+    resend_window: std::time::Duration,
 }
 
 impl Default for SpaceConfig {
@@ -432,6 +452,7 @@ impl Default for SpaceConfig {
             participants: None,
             lapse_routes: std::collections::BTreeMap::new(),
             write_shapes: Vec::new(),
+            resend_window: replay::DEFAULT_WINDOW,
         }
     }
 }
@@ -464,6 +485,15 @@ impl SpaceConfig {
     /// nobody may claim an authored date. See [`crate::attribution`].
     pub fn participants(mut self, graph: impl Into<String>) -> Self {
         self.participants = Some(graph.into());
+        self
+    }
+
+    /// How long a request token (`idempotency-key=`, ledger #4059) is remembered: a retry
+    /// under the same token within it answers the first answer, and one after it is a new
+    /// request. Published on each write that takes a token as `ik:resendWindow`. 24 hours by
+    /// default, and never less: a shorter window is read as 24 hours, core's floor.
+    pub fn resend_window(mut self, window: std::time::Duration) -> Self {
+        self.resend_window = window.max(replay::DEFAULT_WINDOW);
         self
     }
 
@@ -561,6 +591,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
     let lifecycles = Arc::new(config.lifecycles);
     let lapse_routes: lapse::Routes = Arc::new(config.lapse_routes);
     let shapes: crate::shapes::WriteShapes = Arc::new(config.write_shapes);
+    let tokens = replay::Tokens::new(config.resend_window);
     // ⚠ **Bind order is resolution order** (`EndpointSpace` takes the first grammar that
     // matches), and the two ledger-less resources go FIRST. `urn:iki:ledger:policy:next`
     // would otherwise be read as the `next` resource of a ledger called `policy` — which
@@ -629,6 +660,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             LedgerGrammar::action("note"),
             note::NoteEndpoint {
                 participants: participants.clone(),
+                tokens: tokens.clone(),
             },
         )
         .bind(ItemPartGrammar::part("sessions"), session::SessionsEndpoint)
@@ -654,6 +686,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
                 participants: participants.clone(),
                 shapes: Arc::clone(&shapes),
                 decision: false,
+                tokens: tokens.clone(),
             },
         )
         .bind(
@@ -662,6 +695,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
                 participants: participants.clone(),
                 shapes: Arc::clone(&shapes),
                 decision: true,
+                tokens: tokens.clone(),
             },
         )
         .bind(
@@ -669,24 +703,28 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             CloseEndpoint {
                 participants: participants.clone(),
                 shapes: Arc::clone(&shapes),
+                tokens: tokens.clone(),
             },
         )
         .bind(
             LedgerGrammar::action("reopen"),
             ReopenEndpoint {
                 participants: participants.clone(),
+                tokens: tokens.clone(),
             },
         )
         .bind(
             LedgerGrammar::action("claim"),
             ClaimEndpoint {
                 stamper: config.claim_kind,
+                tokens: tokens.clone(),
             },
         )
         .bind(
             LedgerGrammar::action("defer"),
             DeferEndpoint {
                 participants: participants.clone(),
+                tokens: tokens.clone(),
             },
         )
         .bind(
@@ -1300,6 +1338,42 @@ async fn write_comment(
     .await
 }
 
+/// A verb's `content=` note (close, reopen, defer, a claim's release), with the verb's answer
+/// recorded under its request token in the note's own update (ledger #4059).
+///
+/// `answer` renders the verb's answer from the note's IRI, minted here before the write. With
+/// no token this is [`write_comment`] and the answer rendered after it.
+async fn write_note(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    text: &str,
+    who: &Attribution,
+    now: u64,
+    token: Option<&replay::Token>,
+    answer: impl FnOnce(&str) -> Result<Representation>,
+) -> Result<Representation> {
+    let iri = client.ledger().comment(&mint_id(now)?);
+    let answer = answer(&iri)?;
+    let record = token.map(|token| token.triples(&answer, now));
+    write_keyed_comment(
+        client,
+        item,
+        text,
+        who,
+        now,
+        None,
+        Handback::Unchanged,
+        "",
+        &CommentExtra {
+            iri: Some(&iri),
+            replay: record.as_deref(),
+            ..CommentExtra::default()
+        },
+    )
+    .await?;
+    Ok(answer)
+}
+
 /// What a comment does to its item's hand-back state (`ledger:awaiting`, ledger #1199).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Handback {
@@ -1394,6 +1468,10 @@ pub(crate) struct CommentExtra<'a> {
     acks_epoch: u64,
     /// Who writes the acknowledgment, checked against the claim's principal in the update.
     acker: note::Acker<'a>,
+    /// The comment's IRI, minted by the caller so its answer can be rendered before the write.
+    iri: Option<&'a str>,
+    /// A request token's record (ledger #4059), written by the comment's own `INSERT`.
+    replay: Option<&'a str>,
 }
 
 /// [`write_comment`] with an optional key (ledger #1178): with one, the comment is written
@@ -1420,8 +1498,10 @@ async fn write_keyed_comment(
     fence: &str,
     extra: &CommentExtra<'_>,
 ) -> Result<String> {
-    let id = mint_id(now)?;
-    let comment = client.ledger().comment(&id);
+    let comment = match extra.iri {
+        Some(iri) => iri.to_string(),
+        None => client.ledger().comment(&mint_id(now)?),
+    };
     let mut triples = format!(
         "<{comment}> <{type_}> <{class}> ; <{on}> <{item}> ; <{body}> {text} ; <{created}> {when} .",
         type_ = v::ext::TYPE,
@@ -1434,6 +1514,11 @@ async fn write_keyed_comment(
     );
     triples.push_str(&who.triples(&comment, now));
     triples.push_str(&who.date_sources(&comment));
+    // ★ A request token's record rides in the comment's own triples (ledger #4059), so every
+    // guard that keeps the comment out keeps the record out too, and neither lands alone.
+    if let Some(record) = extra.replay {
+        triples.push_str(record);
+    }
     if let Some(decision) = extra.decision {
         for (predicate, object) in decision.facts() {
             triples.push_str(&format!("\n<{comment}> {predicate} {object} ."));
@@ -4303,6 +4388,8 @@ struct CommentEndpoint {
     participants: Participants,
     shapes: crate::shapes::WriteShapes,
     decision: bool,
+    /// The request tokens' window and in-flight set (ledger #4059).
+    tokens: replay::Tokens,
 }
 
 #[async_trait]
@@ -4312,7 +4399,6 @@ impl Endpoint for CommentEndpoint {
             return Err(unsupported(self.name(), inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Comment)?);
-        // Every argument is checked before anything is written, the keyed append's rule.
         if self.decision {
             // The exact write grant is required even when a key replay skips the update.
             let grant = ikigai_store::cap_write_graph(&client.ledger().graph());
@@ -4321,6 +4407,35 @@ impl Endpoint for CommentEndpoint {
                     format!("recording a decision requires the graph write grant `{grant}`").into(),
                 ));
             }
+        }
+        // ★ comment, note and decision share one token scope, as they share `key=`.
+        under_token!(inv, &client, "comment", &self.tokens, |token| self
+            .comment(inv, &client, token)
+            .await)
+    }
+
+    fn name(&self) -> &str {
+        if self.decision {
+            "ledger-decision"
+        } else {
+            "ledger-comment"
+        }
+    }
+
+    fn describe(&self) -> Description {
+        self.contract()
+    }
+}
+
+impl CommentEndpoint {
+    async fn comment(
+        &self,
+        inv: &Invocation<'_>,
+        client: &StoreClient<'_, '_>,
+        token: Option<&replay::Token>,
+    ) -> Result<Representation> {
+        // Every argument is checked before anything is written, the keyed append's rule.
+        if self.decision {
             // An argument supplied in the wrong representation must not become absent.
             for name in ["as", "key", "epoch", "author", "created", "modified"] {
                 match inv.inline_str(name) {
@@ -4357,7 +4472,10 @@ impl Endpoint for CommentEndpoint {
             .decision
             .then(|| DecisionInput::parse(inv, now))
             .transpose()?;
-        let item = require_item(&client, inv.inline_str("item")?).await?;
+        let item = require_item(client, inv.inline_str("item")?).await?;
+        if let Some(token) = token {
+            token.on_item(&item.iri);
+        }
         let text = inv.inline_str("content")?;
         if text.trim().is_empty() {
             return Err(Error::InvalidArgument {
@@ -4369,11 +4487,11 @@ impl Endpoint for CommentEndpoint {
         // is read about the notes it names.
         note::check_acker(inv, &item, &acks)?;
         if let Some(epoch) = epoch {
-            note::check_acks(&client, &item, epoch, &acks).await?;
+            note::check_acks(client, &item, epoch, &acks).await?;
         }
         let who = attribution::resolve(
             inv,
-            &client,
+            client,
             self.participants.as_deref(),
             Dates::Created,
             now,
@@ -4400,8 +4518,8 @@ impl Endpoint for CommentEndpoint {
         // because a key, once on a live comment, stays there while its item lives; the
         // write's own guard is what holds against a racer.
         if let Some(key) = &key {
-            if let Some(found) = model::find_comment_by_key(&client, key).await? {
-                return existing_comment(&client, want, &found, key).await;
+            if let Some(found) = model::find_comment_by_key(client, key).await? {
+                return existing_comment(client, want, &found, key).await;
             }
         }
         // A fenced comment or hand-back (ledger #3205) lands only under the claim it names.
@@ -4455,8 +4573,57 @@ impl Endpoint for CommentEndpoint {
         } else {
             Handback::Unchanged
         };
+        // ★ The answer is rendered BEFORE the write (ledger #4059), from the IRI minted here,
+        // so a request token's record of it rides in the comment's own update. Only the
+        // hand-backs a clearing comment rejected are known after it, and only the store can say
+        // them; the record is settled with them once they are read.
+        let comment = client.ledger().comment(&mint_id(now)?);
+        let render = |comment: &str, rejects: Vec<String>| -> Result<Representation> {
+            if want == JSON {
+                let ledger = client.ledger();
+                let mut answer = json::answer(
+                    ledger,
+                    "commented",
+                    json::item_ref(ledger, item.number, &item.iri),
+                );
+                let mut said = written(comment, &item.iri, text.trim(), &who, now);
+                said.decision = decision.as_ref().map(|input| model::Decision {
+                    decided_by: Some(input.maker.clone()),
+                    decided_at: Some(input.time.clone()),
+                });
+                said.rejects = rejects;
+                answer.comment = Some(json::comment(&said));
+                answer.key = key.clone();
+                answer.handback = match change {
+                    Handback::Set => Some("set".to_string()),
+                    Handback::Clear if item.awaiting.is_some() => Some("cleared".to_string()),
+                    _ => None,
+                };
+                return Ok(json_repr(json::render(&answer)?));
+            }
+            // The suffix in the shape `existing` set: a word after the IRI, so a reader
+            // matching `commented on #N (<iri>)` still matches.
+            let suffix = match change {
+                Handback::Set => " awaiting-dispatcher",
+                Handback::Clear if item.awaiting.is_some() => " cleared-awaiting",
+                _ => "",
+            };
+            let action = if self.decision {
+                "recorded decision"
+            } else {
+                "commented"
+            };
+            Ok(plain(format!(
+                "{action} on {} ({comment}){suffix}\n",
+                item.short()
+            )))
+        };
+        let record = match token {
+            Some(token) => Some(token.triples(&render(&comment, Vec::new())?, now)),
+            None => None,
+        };
         let comment = write_keyed_comment(
-            &client,
+            client,
             &item.iri,
             text.trim(),
             &who,
@@ -4470,6 +4637,8 @@ impl Endpoint for CommentEndpoint {
                 acks: &acks,
                 acks_epoch: epoch.unwrap_or_default(),
                 acker: note::Acker::of(inv),
+                iri: Some(&comment),
+                replay: record.as_deref(),
             },
         )
         .await?;
@@ -4478,14 +4647,14 @@ impl Endpoint for CommentEndpoint {
         // took is answered below as that racer's comment, as any taken key is.
         // A fenced one the guard refused found its claim changed, and wrote nothing either.
         if (change == Handback::Set || epoch.is_some())
-            && !comment_written(&client, &comment).await?
+            && !comment_written(client, &comment).await?
         {
             let keyed = match &key {
-                Some(key) => model::find_comment_by_key(&client, key).await?,
+                Some(key) => model::find_comment_by_key(client, key).await?,
                 None => None,
             };
             if keyed.is_none() {
-                let now = model::load_item(&client, &item.iri).await?.unwrap_or(item);
+                let now = model::load_item(client, &item.iri).await?.unwrap_or(item);
                 // The claim changed principals under the same epoch: not the caller's to
                 // acknowledge.
                 note::check_acker(inv, &now, &acks)?;
@@ -4503,7 +4672,7 @@ impl Endpoint for CommentEndpoint {
             }
         }
         if let Some(key) = &key {
-            let found = model::find_comment_by_key(&client, key)
+            let found = model::find_comment_by_key(client, key)
                 .await?
                 .ok_or_else(|| {
                     Error::Endpoint(format!(
@@ -4513,69 +4682,30 @@ impl Endpoint for CommentEndpoint {
                     ))
                 })?;
             if found.iri != comment {
-                return existing_comment(&client, want, &found, key).await;
+                return existing_comment(client, want, &found, key).await;
             }
         }
-        if want == JSON {
-            let ledger = client.ledger();
-            let mut answer = json::answer(
-                ledger,
-                "commented",
-                json::item_ref(ledger, item.number, &item.iri),
-            );
-            let mut said = written(&comment, &item.iri, text.trim(), &who, now);
-            said.decision = decision.map(|input| model::Decision {
-                decided_by: Some(input.maker),
-                decided_at: Some(input.time),
-            });
-            // What it rejected is what the update found, so only the store can say.
-            if change == Handback::Clear && item.awaiting.is_some() {
-                said.rejects = model::load_rejects(&client, &comment).await?;
-            }
-            answer.comment = Some(json::comment(&said));
-            answer.key = key;
-            answer.handback = match change {
-                Handback::Set => Some("set".to_string()),
-                Handback::Clear if item.awaiting.is_some() => Some("cleared".to_string()),
-                _ => None,
-            };
-            return Ok(json_repr(json::render(&answer)?));
-        }
-        // The suffix in the shape `existing` set: a word after the IRI, so a reader matching
-        // `commented on #N (<iri>)` still matches.
-        let suffix = match change {
-            Handback::Set => " awaiting-dispatcher",
-            Handback::Clear if item.awaiting.is_some() => " cleared-awaiting",
-            _ => "",
-        };
-        let action = if self.decision {
-            "recorded decision"
+        // What it rejected is what the update found, so only the store can say.
+        let rejects = if want == JSON && change == Handback::Clear && item.awaiting.is_some() {
+            model::load_rejects(client, &comment).await?
         } else {
-            "commented"
+            Vec::new()
         };
-        Ok(plain(format!(
-            "{action} on {} ({comment}){suffix}\n",
-            item.short()
-        )))
+        render(&comment, rejects)
     }
 
-    fn name(&self) -> &str {
-        if self.decision {
-            "ledger-decision"
-        } else {
-            "ledger-comment"
-        }
-    }
-
-    fn describe(&self) -> Description {
+    fn contract(&self) -> Description {
         if self.decision {
             return Description::new(self.name())
                 .title("Record a decision on a ledger item")
                 .summary("Append a comment recording the filer’s claimed decision maker and time.")
                 .verb(Verb::Meta)
                 .action(write_scopes(
-                    ikigai_core::ActionSpec::new(Verb::Sink)
-                        .resend_safe_with_key("key")
+                    replay::declare(
+                        ikigai_core::ActionSpec::new(Verb::Sink),
+                        self.tokens.window,
+                        "the decision",
+                    )
                         .input(ledger_arg("decision"))
                         .input(item_arg("The item the decision is about."))
                         .input(
@@ -4628,9 +4758,12 @@ impl Endpoint for CommentEndpoint {
             )
             .verb(Verb::Meta)
             .action(write_scopes(
-                ikigai_core::ActionSpec::new(Verb::Sink)
-                    .resend_safe_with_key("key")
-                    .input(ledger_arg("comment"))
+                replay::declare(
+                    ikigai_core::ActionSpec::new(Verb::Sink),
+                    self.tokens.window,
+                    "the comment",
+                )
+                .input(ledger_arg("comment"))
                     .summary("Append a stamped, attributed comment.")
                     .input(item_arg("The item to comment on."))
                     .input(
@@ -4777,6 +4910,7 @@ async fn existing_comment(
 struct CloseEndpoint {
     participants: Participants,
     shapes: crate::shapes::WriteShapes,
+    tokens: replay::Tokens,
 }
 
 #[async_trait]
@@ -4786,14 +4920,38 @@ impl Endpoint for CloseEndpoint {
             return Err(unsupported("ledger-close", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
+        under_token!(inv, &client, "close", &self.tokens, |token| self
+            .close(inv, &client, token)
+            .await)
+    }
+
+    fn name(&self) -> &str {
+        "ledger-close"
+    }
+
+    fn describe(&self) -> Description {
+        self.contract()
+    }
+}
+
+impl CloseEndpoint {
+    async fn close(
+        &self,
+        inv: &Invocation<'_>,
+        client: &StoreClient<'_, '_>,
+        token: Option<&replay::Token>,
+    ) -> Result<Representation> {
         let want = wanted_face(inv, &WRITE_FACES)?;
         let epoch = parse_epoch(inv)?;
         let now = now_ms(inv)?;
-        let item = require_item(&client, inv.inline_str("item")?).await?;
+        let item = require_item(client, inv.inline_str("item")?).await?;
+        if let Some(token) = token {
+            token.on_item(&item.iri);
+        }
         let name = inv.inline_str("reason").unwrap_or("done");
         // Every mirror of it in another ledger follows the close, so the caller must be able
         // to write them all; refused before anything is written (ledger #2829).
-        across::require_mirror_grants(inv, &client, &item).await?;
+        across::require_mirror_grants(inv, client, &item).await?;
         let reason = v::close_reason(name).ok_or_else(|| Error::InvalidArgument {
             name: "reason".to_string(),
             detail: format!(
@@ -4806,8 +4964,8 @@ impl Endpoint for CloseEndpoint {
             ),
         })?;
         // What closed it (ledger #2842), every value checked before anything is written.
-        let evidence = evidence::resolve(inv, &client, &item).await?;
-        evidence::refuse_without_a_close_event(&client, &item, &evidence).await?;
+        let evidence = evidence::resolve(inv, client, &item).await?;
+        evidence::refuse_without_a_close_event(client, &item, &evidence).await?;
         // A holder's fenced close (ledger #3205) closes only under the claim it names.
         check_fence(&item, epoch)?;
         // The configured write shapes (ledger #3724), on the close's would-be status event.
@@ -4861,14 +5019,13 @@ impl Endpoint for CloseEndpoint {
         // it names is retracted LAST, `claimedBy` after every other field: each operation
         // finds the claim the fence names until the close is otherwise complete, so the batch
         // lands whole or not at all.
-        let who =
-            attribution::resolve(inv, &client, self.participants.as_deref(), Dates::None, now)
-                .await?;
+        let who = attribution::resolve(inv, client, self.participants.as_deref(), Dates::None, now)
+            .await?;
         // ★ An import principal may date the close at its source (ledger #2819), as it may
         // date an item's filing; anyone else is refused, with the reason and the remedy.
         let claimed = attribution::resolve_closed_at(
             inv,
-            &client,
+            client,
             self.participants.as_deref(),
             item.created,
             now,
@@ -4883,7 +5040,7 @@ impl Endpoint for CloseEndpoint {
         let mut attempt = 0;
         let closed_here = loop {
             attempt += 1;
-            let mut events = counts::StatusEvents::read(&client, &item.iri).await?;
+            let mut events = counts::StatusEvents::read(client, &item.iri).await?;
             let event_iri = events.mint(now)?;
             let fence = format!("{} {}", fence_clause(&item.iri, epoch), events.unchanged());
             let still_open = format!(
@@ -4893,7 +5050,7 @@ impl Endpoint for CloseEndpoint {
                 v::CLOSED
             );
             let event = counts::status_event_when(
-                &client,
+                client,
                 &item.iri,
                 &event_iri,
                 &events,
@@ -4908,7 +5065,7 @@ impl Endpoint for CloseEndpoint {
                 // Editing the verdict of an already closed item must not move its close time.
                 event,
                 replace_one_when(
-                    &client,
+                    client,
                     &item.iri,
                     v::CLOSED_AT,
                     &datetime(claimed.unwrap_or(now)),
@@ -4937,19 +5094,19 @@ impl Endpoint for CloseEndpoint {
                 } else {
                     String::new()
                 },
-                release_record(&client, &item.iri, &record, &who, now, &fence),
+                release_record(client, &item.iri, &record, &who, now, &fence),
                 // And the release as an event, who held it and who released it (ledger #2819),
                 // under the same condition: only an update that finds a claim records one.
-                release_event(&client, &item.iri, ReleaseReason::Closed, &fence, &who, now)?,
+                release_event(client, &item.iri, ReleaseReason::Closed, &fence, &who, now)?,
                 replace_one_when(
-                    &client,
+                    client,
                     &item.iri,
                     v::STATUS,
                     &format!("<{}>", v::CLOSED),
                     &fence,
                 ),
                 replace_one_when(
-                    &client,
+                    client,
                     &item.iri,
                     v::CLOSED_REASON,
                     &format!("<{reason}>"),
@@ -4957,12 +5114,12 @@ impl Endpoint for CloseEndpoint {
                 ),
                 // After the status, so it finds the close that stands: this one's event, or, when
                 // the item was already closed, that close's.
-                evidence::record(&client, &item.iri, &events, reason, &evidence, &fence),
+                evidence::record(client, &item.iri, &events, reason, &evidence, &fence),
                 // A close dated at the source moves `modified` only forward (ledger #2928).
-                touch_dated(&client, &item.iri, now, claimed, &fence),
+                touch_dated(client, &item.iri, now, claimed, &fence),
                 // And a hand-back is answered: closed work awaits nobody (ledger #1199).
-                retract_when(&client, &item.iri, v::AWAITING, &fence),
-                replace_one_when(&client, &item.iri, v::AWAITING_AT, &datetime(now), &fence),
+                retract_when(client, &item.iri, v::AWAITING, &fence),
+                replace_one_when(client, &item.iri, v::AWAITING_AT, &datetime(now), &fence),
             ];
             // The claim last, its holder after every other field: see the fence above.
             ops.extend(
@@ -4970,9 +5127,9 @@ impl Endpoint for CloseEndpoint {
                     .iter()
                     .filter(|field| **field != v::CLAIMED_BY)
                     .chain([&v::CLAIMED_BY])
-                    .map(|field| retract_when(&client, &item.iri, field, &fence)),
+                    .map(|field| retract_when(client, &item.iri, field, &fence)),
             );
-            guarded_update(&client, &[&item.iri], &batch(&ops)).await?;
+            guarded_update(client, &[&item.iri], &batch(&ops)).await?;
             let here = client
                 .ask(&format!(
                     "ASK {{ {} }}",
@@ -4980,7 +5137,7 @@ impl Endpoint for CloseEndpoint {
                 ))
                 .await?;
             records.push(record);
-            if here || !events.changed(&client).await? {
+            if here || !events.changed(client).await? {
                 break here;
             }
             if attempt == STATUS_ATTEMPTS {
@@ -4991,66 +5148,70 @@ impl Endpoint for CloseEndpoint {
         // changed between the read and the write, and the fence refused every operation.
         if let Some(epoch) = epoch {
             if !closed_here {
-                return Err(fence_refusal_now(&client, &item, epoch).await);
+                return Err(fence_refusal_now(client, &item, epoch).await);
             }
         }
         // Even when another close got there first: a write from the latest snapshot is never
         // wrong, and it repairs a mirror an interrupted writer left behind.
-        let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
+        let unreached = across::sync(inv, client, &item.iri, None, true, now).await?;
         let mut released = None;
         for record in &records {
             if released.is_none() {
-                released = released_by(&client, record).await?;
+                released = released_by(client, record).await?;
             }
         }
-        let mut note_written = None;
-        if let Ok(note) = inv.inline_str("content") {
-            if !note.trim().is_empty() {
-                let comment = write_comment(&client, &item.iri, note.trim(), &who, now).await?;
-                note_written = Some(json::comment(&written(
-                    &comment,
-                    &item.iri,
-                    note.trim(),
-                    &who,
-                    now,
-                )));
+        let note = inv
+            .inline_str("content")
+            .ok()
+            .map(str::trim)
+            .filter(|note| !note.is_empty());
+        // ★ The answer is rendered before the note is written (ledger #4059), so a request
+        // token's record of it rides in the note's own update.
+        let render = |comment: Option<&str>| -> Result<Representation> {
+            let note_written = comment.zip(note).map(|(comment, note)| {
+                json::comment(&written(comment, &item.iri, note, &who, now))
+            });
+            if want == JSON {
+                let ledger = client.ledger();
+                let mut answer = json::answer(
+                    ledger,
+                    "closed",
+                    json::item_ref(ledger, item.number, &item.iri),
+                );
+                answer.reason = Some(name.to_string());
+                answer.comment = note_written;
+                answer.released = released.clone();
+                answer.already_closed = (!closed_here).then_some(true);
+                evidence::answer(&mut answer, name, &evidence);
+                return Ok(json_repr(json::render(&answer)?));
             }
-        }
-        if want == JSON {
-            let ledger = client.ledger();
-            let mut answer = json::answer(
-                ledger,
-                "closed",
-                json::item_ref(ledger, item.number, &item.iri),
-            );
-            answer.reason = Some(name.to_string());
-            answer.comment = note_written;
-            answer.released = released;
-            answer.already_closed = (!closed_here).then_some(true);
-            evidence::answer(&mut answer, name, &evidence);
-            return Ok(json_repr(json::render(&answer)?));
-        }
-        let head = evidence::receipt(&item, name, &evidence);
-        let mut said = match (released, closed_here) {
-            (Some(holder), _) => format!("{head}, released {holder}\n"),
-            (None, true) => format!("{head}\n"),
-            (None, false) if evidence.is_empty() => {
-                format!("{head}; it was already closed, so only the verdict changed\n")
-            }
-            (None, false) => format!(
+            let head = evidence::receipt(&item, name, &evidence);
+            let mut said = match (&released, closed_here) {
+                (Some(holder), _) => format!("{head}, released {holder}\n"),
+                (None, true) => format!("{head}\n"),
+                (None, false) if evidence.is_empty() => {
+                    format!("{head}; it was already closed, so only the verdict changed\n")
+                }
+                (None, false) => format!(
                 "{head}; it was already closed, so the verdict changed and this evidence joined \
                  that close\n"
             ),
+            };
+            said.push_str(&across::unreached(&item, &unreached));
+            Ok(plain(said))
         };
-        said.push_str(&across::unreached(&item, &unreached));
-        Ok(plain(said))
+        match note {
+            Some(note) => {
+                write_note(client, &item.iri, note, &who, now, token, |comment| {
+                    render(Some(comment))
+                })
+                .await
+            }
+            None => render(None),
+        }
     }
 
-    fn name(&self) -> &str {
-        "ledger-close"
-    }
-
-    fn describe(&self) -> Description {
+    fn contract(&self) -> Description {
         Description::new("ledger-close")
             .title("Close a ledger item")
             .summary(
@@ -5062,8 +5223,12 @@ impl Endpoint for CloseEndpoint {
             )
             .verb(Verb::Meta)
             .action(write_scopes(
-                ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg("close"))
+                replay::declare(
+                    ikigai_core::ActionSpec::new(Verb::Sink),
+                    self.tokens.window,
+                    "the closing note",
+                )
+                .input(ledger_arg("close"))
                     .summary(
                         "Set the status to closed, record why, and release any claim. Needs \
                          `urn:cap:ledger:close:{ledger}` or `urn:cap:ledger:write:{ledger}`.",
@@ -5127,6 +5292,7 @@ impl Endpoint for CloseEndpoint {
 #[derive(Clone)]
 struct ReopenEndpoint {
     participants: Participants,
+    tokens: replay::Tokens,
 }
 
 #[async_trait]
@@ -5136,21 +5302,40 @@ impl Endpoint for ReopenEndpoint {
             return Err(unsupported("ledger-reopen", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
+        under_token!(inv, &client, "reopen", &self.tokens, |token| self
+            .reopen(inv, &client, token)
+            .await)
+    }
+
+    fn name(&self) -> &str {
+        "ledger-reopen"
+    }
+
+    fn describe(&self) -> Description {
+        self.contract()
+    }
+}
+
+impl ReopenEndpoint {
+    async fn reopen(
+        &self,
+        inv: &Invocation<'_>,
+        client: &StoreClient<'_, '_>,
+        token: Option<&replay::Token>,
+    ) -> Result<Representation> {
         let now = now_ms(inv)?;
-        let item = require_item(&client, inv.inline_str("item")?).await?;
-        let mut who = attribution::resolve(
-            inv,
-            &client,
-            self.participants.as_deref(),
-            Dates::Event,
-            now,
-        )
-        .await?;
+        let item = require_item(client, inv.inline_str("item")?).await?;
+        if let Some(token) = token {
+            token.on_item(&item.iri);
+        }
+        let mut who =
+            attribution::resolve(inv, client, self.participants.as_deref(), Dates::Event, now)
+                .await?;
         // A reopen an import principal dated at its source (ledger #2939), as a close may be:
         // the status event and a note carry the date, and `modified` moves only forward.
         let claimed = attribution::resolve_claimed(
             inv,
-            &client,
+            client,
             self.participants.as_deref(),
             "created",
             "a reopen",
@@ -5166,13 +5351,13 @@ impl Endpoint for ReopenEndpoint {
         // "the item is closed" in its own `WHERE`, ahead of the operation that sets it open:
         // under the store's write lock exactly one update finds it closed. Reading back the
         // event IRI minted here is how this request learns whether it was that one.
-        across::require_mirror_grants(inv, &client, &item).await?;
+        across::require_mirror_grants(inv, client, &item).await?;
         // ★ Its status events are listed, and the batch made again when one lands since the
         // read, as for close (ledger #3256, [`counts::StatusEvents`]).
         let mut attempt = 0;
         let reopened_here = loop {
             attempt += 1;
-            let mut events = counts::StatusEvents::read(&client, &item.iri).await?;
+            let mut events = counts::StatusEvents::read(client, &item.iri).await?;
             let preserved = events.mint(now)?;
             let event_iri = events.mint(now)?;
             let still_closed = format!(
@@ -5183,7 +5368,7 @@ impl Endpoint for ReopenEndpoint {
                 events.unchanged()
             );
             let event = counts::status_event_when(
-                &client,
+                client,
                 &item.iri,
                 &event_iri,
                 &events,
@@ -5194,33 +5379,33 @@ impl Endpoint for ReopenEndpoint {
                 claimed,
             );
             guarded_update(
-                &client,
+                client,
                 &[&item.iri],
                 &batch(&[
                     counts::preserve_close(
-                        &client,
+                        client,
                         &item.iri,
                         &preserved,
                         &events,
                         &events.unchanged(),
                     ),
                     event,
-                    retract_when(&client, &item.iri, v::CLOSED_REASON, &still_closed),
-                    retract_when(&client, &item.iri, v::CLOSED_AT, &still_closed),
-                    retract_when(&client, &item.iri, v::CLOSED_AT_SOURCE, &still_closed),
+                    retract_when(client, &item.iri, v::CLOSED_REASON, &still_closed),
+                    retract_when(client, &item.iri, v::CLOSED_AT, &still_closed),
+                    retract_when(client, &item.iri, v::CLOSED_AT_SOURCE, &still_closed),
                     // A reopened item starts from "not awaiting": whatever hand-back preceded
                     // the close was answered by it (ledger #1199).
-                    retract_when(&client, &item.iri, v::AWAITING, &still_closed),
+                    retract_when(client, &item.iri, v::AWAITING, &still_closed),
                     replace_one_when(
-                        &client,
+                        client,
                         &item.iri,
                         v::AWAITING_AT,
                         &datetime(now),
                         &still_closed,
                     ),
-                    touch_dated(&client, &item.iri, now, claimed, &still_closed),
+                    touch_dated(client, &item.iri, now, claimed, &still_closed),
                     replace_one_when(
-                        &client,
+                        client,
                         &item.iri,
                         v::STATUS,
                         &format!("<{}>", v::OPEN),
@@ -5235,21 +5420,20 @@ impl Endpoint for ReopenEndpoint {
                     client.in_graph(&format!("<{event_iri}> <{}> ?any", v::ext::TYPE))
                 ))
                 .await?;
-            if here || !events.changed(&client).await? {
+            if here || !events.changed(client).await? {
                 break here;
             }
             if attempt == STATUS_ATTEMPTS {
                 return Err(status_kept_changing(&item, "reopen"));
             }
         };
-        let unreached = across::sync(inv, &client, &item.iri, None, true, now).await?;
-        let mut noted = false;
-        if let Ok(note) = inv.inline_str("content") {
-            if !note.trim().is_empty() {
-                write_comment(&client, &item.iri, note.trim(), &who, now).await?;
-                noted = true;
-            }
-        }
+        let unreached = across::sync(inv, client, &item.iri, None, true, now).await?;
+        let note = inv
+            .inline_str("content")
+            .ok()
+            .map(str::trim)
+            .filter(|note| !note.is_empty());
+        let noted = note.is_some();
         let mut said = match (reopened_here, noted) {
             (true, _) => format!("reopened {}\n", item.short()),
             (false, false) => format!(
@@ -5262,14 +5446,20 @@ impl Endpoint for ReopenEndpoint {
             ),
         };
         said.push_str(&across::unreached(&item, &unreached));
-        Ok(plain(said))
+        // ★ The answer is known before the note is written (ledger #4059), so a request
+        // token's record of it rides in the note's own update.
+        match note {
+            Some(note) => {
+                write_note(client, &item.iri, note, &who, now, token, |_| {
+                    Ok(plain(said))
+                })
+                .await
+            }
+            None => Ok(plain(said)),
+        }
     }
 
-    fn name(&self) -> &str {
-        "ledger-reopen"
-    }
-
-    fn describe(&self) -> Description {
+    fn contract(&self) -> Description {
         Description::new("ledger-reopen")
             .title("Reopen a ledger item")
             .summary(
@@ -5278,8 +5468,12 @@ impl Endpoint for ReopenEndpoint {
             )
             .verb(Verb::Meta)
             .action(write_scopes(
-                ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg("reopen"))
+                replay::declare(
+                    ikigai_core::ActionSpec::new(Verb::Sink),
+                    self.tokens.window,
+                    "the note",
+                )
+                .input(ledger_arg("reopen"))
                     .summary("Set the status back to open.")
                     .input(item_arg("The item to reopen."))
                     .input(
@@ -5317,6 +5511,7 @@ impl Endpoint for ReopenEndpoint {
 #[derive(Clone)]
 struct ClaimEndpoint {
     stamper: crate::claim::ClaimKindStamper,
+    tokens: replay::Tokens,
 }
 
 /// What a claim may replace, for [`claim_update`].
@@ -6316,7 +6511,32 @@ impl Endpoint for ClaimEndpoint {
                     format!("{} claimed by {holder}{at}{until}\n", item.short())
                 }))
             }
-            Verb::Delete => {
+            Verb::Delete => under_token!(inv, &client, "claim", &self.tokens, |token| self
+                .release(inv, &client, token)
+                .await),
+            other => Err(unsupported("ledger-claim", other)),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ledger-claim"
+    }
+
+    fn describe(&self) -> Description {
+        self.contract()
+    }
+}
+
+impl ClaimEndpoint {
+    /// A release (`Delete`), under its request token (ledger #4059).
+    async fn release(
+        &self,
+        inv: &Invocation<'_>,
+        client: &StoreClient<'_, '_>,
+        token: Option<&replay::Token>,
+    ) -> Result<Representation> {
+        {
+            {
                 let from = match inv.inline_str("from").ok().map(str::trim) {
                     Some("") => {
                         return Err(Error::InvalidArgument {
@@ -6330,7 +6550,10 @@ impl Endpoint for ClaimEndpoint {
                 };
                 let epoch = parse_epoch(inv)?;
                 let now = now_ms(inv)?;
-                let item = require_item(&client, inv.inline_str("item")?).await?;
+                let item = require_item(client, inv.inline_str("item")?).await?;
+                if let Some(token) = token {
+                    token.on_item(&item.iri);
+                }
                 let resource = client.ledger().resource("claim");
                 let ledger = client.ledger();
                 let caller = inv.capability.principal();
@@ -6415,7 +6638,7 @@ impl Endpoint for ClaimEndpoint {
                 client
                     .update(&batch(&[
                         release_event_at(
-                            &client,
+                            client,
                             &event,
                             &item.iri,
                             ReleaseReason::Released,
@@ -6423,7 +6646,7 @@ impl Endpoint for ClaimEndpoint {
                             &Attribution::committer(inv)?,
                             now,
                         ),
-                        release_update(&client, &item.iri, &guard, now),
+                        release_update(client, &item.iri, &guard, now),
                     ]))
                     .await?;
                 // A fenced release that found its claim gone wrote no event: the claim changed
@@ -6436,11 +6659,11 @@ impl Endpoint for ClaimEndpoint {
                         ))
                         .await?;
                     if !released {
-                        return Err(fence_refusal_now(&client, &item, epoch).await);
+                        return Err(fence_refusal_now(client, &item, epoch).await);
                     }
                 }
                 if !guard.is_empty() {
-                    let after = model::load_item(&client, &item.iri).await?.ok_or_else(|| {
+                    let after = model::load_item(client, &item.iri).await?.ok_or_else(|| {
                         Error::NotFound(format!("no ledger item at `{}`", item.iri))
                     })?;
                     if after.claimed_by.is_some() {
@@ -6455,29 +6678,27 @@ impl Endpoint for ClaimEndpoint {
                         )));
                     }
                 }
-                if let Ok(note) = inv.inline_str("content") {
-                    if !note.trim().is_empty() {
-                        write_comment(
-                            &client,
+                let answer = plain(format!("{} released\n", item.short()));
+                match inv.inline_str("content").map(str::trim) {
+                    Ok(note) if !note.is_empty() => {
+                        write_note(
+                            client,
                             &item.iri,
-                            note.trim(),
+                            note,
                             &Attribution::committer(inv)?,
                             now,
+                            token,
+                            |_| Ok(answer),
                         )
-                        .await?;
+                        .await
                     }
+                    _ => Ok(answer),
                 }
-                Ok(plain(format!("{} released\n", item.short())))
             }
-            other => Err(unsupported("ledger-claim", other)),
         }
     }
 
-    fn name(&self) -> &str {
-        "ledger-claim"
-    }
-
-    fn describe(&self) -> Description {
+    fn contract(&self) -> Description {
         Description::new("ledger-claim")
             .title("Claim or release a ledger item")
             .summary(
@@ -6566,10 +6787,14 @@ impl Endpoint for ClaimEndpoint {
                 CAP_ANY,
             ))
             .action(write_scopes(
-                ikigai_core::ActionSpec::new(Verb::Delete)
-                    .input(ledger_arg("claim"))
-                    .summary(
-                        "Release the claim, lease and all. Needs \
+                replay::declare(
+                    ikigai_core::ActionSpec::new(Verb::Delete),
+                    self.tokens.window,
+                    "the release note",
+                )
+                .input(ledger_arg("claim"))
+                .summary(
+                    "Release the claim, lease and all. Needs \
                          `urn:cap:ledger:claim:{ledger}` (or `write:{ledger}`). A claim taken \
                          AS A PRINCIPAL (the capability carried one, minted by the host's \
                          door) is released only by a capability acting as that principal, \
@@ -6577,28 +6802,28 @@ impl Endpoint for ClaimEndpoint {
                          Denied otherwise, so one worker cannot release another's claim by \
                          naming it. A claim taken without a principal is free text, released \
                          by any claim-grant holder.",
-                    )
-                    .input(item_arg("The item to release."))
-                    .input(
-                        ArgSpec::new("from")
-                            .summary(
-                                "Release only if THIS holder still holds the claim — its \
+                )
+                .input(item_arg("The item to release."))
+                .input(
+                    ArgSpec::new("from")
+                        .summary(
+                            "Release only if THIS holder still holds the claim — its \
                                  name, or the principal it was taken as; a compare-and-set, \
                                  refused (Conflict) and nothing released when the claim changed \
                                  hands. Without it the release drops the claim, which for a \
                                  claim taken as another principal is the dispatcher's override.",
-                            )
-                            .class(v::ext::XSD_STRING)
-                            .optional(),
-                    )
-                    .input(
-                        ArgSpec::new("content")
-                            .summary("An optional release note, recorded as a comment.")
-                            .class(v::ext::XSD_STRING)
-                            .optional(),
-                    )
-                    .input(epoch_arg("the release releases the claim"))
-                    .output(PLAIN),
+                        )
+                        .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(
+                    ArgSpec::new("content")
+                        .summary("An optional release note, recorded as a comment.")
+                        .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(epoch_arg("the release releases the claim"))
+                .output(PLAIN),
                 CAP_ANY,
             ))
             .action(read_action(
@@ -6699,31 +6924,55 @@ async fn epoch_check(client: &StoreClient<'_, '_>, inv: &Invocation<'_>) -> Resu
 #[derive(Clone)]
 struct DeferEndpoint {
     participants: Participants,
+    tokens: replay::Tokens,
 }
 
 #[async_trait]
 impl Endpoint for DeferEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if !matches!(inv.request.verb, Verb::Sink | Verb::Delete) {
+            return Err(unsupported("ledger-defer", inv.request.verb));
+        }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        under_token!(inv, &client, "defer", &self.tokens, |token| self
+            .defer(inv, &client, token)
+            .await)
+    }
+
+    fn name(&self) -> &str {
+        "ledger-defer"
+    }
+
+    fn describe(&self) -> Description {
+        self.contract()
+    }
+}
+
+impl DeferEndpoint {
+    async fn defer(
+        &self,
+        inv: &Invocation<'_>,
+        client: &StoreClient<'_, '_>,
+        token: Option<&replay::Token>,
+    ) -> Result<Representation> {
         let now = now_ms(inv)?;
-        let item = require_item(&client, inv.inline_str("item")?).await?;
+        let item = require_item(client, inv.inline_str("item")?).await?;
+        if let Some(token) = token {
+            token.on_item(&item.iri);
+        }
         let (update, said, edit) = match inv.request.verb {
             Verb::Sink => (
-                replace_one(&client, &item.iri, v::DEFERRED, &boolean(true)),
+                replace_one(client, &item.iri, v::DEFERRED, &boolean(true)),
                 "deferred",
                 "defer",
             ),
-            Verb::Delete => (
-                retract(&client, &item.iri, v::DEFERRED),
-                "resumed",
-                "resume",
-            ),
+            Verb::Delete => (retract(client, &item.iri, v::DEFERRED), "resumed", "resume"),
             other => return Err(unsupported("ledger-defer", other)),
         };
         // A deferral or a resume an import principal dated at its source (ledger #2939).
         let (claimed, who) = importer_dated(
             inv,
-            &client,
+            client,
             self.participants.as_deref(),
             if edit == "defer" {
                 "a deferral"
@@ -6735,28 +6984,25 @@ impl Endpoint for DeferEndpoint {
         )
         .await?;
         guarded_update(
-            &client,
+            client,
             &[&item.iri],
             &batch(&[
                 update,
-                touch_dated(&client, &item.iri, now, claimed, ""),
-                edit_event(&client, &item.iri, edit, &who, now)?,
+                touch_dated(client, &item.iri, now, claimed, ""),
+                edit_event(client, &item.iri, edit, &who, now)?,
             ]),
         )
         .await?;
-        if let Ok(note) = inv.inline_str("content") {
-            if !note.trim().is_empty() {
-                write_comment(&client, &item.iri, note.trim(), &who, now).await?;
+        let answer = plain(format!("{} {said}\n", item.short()));
+        match inv.inline_str("content").map(str::trim) {
+            Ok(note) if !note.is_empty() => {
+                write_note(client, &item.iri, note, &who, now, token, |_| Ok(answer)).await
             }
+            _ => Ok(answer),
         }
-        Ok(plain(format!("{} {said}\n", item.short())))
     }
 
-    fn name(&self) -> &str {
-        "ledger-defer"
-    }
-
-    fn describe(&self) -> Description {
+    fn contract(&self) -> Description {
         Description::new("ledger-defer")
             .title("Defer a ledger item, or resume it")
             .summary(
@@ -6768,33 +7014,41 @@ impl Endpoint for DeferEndpoint {
             )
             .verb(Verb::Meta)
             .action(write_scopes(
-                ikigai_core::ActionSpec::new(Verb::Sink)
-                    .input(ledger_arg("defer"))
-                    .summary("Mark the item deferred.")
-                    .input(item_arg("The item to defer."))
-                    .input(
-                        ArgSpec::new("content")
-                            .summary("An optional note, recorded as a comment.")
-                            .class(v::ext::XSD_STRING)
-                            .optional(),
-                    )
-                    .input(created_arg("a deferral"))
-                    .output(PLAIN),
+                replay::declare(
+                    ikigai_core::ActionSpec::new(Verb::Sink),
+                    self.tokens.window,
+                    "the note",
+                )
+                .input(ledger_arg("defer"))
+                .summary("Mark the item deferred.")
+                .input(item_arg("The item to defer."))
+                .input(
+                    ArgSpec::new("content")
+                        .summary("An optional note, recorded as a comment.")
+                        .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(created_arg("a deferral"))
+                .output(PLAIN),
                 CAP_WRITE,
             ))
             .action(write_scopes(
-                ikigai_core::ActionSpec::new(Verb::Delete)
-                    .input(ledger_arg("defer"))
-                    .summary("Undefer: the item becomes eligible for the ready set again.")
-                    .input(item_arg("The item to resume."))
-                    .input(
-                        ArgSpec::new("content")
-                            .summary("An optional note, recorded as a comment.")
-                            .class(v::ext::XSD_STRING)
-                            .optional(),
-                    )
-                    .input(created_arg("a resume"))
-                    .output(PLAIN),
+                replay::declare(
+                    ikigai_core::ActionSpec::new(Verb::Delete),
+                    self.tokens.window,
+                    "the note",
+                )
+                .input(ledger_arg("defer"))
+                .summary("Undefer: the item becomes eligible for the ready set again.")
+                .input(item_arg("The item to resume."))
+                .input(
+                    ArgSpec::new("content")
+                        .summary("An optional note, recorded as a comment.")
+                        .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(created_arg("a resume"))
+                .output(PLAIN),
                 CAP_WRITE,
             ))
     }

@@ -178,6 +178,10 @@ term! {
     DECIDED_AT => "decidedAt";
     /// `ledger:DispatchNote` — a comment from the dispatcher to a claim's holder (ledger #3718).
     DISPATCH_NOTE_CLASS => "DispatchNote";
+    /// `ledger:Replay` — a request token's remembered first answer (ledger #4059).
+    REPLAY_CLASS => "Replay";
+    /// `ledger:replayRecord` — that answer, as the hex of core's stable `Replay` encoding.
+    REPLAY_RECORD => "replayRecord";
     /// `ledger:Tombstone`
     TOMBSTONE_CLASS => "Tombstone";
     /// `ledger:Counter`
@@ -429,8 +433,9 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 24] = [
+pub const STRUCTURAL_CLASSES: [&str; 25] = [
     COMMENT_CLASS,
+    REPLAY_CLASS,
     DISPATCH_NOTE_CLASS,
     TOMBSTONE_CLASS,
     COUNTER_CLASS,
