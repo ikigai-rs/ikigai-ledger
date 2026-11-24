@@ -28,8 +28,10 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 # writes root-only (ledger #2965); all ikigai dependencies must share these core types.
 # Core 0.3.4 adds the resend safety declaration used by keyed writes.
 # Core 0.4.0 (scope opacity, structured denials; the cascade, ledger #3893, #3937). 0.4.1 is
-# the release every consumer in the cascade pins.
-ikigai-core = "0.4.1"
+# the release every consumer in the cascade pins. 0.4.2 is the floor since ledger #4059: its
+# idempotency toolkit (`IdempotencyKey`, `Request::fingerprint_without`, `Replay`,
+# `ActionSpec::resend_window`) is what `idempotency-key=` is built on.
+ikigai-core = "0.4.2"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's

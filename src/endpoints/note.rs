@@ -24,6 +24,8 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct NoteEndpoint {
     pub(super) participants: Participants,
+    /// The request tokens' window and in-flight set (ledger #4059).
+    pub(super) tokens: replay::Tokens,
 }
 
 /// The faces of the notes read.
@@ -82,6 +84,30 @@ impl Endpoint for NoteEndpoint {
             ));
         }
         let client = StoreClient::new(inv, ledger);
+        // ★ The comment's token scope (ledger #4059): note and comment share `key=`'s namespace.
+        under_token!(inv, &client, "comment", &self.tokens, |token| self
+            .note(inv, &client, &grant, token)
+            .await)
+    }
+
+    fn name(&self) -> &str {
+        "ledger-note"
+    }
+
+    fn describe(&self) -> Description {
+        self.contract()
+    }
+}
+
+impl NoteEndpoint {
+    async fn note(
+        &self,
+        inv: &Invocation<'_>,
+        client: &StoreClient<'_, '_>,
+        grant: &str,
+        token: Option<&replay::Token>,
+    ) -> Result<Representation> {
+        let grant = grant.to_string();
         let want = wanted_face(inv, &WRITE_FACES)?;
         // The sender is the verified principal, never someone it names.
         for name in ["author", "created"] {
@@ -107,7 +133,10 @@ impl Endpoint for NoteEndpoint {
                 .to_string(),
         })?;
         let now = now_ms(inv)?;
-        let item = require_item(&client, inv.inline_str("item")?).await?;
+        let item = require_item(client, inv.inline_str("item")?).await?;
+        if let Some(token) = token {
+            token.on_item(&item.iri);
+        }
         let text = inv.inline_str("content")?;
         if text.trim().is_empty() {
             return Err(Error::InvalidArgument {
@@ -117,7 +146,7 @@ impl Endpoint for NoteEndpoint {
         }
         let who = attribution::resolve(
             inv,
-            &client,
+            client,
             self.participants.as_deref(),
             Dates::Created,
             now,
@@ -128,15 +157,43 @@ impl Endpoint for NoteEndpoint {
             attribution::claimed_not_before_filing("created", claimed, item.created)?;
         }
         if let Some(key) = &key {
-            if let Some(found) = model::find_comment_by_key(&client, key).await? {
-                return existing_comment(&client, want, &found, key).await;
+            if let Some(found) = model::find_comment_by_key(client, key).await? {
+                return existing_comment(client, want, &found, key).await;
             }
         }
         if !epoch_is_current(&item, epoch) {
             return Err(note_refusal(&item, epoch));
         }
+        // The recipient is the claim the fence holds at this epoch: the label and principal as
+        // read, which a renewal keeps and anything else would have refused the write.
+        let holder = item.claimed_by.clone().unwrap_or_default();
+        let note = model::Note {
+            holder: holder.clone(),
+            principal: item.claim_principal.clone(),
+            epoch,
+            grant: grant.clone(),
+        };
+        // ★ Rendered before the write (ledger #4059), so a request token's record of it rides
+        // in the note's own update.
+        let comment = client.ledger().comment(&mint_id(now)?);
+        let answer = if want == JSON {
+            let ledger = client.ledger();
+            let mut answer = json::answer(
+                ledger,
+                "noted",
+                json::item_ref(ledger, item.number, &item.iri),
+            );
+            let mut said = written(&comment, &item.iri, text.trim(), &who, now);
+            said.note = Some(note.clone());
+            answer.comment = Some(json::comment(&said));
+            answer.key = key.clone();
+            json_repr(json::render(&answer)?)
+        } else {
+            plain(format!("{} on {} ({comment})\n", note.line(), item.short()))
+        };
+        let record = token.map(|token| token.triples(&answer, now));
         let comment = write_keyed_comment(
-            &client,
+            client,
             &item.iri,
             text.trim(),
             &who,
@@ -146,53 +203,25 @@ impl Endpoint for NoteEndpoint {
             &fence_clause(&item.iri, Some(epoch)),
             &CommentExtra {
                 note: Some((epoch, &grant)),
+                iri: Some(&comment),
+                replay: record.as_deref(),
                 ..CommentExtra::default()
             },
         )
         .await?;
-        if !comment_written(&client, &comment).await? {
+        if !comment_written(client, &comment).await? {
             if let Some(key) = &key {
-                if let Some(found) = model::find_comment_by_key(&client, key).await? {
-                    return existing_comment(&client, want, &found, key).await;
+                if let Some(found) = model::find_comment_by_key(client, key).await? {
+                    return existing_comment(client, want, &found, key).await;
                 }
             }
-            let now = model::load_item(&client, &item.iri).await?.unwrap_or(item);
+            let now = model::load_item(client, &item.iri).await?.unwrap_or(item);
             return Err(note_refusal(&now, epoch));
         }
-        // The recipient is the claim the fence held at this epoch: the label and principal as
-        // read, which a renewal keeps and anything else would have refused the write.
-        let holder = item.claimed_by.clone().unwrap_or_default();
-        let note = model::Note {
-            holder: holder.clone(),
-            principal: item.claim_principal.clone(),
-            epoch,
-            grant: grant.clone(),
-        };
-        if want == JSON {
-            let ledger = client.ledger();
-            let mut answer = json::answer(
-                ledger,
-                "noted",
-                json::item_ref(ledger, item.number, &item.iri),
-            );
-            let mut said = written(&comment, &item.iri, text.trim(), &who, now);
-            said.note = Some(note);
-            answer.comment = Some(json::comment(&said));
-            answer.key = key;
-            return Ok(json_repr(json::render(&answer)?));
-        }
-        Ok(plain(format!(
-            "{} on {} ({comment})\n",
-            note.line(),
-            item.short()
-        )))
+        Ok(answer)
     }
 
-    fn name(&self) -> &str {
-        "ledger-note"
-    }
-
-    fn describe(&self) -> Description {
+    fn contract(&self) -> Description {
         Description::new("ledger-note")
             .title("Send a dispatch note to the holder of an item's claim")
             .summary(
@@ -205,41 +234,44 @@ impl Endpoint for NoteEndpoint {
             )
             .verb(Verb::Meta)
             .action(write_scopes(
-                ikigai_core::ActionSpec::new(Verb::Sink)
-                    .resend_safe_with_key("key")
-                    .input(ledger_arg("note"))
-                    .summary("Append a dispatch note addressed to the current claim's holder.")
-                    .input(item_arg("The item whose holder the note is for."))
-                    .input(
-                        ArgSpec::new("content")
-                            .summary("The note text — where a pipe's value lands.")
-                            .class(v::ext::XSD_STRING),
-                    )
-                    .input(
-                        ArgSpec::new("epoch")
-                            .summary(
-                                "Required: the epoch of the claim the note is for. The note is \
+                replay::declare(
+                    ikigai_core::ActionSpec::new(Verb::Sink),
+                    self.tokens.window,
+                    "the note",
+                )
+                .input(ledger_arg("note"))
+                .summary("Append a dispatch note addressed to the current claim's holder.")
+                .input(item_arg("The item whose holder the note is for."))
+                .input(
+                    ArgSpec::new("content")
+                        .summary("The note text — where a pipe's value lands.")
+                        .class(v::ext::XSD_STRING),
+                )
+                .input(
+                    ArgSpec::new("epoch")
+                        .summary(
+                            "Required: the epoch of the claim the note is for. The note is \
                                  written only while the item is claimed at exactly this epoch, \
                                  checked in the write's own update; otherwise refused \
                                  (Conflict) naming the current holder and epoch, and nothing \
                                  is written.",
-                            )
-                            .class(v::ext::XSD_INTEGER),
-                    )
-                    .input(
-                        ArgSpec::new("key")
-                            .summary(
-                                "Your own name for this note, as `comment key=`: if a comment \
+                        )
+                        .class(v::ext::XSD_INTEGER),
+                )
+                .input(
+                    ArgSpec::new("key")
+                        .summary(
+                            "Your own name for this note, as `comment key=`: if a comment \
                                  already carries it, NOTHING is written and the answer names \
                                  that comment, marked `existing`, so a dispatcher resending \
                                  after a dropped connection records the note once.",
-                            )
-                            .class(v::ext::XSD_STRING)
-                            .optional(),
-                    )
-                    .input(as_arg(&WRITE_FACES))
-                    .output(PLAIN)
-                    .output(JSON),
+                        )
+                        .class(v::ext::XSD_STRING)
+                        .optional(),
+                )
+                .input(as_arg(&WRITE_FACES))
+                .output(PLAIN)
+                .output(JSON),
                 CAP_ANY,
             ))
     }

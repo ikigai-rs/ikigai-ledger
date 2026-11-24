@@ -8,6 +8,7 @@ use ikigai_core::{Error, Iri, Request, Resend, Resolution, Scope, Space, Verb};
 fn only_writes_with_replay_identity_declare_safe_resends() {
     let space = ikigai_ledger::space();
     let mut keyed = 0;
+    let mut tokened = 0;
     for entry in space.entries().unwrap() {
         let iri = entry
             .pattern
@@ -23,7 +24,26 @@ fn only_writes_with_replay_identity_declare_safe_resends() {
             panic!("unresolved {}", entry.pattern)
         };
         for action in resolved.endpoint.describe().action_specs() {
-            if action.verb == Verb::Sink && action.inputs.iter().any(|input| input.name == "key") {
+            if action
+                .inputs
+                .iter()
+                .any(|input| input.name == "idempotency-key")
+            {
+                // A request token (ledger #4059) is the declared resend key wherever it is taken,
+                // beside a `key=` or not.
+                tokened += 1;
+                assert_eq!(
+                    action.resend,
+                    Some(Resend::Key("idempotency-key".into())),
+                    "{}",
+                    entry.pattern
+                );
+                assert!(!action.resend_is_safe(|_| false));
+                assert!(!action.resend_is_safe(|name| name == "key"));
+                assert!(action.resend_is_safe(|name| name == "idempotency-key"));
+            } else if action.verb == Verb::Sink
+                && action.inputs.iter().any(|input| input.name == "key")
+            {
                 keyed += 1;
                 assert_eq!(
                     action.resend,
@@ -41,7 +61,8 @@ fn only_writes_with_replay_identity_declare_safe_resends() {
             }
         }
     }
-    assert!(keyed >= 2);
+    assert!(keyed >= 1);
+    assert!(tokened >= 7);
 }
 
 fn graph(kernel: &ikigai_core::Kernel) -> String {
@@ -143,7 +164,7 @@ fn a_move_replay_conflicts_and_from_does_not_identify_a_request_after_a_cycle() 
 #[test]
 fn turtle_meta_exposes_resend_safety_to_clients() {
     let kernel = kernel();
-    for endpoint in ["append", "comment"] {
+    for (endpoint, key) in [("append", "key"), ("comment", "idempotency-key")] {
         let meta = ok(
             &kernel,
             Verb::Meta,
@@ -151,19 +172,13 @@ fn turtle_meta_exposes_resend_safety_to_clients() {
             &[],
         );
         assert!(meta.contains("ik:resendKey <"), "{meta}");
-        assert!(meta.contains(":input:key>"), "{meta}");
+        assert!(meta.contains(&format!(":input:{key}>")), "{meta}");
         assert!(!meta.contains("ik:resendSafe true"));
     }
     let meta = ok(&kernel, Verb::Meta, "urn:iki:ledger:history", &[]);
     assert!(meta.contains("ik:resendSafe true"), "{meta}");
-    for endpoint in ["claim", "item:1:state"] {
-        let meta = ok(
-            &kernel,
-            Verb::Meta,
-            &format!("urn:iki:ledger:{endpoint}"),
-            &[],
-        );
-        assert!(!meta.contains("ik:resendKey <"));
-        assert!(!meta.contains("ik:resendSafe true"));
-    }
+    // A state move is undeclared; a claim's Sink is too, and only its release takes a token.
+    let meta = ok(&kernel, Verb::Meta, "urn:iki:ledger:item:1:state", &[]);
+    assert!(!meta.contains("ik:resendKey <"));
+    assert!(!meta.contains("ik:resendSafe true"));
 }

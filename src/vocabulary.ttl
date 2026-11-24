@@ -101,6 +101,16 @@ ledger:DispatchNote a rdfs:Class ;
     rdfs:label "Dispatch note" ;
     rdfs:comment "A comment from the ledger's dispatcher (a caller holding the close or write grant, with a verified principal) to the holder of an item's current claim, written through `urn:iki:ledger:{ledger}:note item= epoch=` (ledger #3718). The ledger records who it is for (ledger:noteTo, ledger:noteHolder), which claim (ledger:noteEpoch) and the grant that admitted it (ledger:noteGrant), all read by the write itself, never from the caller's text: the recipient is the claim at that epoch, and a note to an epoch that is not current is refused and nothing is written. A note carries no capability and changes no claim, lease, label, state or grant. Append-only like every comment." .
 
+ledger:Replay a rdfs:Class ;
+    rdfs:label "Replay" ;
+    rdfs:comment "What a write under a request token (`idempotency-key=`, ledger #4059) answered the first time, kept so a retry under the same token gets the same answer, byte for byte, and writes nothing. Scoped per endpoint resource, principal and token: the subject is `urn:iki:ledger:{ledger}:replay:{digest}`, the digest of that scope, so two principals using one token never see each other's answer. Committed in the same store update as the comment the write adds, so the comment and its record land together or not at all. It belongs to its item by ledger:onItem, so a delete archives it and a purge destroys it with the item. Remembered for the window the contract publishes as ik:resendWindow (24 hours by default); a token presented after it is a new request." .
+
+ledger:replayRecord a rdf:Property ;
+    rdfs:domain ledger:Replay ;
+    rdfs:range xsd:string ;
+    rdfs:label "replay record" ;
+    rdfs:comment "The remembered answer, as lowercase hex of ikigai-core's stable `Replay` encoding (`ikigai.replay.v1`): the scope, the request's fingerprint without its token, the answer's media type and bytes (or a recorded Conflict, NotFound or Gone), and when it was recorded." .
+
 ledger:Tombstone a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
     rdfs:label "Tombstone" ;

@@ -498,12 +498,34 @@ their fields and need no migration.
 
 ### Resending writes after a lost answer
 
-The action contracts declare `resend_safe_with_key("key")` on `append`, `comment`, and `decision`:
-a client may resend the same request with a nonblank `key`. A replay writes nothing and
-answers `existing` in plain text or `"outcome": "existing"` in JSON. Without `key`, these
-writes have no resend safety declaration. `item=key:…` only selects an item; it does not
-make another write safe to resend. Keys belong to one ledger, with the lifetimes described
-above.
+The action contract declares `resend_safe_with_key("key")` on `append`: a client may resend
+the same request with a nonblank `key`. A replay writes nothing and answers `existing` in plain
+text or `"outcome": "existing"` in JSON. `item=key:…` only selects an item; it does not make
+another write safe to resend. Keys belong to one ledger, with the lifetimes described above.
+
+**Request tokens** (ledger #4059). `comment`, `note`, `decision`, `close`, `reopen`, `defer`
+(both verbs) and a claim's release take `idempotency-key=`, and their contracts declare
+`resend_safe_with_key("idempotency-key")` with the window as `ik:resendWindow`. A token is
+one attempt at one write: ASCII letters, digits, `-` `.` `_` `~` `:`, at most 256 characters.
+A repeat under it, from the same principal, within the window, answers the first answer byte
+for byte and writes nothing, so a retried close, reopen, deferral or release no longer posts
+its `content=` note twice. The rules:
+
+- The token is scoped per endpoint resource, principal and token. `comment`, `note` and
+  `decision` share one scope, as they share `key=`'s namespace.
+- A repeat with any other argument changed is refused: `InvalidArgument` on
+  `idempotency-key`, "was used for a different request".
+- A success is recorded, and so is a Conflict, NotFound or Gone the endpoint produced. A
+  Denied, an InvalidArgument and a transient failure are not, so their retry runs again.
+- A repeat while the first attempt still runs in this process is answered `RetryAfter`.
+- The window is 24 hours unless the host sets `SpaceConfig::resend_window`, and never less.
+  After it, the token is a new request.
+- The record (`ledger:Replay`) is written in the same store update as the comment it guards,
+  so the two land together or not at all. It belongs to its item, so a delete archives it and
+  a purge destroys it.
+
+`key=` on a comment is a different thing: it names the comment for as long as the comment
+lives, and its replay answers `existing`. A call may carry both.
 
 The history import Sink declares `resend_safe()`: every accepted event already has a
 caller-supplied source ID in its Turtle content. Replaying a batch records no new events;
@@ -611,8 +633,9 @@ note to worker-1 at epoch 2, sent under the dispatcher grant on acme#12 (urn:iki
   `"kind": "comment"`, and a note also has `"to": {"holder", "principal"}`, `"epoch"` and
   `"grant"`; in text a note's stamp is followed by `note to worker-1 at epoch 2, sent under the
   dispatcher grant`.
-- **Resend once.** `key=` works as `comment key=`: a dispatcher resending after a dropped
-  connection gets the note already recorded, marked `existing`.
+- **Resend once.** `idempotency-key=` works as on `comment`: a dispatcher resending after a
+  dropped connection gets the first answer, and the note is recorded once. `key=` works as
+  `comment key=`: the note already recorded, marked `existing`.
 - **The worker's side.** `source …:item:12:notes` answers the notes to the caller's current
   claim, oldest first (`after=<note iri>` for only later ones), in text, JSON and Turtle; a
   capability that does not act as the claim's principal is refused. `claim renew=true` ends
