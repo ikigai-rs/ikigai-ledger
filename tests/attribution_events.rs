@@ -868,7 +868,7 @@ fn no_event_property_infers_an_item() {
 /// so pin the independently versioned vocabulary document.
 #[test]
 fn the_vocabulary_names_its_version_for_ns_drift() {
-    let line = "    owl:versionInfo \"0.26.0\" .";
+    let line = "    owl:versionInfo \"0.26.1\" .";
     let found: Vec<&str> = ikigai_ledger::VOCABULARY_TTL
         .lines()
         .filter(|l| l.trim_start().starts_with("owl:versionInfo"))
