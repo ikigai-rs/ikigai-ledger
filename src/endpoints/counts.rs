@@ -225,7 +225,11 @@ pub(super) fn status_event_when(
         v::ON_ITEM,
         events.not_imported("?past")
     ));
-    format!("INSERT {{ {triples} }} WHERE {{ {guard} {{ SELECT (COUNT(?past) + 1 AS ?sequence) WHERE {{ {previous} }} }} }}")
+    // The event's item revision (ledger #4199) in the same update, once the event is in.
+    super::batch(&[
+        format!("INSERT {{ {triples} }} WHERE {{ {guard} {{ SELECT (COUNT(?past) + 1 AS ?sequence) WHERE {{ {previous} }} }} }}"),
+        super::revise(client, item, event),
+    ])
 }
 
 /// Preserve a close stamp imported directly through the store before reopen removes it, under

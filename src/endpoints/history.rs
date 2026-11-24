@@ -40,8 +40,9 @@ impl Node {
     }
 }
 
-/// The events of `item`, in ONE query, oldest first; events of one millisecond in the order
-/// their ids were minted.
+/// The events of `item`, in ONE query, in commit order (ledger #4199): by `ledger:itemRevision`,
+/// after any legacy events without one, which keep the old order, oldest first and events of
+/// one millisecond in the order their ids were minted.
 async fn read(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<json::HistoryEvent>> {
     let rows = client
         .select(&format!(
@@ -76,21 +77,33 @@ async fn read(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<json::Hist
             .or_default()
             .insert(o.value.clone());
     }
-    let mut events: Vec<(u64, String, json::HistoryEvent)> = nodes
+    // ★ Commit order (ledger #4199): an event with no revision (written before ledger #4199, or
+    // recorded afterward by an importer as history only) first, in the legacy order, time then
+    // id, which is approximate; then every event with one, by revision.
+    let mut events: Vec<((bool, u64, u64, String), json::HistoryEvent)> = nodes
         .into_iter()
         .map(|(iri, node)| {
             let at = node
                 .one(v::ext::CREATED)
                 .and_then(|when| model::millis(&when));
+            let revision = node
+                .one(v::ITEM_REVISION)
+                .and_then(|revision| revision.parse::<u64>().ok());
             let id = iri.rsplit(':').next().unwrap_or(&iri).to_string();
-            (at.unwrap_or(0), id, event(iri, &node, at))
+            let key = (
+                revision.is_some(),
+                revision.unwrap_or(0),
+                at.unwrap_or(0),
+                id,
+            );
+            (key, event(iri, &node, at, revision))
         })
         .collect();
-    events.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    Ok(events.into_iter().map(|(_, _, event)| event).collect())
+    events.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(events.into_iter().map(|(_, event)| event).collect())
 }
 
-fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
+fn event(iri: String, node: &Node, at: Option<u64>, revision: Option<u64>) -> json::HistoryEvent {
     let kind = if node.class == v::CLAIM_EVENT_CLASS {
         "claim".to_string()
     } else if node.class == v::RELEASE_EVENT_CLASS {
@@ -158,6 +171,8 @@ fn event(iri: String, node: &Node, at: Option<u64>) -> json::HistoryEvent {
             .one(v::LAPSED_AT)
             .and_then(|when| model::millis(&when))
             .map(iso8601),
+        item_revision: revision,
+        order: json::order_of(revision),
     }
 }
 

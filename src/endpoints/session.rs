@@ -402,18 +402,26 @@ fn parse(content: &str) -> Result<(String, Vec<(String, Term)>)> {
 }
 
 /// The item's newest hand-back comment, or a `Conflict` saying there is none.
+///
+/// ★ Newest is LAST COMMITTED (ledger #4199): the hand-back with the item's highest
+/// `ledger:itemRevision`, so a later hand-back from a host whose clock runs slow still
+/// stands. Only when no hand-back has a revision (all written before ledger #4199) does the
+/// legacy order decide, latest created then greatest IRI, which is approximate.
 async fn newest_handback(client: &StoreClient<'_, '_>, item: &Item) -> Result<String> {
     let rows = client
         .select(&format!(
-            "SELECT ?comment WHERE {{ {} }} ORDER BY DESC(?at) DESC(STR(?comment)) LIMIT 1",
+            "SELECT ?comment WHERE {{ {} }} \
+             ORDER BY DESC(BOUND(?revision)) DESC(?revision) DESC(?at) DESC(STR(?comment)) LIMIT 1",
             client.in_graph(&format!(
                 "?comment <{on}> <{iri}> ; <{created}> ?at . \
-                 {{ ?comment <{mark}> true }} UNION {{ ?comment <{by}> ?holder }}",
+                 {{ ?comment <{mark}> true }} UNION {{ ?comment <{by}> ?holder }} \
+                 OPTIONAL {{ ?comment <{revision}> ?revision }}",
                 on = v::ON_ITEM,
                 iri = item.iri,
                 created = v::ext::CREATED,
                 mark = v::HAND_BACK,
                 by = v::HANDED_BACK_BY,
+                revision = v::ITEM_REVISION,
             ))
         ))
         .await?;

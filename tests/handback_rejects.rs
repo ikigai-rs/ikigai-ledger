@@ -230,7 +230,12 @@ fn an_item_with_no_reject_is_unchanged() {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["author", "id", "kind", "text", "time"], "{comment}");
+        // `item_revision` since ledger #4199: its place in the item's commit order.
+        assert_eq!(
+            keys,
+            ["author", "id", "item_revision", "kind", "text", "time"],
+            "{comment}"
+        );
     }
     let answer = comment(&kernel, &worker(), &[("content", "a note")]);
     assert!(answer["comment"].get("rejects").is_none(), "{answer}");

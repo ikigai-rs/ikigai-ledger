@@ -337,6 +337,8 @@ fn lapse_update(
             lapsed = datetime(found.lapsed),
         ))
     )];
+    // The lapse's item revision (ledger #4199), once its event is in.
+    operations.push(super::revise(client, &found.iri, event));
     let mut label_event = None;
     if let Some(label) = route {
         let landed = format!("<{event}> <{}> {item} .", v::ON_ITEM);
@@ -360,6 +362,7 @@ fn lapse_update(
             None,
             &format!("{landed} <{edit}> <{}> {item} .", v::ON_ITEM),
         ));
+        operations.push(super::revise(client, &found.iri, &edit));
         label_event = Some(edit);
     }
     Ok((batch(&operations), label_event))

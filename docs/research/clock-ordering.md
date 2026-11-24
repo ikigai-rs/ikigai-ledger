@@ -4,6 +4,8 @@ Scope: source review of this ledger repository at the parent of this note, plus 
 
 ## Reproduction
 
+⚠ **Since ledger #4199 this inversion is fixed for comments, `comments=last`, history and the session hand-back**: each record carries a store-allocated per-item `ledger:itemRevision` (README, "Commit order"), and `tests/skew_research.rs` is now the regression, asserting that the second write lists second. The paragraph below describes the proof as it was written against 0.26.0.
+
 Run `cargo test --test skew_research`. The fast host's clock is 2026-09-15 00:01:00 UTC; the slow host's is 00:00:00 UTC. The fast host files an item and writes `first write`; only after that call returns, the slow host writes `second write` to the same item. Both writes succeed, but the detail lists `second write` first. `model::load_comments` sorts by authored `created`, then comment IRI; a process-local mint sequence only breaks equal timestamps, and cannot correct a clock offset. The test asserts the observed inversion, not the desired future behavior. It models clock skew and shared durable state, not actual network replication. The skew also makes the later write's item `modified` earlier than its filing; consequences for other views require separate tests.
 
 ## Inventory of decisions
