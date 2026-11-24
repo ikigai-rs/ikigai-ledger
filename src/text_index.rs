@@ -116,15 +116,30 @@ async fn hits(
 /// ledger's whole-word regex matches. Unicode simple folding also matches long s and the
 /// Kelvin sign. The index lowercases the Kelvin sign to k, but keeps long s distinct.
 fn candidate_words(term: &str) -> Option<Vec<String>> {
-    if term.is_empty() || term.len() > 32 || !term.bytes().all(|b| b.is_ascii_alphanumeric()) {
+    if term.is_empty() || !term.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return None;
     }
     let lower = term.to_ascii_lowercase();
-    match lower.bytes().filter(|b| *b == b's').count() {
-        0 => Some(vec![lower]),
-        1 => Some(vec![lower.replacen('s', "ſ", 1), lower]),
-        _ => None,
+    let long_s: Vec<_> = lower.match_indices('s').map(|(index, _)| index).collect();
+    let kelvin = lower.matches('k').count();
+    // The tokenizer drops a token of 40 bytes or more, before lowercasing. A
+    // folded spelling can use two bytes for long s or three for the Kelvin sign.
+    if long_s.len() > 4 || lower.len() + long_s.len() + 2 * kelvin >= 40 {
+        return None;
     }
+    let mut variants = vec![lower];
+    for index in long_s.into_iter().rev() {
+        let additional = variants
+            .iter()
+            .map(|word| {
+                let mut variant = word.clone();
+                variant.replace_range(index..index + 1, "ſ");
+                variant
+            })
+            .collect::<Vec<_>>();
+        variants.extend(additional);
+    }
+    Some(variants)
 }
 
 fn candidate_query(filter: &Filter) -> Option<String> {
@@ -234,6 +249,23 @@ async fn candidates(client: &StoreClient<'_, '_>, filter: &Filter) -> Option<Str
     )
     .await?;
     complete(client, &graph, &weights).await?;
+    if filter.search.phrase.is_none() {
+        // A character such as ² is alphanumeric to the tokenizer, but is outside
+        // the regex word class. A whole-word match could end before it and be
+        // absent from the index's hit set. This probe is independent of the term.
+        let values = predicates
+            .iter()
+            .map(|p| format!("<{p}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let pattern = sparql::literal(r"[\p{Number}--\w]");
+        let query = format!("ASK {{ {} }}", client.in_graph(&format!(
+            "VALUES ?predicate {{ {values} }} ?subject ?predicate ?text . FILTER(REGEX(STR(?text), {pattern}))"
+        )));
+        if client.ask(&query).await.ok()? {
+            return None;
+        }
+    }
     let subjects: BTreeSet<_> = hits.iter().map(|hit| hit.subject.as_str()).collect();
     // Blank subjects and unusually large IRI lists are handled by the ordinary scan.
     let mut lists = model::values_lists(subjects).ok()?;
@@ -303,7 +335,11 @@ async fn ranked_scores(
         .copied()
         .chain(phrase)
         .flat_map(model::text_words)
-        .map(str::to_lowercase)
+        .map(|word| {
+            word.chars()
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>()

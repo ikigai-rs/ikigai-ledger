@@ -928,9 +928,10 @@ fn indexed_and_scanned_searches_agree() {
         append(kernel, "ParserCode\n\nLease ran out", &[("priority", "0")]);
         append(kernel, "Leaſe and parser", &[]);
         append(kernel, "parser_module", &[]);
+        append(kernel, "Lease²", &[]);
         comment(kernel, "default", "4", "The lease—ran out yesterday");
     }
-    commit_index(&index, 8);
+    commit_index(&index, 9);
     let cases: &[&[(&str, &str)]] = &[
         &[("text", "parser")],
         &[("text", "lease"), ("whole_word", "true")],
