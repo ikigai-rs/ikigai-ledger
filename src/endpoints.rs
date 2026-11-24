@@ -625,6 +625,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             flight::StateEndpoint {
                 lifecycles: Arc::clone(&lifecycles),
                 participants: participants.clone(),
+                tokens: tokens.clone(),
             },
         )
         .bind(

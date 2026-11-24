@@ -411,6 +411,7 @@ fn state_document(
 pub(super) struct StateEndpoint {
     pub(super) lifecycles: Arc<Lifecycles>,
     pub(super) participants: super::Participants,
+    pub(super) tokens: replay::Tokens,
 }
 
 #[async_trait]
@@ -444,117 +445,18 @@ impl Endpoint for StateEndpoint {
                 face(format!("{}\n", state.name), None, PLAIN)
             }
             Verb::Sink => {
-                // Every argument is checked before anything is read or written.
-                let to = named_state(lifecycle, "to", inv.inline_str("to")?)?;
-                let from = named_state(lifecycle, "from", inv.inline_str("from")?)?;
-                if !lifecycle.allows_move(from, to) {
-                    return Err(undeclared_move(lifecycle, from, to));
-                }
-                let now = now_ms(inv)?;
-                let item = require_item(&client, id).await?;
-                let who = attribution::resolve(
+                // ★ A request token (ledger #4061) is scoped to this item's state resource:
+                // a retry under it answers the first transition, and a racer, or the same
+                // caller under another token, still meets the compare-and-set's Conflict.
+                under_token!(
                     inv,
                     &client,
-                    self.participants.as_deref(),
-                    Dates::Event,
-                    now,
+                    &format!("item:{id}:state"),
+                    &self.tokens,
+                    |token| self
+                        .transition(inv, &client, lifecycle, want, id, token)
+                        .await
                 )
-                .await?;
-                // ★ An import principal may date a move at its source (ledger #2934), as it may
-                // date a comment or a close: the event and a note carry the date, and
-                // `modified` moves only forward to it. Anyone else is refused.
-                let claimed = attribution::resolve_claimed(
-                    inv,
-                    &client,
-                    self.participants.as_deref(),
-                    "created",
-                    "a state move",
-                    item.created,
-                    now,
-                )
-                .await?;
-                let who = Attribution {
-                    created: claimed,
-                    ..who
-                };
-
-                // The cheap half first: an item already somewhere else is refused without a
-                // write, because a no-op update still cuts every cached read of the ledger.
-                // This read proves nothing about the update below — the update's own guard
-                // is what holds against a racer.
-                let before = read_state(&client, &item.iri).await?;
-                match current(lifecycle, &item, &before.values) {
-                    Ok(state) if state.name == from.name => {}
-                    Ok(state) => return Err(conflict(&client, &item, &from.name, &state.name)),
-                    Err(why) => {
-                        return Err(Error::Conflict(format!(
-                            "{why}, so it is not in `{}` and no transition can name the state \
-                             it leaves. Repair the item with one SPARQL UPDATE over this \
-                             ledger's graph",
-                            from.name
-                        )))
-                    }
-                }
-
-                let outcome = if to.name == from.name {
-                    // Nothing to move: answered without a write, for the reason above.
-                    "unchanged"
-                } else {
-                    let token = mint_id(now)?;
-                    let node = event_iri(&item.iri, "edit", now)?;
-                    let mut event = edit_event_triples(&node, &item.iri, "state", &who, now);
-                    event.push_str(&format!(
-                        "\n<{node}> <{}> ?left ; <{}> <{}> ; <{}> {} .",
-                        v::STATE_FROM,
-                        v::STATE_TO,
-                        to.iri,
-                        v::LIFECYCLE_VERSION,
-                        literal(lifecycle.version()),
-                    ));
-                    client
-                        .update(&cas(
-                            &client, &item.iri, from, to, &token, &event, claimed, now,
-                        ))
-                        .await?;
-                    let after = read_state(&client, &item.iri).await?;
-                    if after.tokens != [token.clone()] {
-                        if to.in_flight {
-                            if let Some(refusal) =
-                                closed_transition_refusal(&client, &item, to).await?
-                            {
-                                return Err(refusal);
-                            }
-                        }
-                        let found = current(lifecycle, &item, &after.values)
-                            .map(|s| s.name.clone())
-                            .unwrap_or_else(|why| why);
-                        return Err(conflict(&client, &item, &from.name, &found));
-                    }
-                    "transitioned"
-                };
-
-                if let Ok(note) = inv.inline_str("content") {
-                    if !note.trim().is_empty() && outcome == "transitioned" {
-                        write_comment(&client, &item.iri, note.trim(), &who, now).await?;
-                    }
-                }
-
-                if want == JSON {
-                    let since = if outcome == "unchanged" {
-                        before.at
-                    } else {
-                        Some(claimed.unwrap_or(now))
-                    };
-                    let mut doc = state_document(&client, &item, lifecycle, to, since);
-                    doc.outcome = Some(outcome.to_string());
-                    doc.from = Some(from.name.clone());
-                    return Ok(json_repr(json::render(&doc)?));
-                }
-                Ok(plain(if outcome == "unchanged" {
-                    format!("{} {} (unchanged)\n", item.short(), to.name)
-                } else {
-                    format!("{} {} (was {})\n", item.short(), to.name, from.name)
-                }))
             }
             other => Err(unsupported("ledger-item-state", other)),
         }
@@ -597,7 +499,11 @@ impl Endpoint for StateEndpoint {
                     .output(JSON),
             ))
             .action(write_scopes(
-                ikigai_core::ActionSpec::new(Verb::Sink)
+                replay::declare(
+                    ikigai_core::ActionSpec::new(Verb::Sink),
+                    self.tokens.window,
+                    "the move",
+                )
                     .input(ledger_arg("item:{id}:state"))
                     .summary(
                         "Move the item from `from` to `to` — only if it is in `from` now. A \
@@ -606,9 +512,11 @@ impl Endpoint for StateEndpoint {
                          declares moves (`ledger:movesTo`), a pair it does not declare is a \
                          Conflict naming every legal move from `from`, also before anything is \
                          written. A closed item refuses entry into an in-flight state, with a \
-                         Conflict naming its close. Resending is not declared safe: `from` \
-                         is a state precondition, not a request ID. A replay after a move \
-                         conflicts, and after a cycle back to `from` can move again.",
+                         Conflict naming its close. `from` is a state precondition, not a \
+                         request ID: a resend after a move conflicts, and after a cycle back \
+                         to `from` can move again. A resend under `idempotency-key` answers \
+                         the first transition instead (ledger #4061); a different caller, or \
+                         another token, still meets the Conflict.",
                     )
                     .input(item_id_input())
                     .input(state_arg("to", "The state to move the item to."))
@@ -645,6 +553,139 @@ impl Endpoint for StateEndpoint {
                     .output(JSON),
                 CAP_WRITE,
             ))
+    }
+}
+
+impl StateEndpoint {
+    /// The transition a state Sink asks for, under its request token when it carries one.
+    async fn transition(
+        &self,
+        inv: &Invocation<'_>,
+        client: &StoreClient<'_, '_>,
+        lifecycle: &Lifecycle,
+        want: &str,
+        id: &str,
+        token: Option<&replay::Token>,
+    ) -> Result<Representation> {
+        // Every argument is checked before anything is read or written.
+        let to = named_state(lifecycle, "to", inv.inline_str("to")?)?;
+        let from = named_state(lifecycle, "from", inv.inline_str("from")?)?;
+        if !lifecycle.allows_move(from, to) {
+            return Err(undeclared_move(lifecycle, from, to));
+        }
+        let now = now_ms(inv)?;
+        let item = require_item(client, id).await?;
+        let who =
+            attribution::resolve(inv, client, self.participants.as_deref(), Dates::Event, now)
+                .await?;
+        // ★ An import principal may date a move at its source (ledger #2934), as it may
+        // date a comment or a close: the event and a note carry the date, and
+        // `modified` moves only forward to it. Anyone else is refused.
+        let claimed = attribution::resolve_claimed(
+            inv,
+            client,
+            self.participants.as_deref(),
+            "created",
+            "a state move",
+            item.created,
+            now,
+        )
+        .await?;
+        let who = Attribution {
+            created: claimed,
+            ..who
+        };
+
+        // The cheap half first: an item already somewhere else is refused without a
+        // write, because a no-op update still cuts every cached read of the ledger.
+        // This read proves nothing about the update below — the update's own guard
+        // is what holds against a racer.
+        let before = read_state(client, &item.iri).await?;
+        match current(lifecycle, &item, &before.values) {
+            Ok(state) if state.name == from.name => {}
+            Ok(state) => return Err(conflict(client, &item, &from.name, &state.name)),
+            Err(why) => {
+                return Err(Error::Conflict(format!(
+                    "{why}, so it is not in `{}` and no transition can name the state \
+                     it leaves. Repair the item with one SPARQL UPDATE over this \
+                     ledger's graph",
+                    from.name
+                )))
+            }
+        }
+
+        let outcome = if to.name == from.name {
+            // Nothing to move: answered without a write, for the reason above.
+            "unchanged"
+        } else {
+            "transitioned"
+        };
+        // ★ The answer is rendered before the write, so the token's record rides in the
+        // compare-and-set's own update (ledger #4061): the move and its record land together
+        // or not at all, and a retry can never find the move without the record.
+        let answer = if want == JSON {
+            let since = if outcome == "unchanged" {
+                before.at
+            } else {
+                Some(claimed.unwrap_or(now))
+            };
+            let mut doc = state_document(client, &item, lifecycle, to, since);
+            doc.outcome = Some(outcome.to_string());
+            doc.from = Some(from.name.clone());
+            json_repr(json::render(&doc)?)
+        } else {
+            plain(if outcome == "unchanged" {
+                format!("{} {} (unchanged)\n", item.short(), to.name)
+            } else {
+                format!("{} {} (was {})\n", item.short(), to.name, from.name)
+            })
+        };
+        if let Some(token) = token {
+            token.on_item(&item.iri);
+        }
+
+        if outcome == "transitioned" {
+            let receipt = mint_id(now)?;
+            let node = event_iri(&item.iri, "edit", now)?;
+            let mut event = edit_event_triples(&node, &item.iri, "state", &who, now);
+            event.push_str(&format!(
+                "\n<{node}> <{}> ?left ; <{}> <{}> ; <{}> {} .",
+                v::STATE_FROM,
+                v::STATE_TO,
+                to.iri,
+                v::LIFECYCLE_VERSION,
+                literal(lifecycle.version()),
+            ));
+            if let Some(token) = token {
+                event.push_str(&token.triples(&answer, now));
+            }
+            client
+                .update(&cas(
+                    client, &item.iri, from, to, &receipt, &event, claimed, now,
+                ))
+                .await?;
+            let after = read_state(client, &item.iri).await?;
+            if after.tokens != [receipt.clone()] {
+                if to.in_flight {
+                    if let Some(refusal) = closed_transition_refusal(client, &item, to).await? {
+                        return Err(refusal);
+                    }
+                }
+                let found = current(lifecycle, &item, &after.values)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|why| why);
+                return Err(conflict(client, &item, &from.name, &found));
+            }
+            // ⚠ The note is a second update, after the move: should it fail, the move and
+            // its record stand, and a retry under the token answers the move without
+            // posting the note.
+            if let Ok(note) = inv.inline_str("content") {
+                if !note.trim().is_empty() {
+                    write_comment(client, &item.iri, note.trim(), &who, now).await?;
+                }
+            }
+        }
+        Ok(answer)
     }
 }
 

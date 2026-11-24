@@ -1,5 +1,6 @@
 //! **Request tokens** (ledger #4059): `idempotency-key=` on comment and note, then on close,
 //! reopen, defer and a claim's release, whose `content=` note was an unkeyed comment.
+//! Then (ledger #4061) on the state compare-and-set, whose retry was refused as a Conflict.
 //!
 //! The reproduction is ikigai-core's `docs/research/sink-idempotency/repro/`: a link delivers a
 //! write, the write lands, and the answer is lost (`Error::Timeout`). An agent sends the same
@@ -619,4 +620,184 @@ fn the_contract_declares_the_token_and_its_window() {
     let meta = ok(&kernel, Verb::Meta, "urn:iki:ledger:comment", &[]);
     assert!(meta.contains("ik:resendWindow"), "{meta}");
     assert!(meta.contains(":input:idempotency-key>"), "{meta}");
+}
+
+// ------------------------------------------------------------------- the state compare-and-set
+
+const STATE: &str = "urn:iki:ledger:item:1:state";
+
+/// How many state-move events the ledger records.
+fn state_events(kernel: &Kernel) -> usize {
+    let rows = select(
+        kernel,
+        "SELECT ?e WHERE { GRAPH <urn:iki:ledger:graph:default> { ?e \
+         <https://ikigai-rs.dev/ns/ledger#stateTo> ?to } }",
+    );
+    rows.matches("urn:iki:ledger:default:").count()
+}
+
+#[test]
+fn an_untokened_move_retried_after_a_lost_answer_conflicts() {
+    // The gap: the move landed, its answer was lost, and the retry is told another writer won.
+    let link = link();
+    filed(&link);
+    let mv = request(Verb::Sink, STATE, &[("from", "filed"), ("to", "queued")]);
+    link.lose_next();
+    assert!(link.send(mv.clone(), &Capability::root()).is_err());
+    let retry = link.send(mv, &Capability::root());
+    assert!(matches!(retry, Err(Error::Conflict(_))), "{retry:?}");
+}
+
+#[test]
+fn a_tokened_move_retried_after_a_lost_answer_answers_the_first_transition() {
+    for face in ["text/plain", "application/json"] {
+        let link = link();
+        filed(&link);
+        let args = with_token(&[("from", "filed"), ("to", "queued"), ("as", face)], TOKEN);
+        let mv = request(Verb::Sink, STATE, &args);
+        let (lost, retry) = link.lose_and_retry(&mv, &Capability::root());
+        assert_eq!(text(&retry), text(&lost), "{face}");
+        if face == "text/plain" {
+            assert_eq!(text(&retry), "#1 queued (was filed)\n");
+        } else {
+            let doc: serde_json::Value = serde_json::from_slice(&retry).unwrap();
+            assert_eq!(doc["outcome"], "transitioned", "{doc}");
+            assert_eq!(doc["from"], "filed", "{doc}");
+        }
+        assert_eq!(state_events(&link.kernel), 1, "{face}: one transition");
+        let before = graph(&link.kernel);
+        assert_eq!(link.send(mv, &Capability::root()).unwrap(), lost, "{face}");
+        assert_eq!(
+            graph(&link.kernel),
+            before,
+            "{face}: a replay writes nothing"
+        );
+    }
+}
+
+#[test]
+fn a_tokened_move_with_a_note_posts_its_note_once() {
+    let link = link();
+    filed(&link);
+    let mv = request(
+        Verb::Sink,
+        STATE,
+        &with_token(
+            &[
+                ("from", "filed"),
+                ("to", "queued"),
+                ("content", "the move's note"),
+            ],
+            TOKEN,
+        ),
+    );
+    let (lost, retry) = link.lose_and_retry(&mv, &Capability::root());
+    assert_eq!(retry, lost);
+    assert_eq!(copies(&link.kernel, "the move's note"), 1);
+}
+
+#[test]
+fn a_racer_still_conflicts_under_a_token() {
+    // ★ Do (note section 5.3): "already there means success" must not hide a real racer. A
+    // different caller, or the same caller under another token, still gets Conflict.
+    let link = link();
+    filed(&link);
+    let args = [("from", "filed"), ("to", "queued")];
+    let a = writer("urn:iki:test:a");
+    let b = writer("urn:iki:test:b");
+    let first = link
+        .send(request(Verb::Sink, STATE, &with_token(&args, TOKEN)), &a)
+        .unwrap();
+    for (cap, token) in [(&b, TOKEN), (&a, "another-token")] {
+        let err = link
+            .send(request(Verb::Sink, STATE, &with_token(&args, token)), cap)
+            .unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{token}: {err}");
+    }
+    assert_eq!(
+        link.send(request(Verb::Sink, STATE, &with_token(&args, TOKEN)), &a)
+            .unwrap(),
+        first
+    );
+    assert_eq!(state_events(&link.kernel), 1);
+}
+
+#[test]
+fn a_move_token_reused_for_another_move_is_refused() {
+    let link = link();
+    filed(&link);
+    link.send(
+        request(
+            Verb::Sink,
+            STATE,
+            &with_token(&[("from", "filed"), ("to", "queued")], TOKEN),
+        ),
+        &Capability::root(),
+    )
+    .unwrap();
+    let before = graph(&link.kernel);
+    let err = link
+        .send(
+            request(
+                Verb::Sink,
+                STATE,
+                &with_token(&[("from", "queued"), ("to", "filed")], TOKEN),
+            ),
+            &Capability::root(),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("was used for a different request"),
+        "{err}"
+    );
+    assert_eq!(graph(&link.kernel), before);
+}
+
+#[test]
+fn a_move_records_its_token_in_the_transitions_own_update() {
+    // The record and the move land together: a move leaves exactly one record, on its item.
+    let link = link();
+    filed(&link);
+    link.send(
+        request(
+            Verb::Sink,
+            STATE,
+            &with_token(&[("from", "filed"), ("to", "queued")], TOKEN),
+        ),
+        &Capability::root(),
+    )
+    .unwrap();
+    let records = select(
+        &link.kernel,
+        "SELECT ?r WHERE { GRAPH <urn:iki:ledger:graph:default> { ?r a \
+         <https://ikigai-rs.dev/ns/ledger#Replay> ; \
+         <https://ikigai-rs.dev/ns/ledger#onItem> ?item } }",
+    );
+    assert_eq!(
+        records.matches("urn:iki:ledger:default:replay:").count(),
+        1,
+        "{records}"
+    );
+}
+
+#[test]
+fn the_state_contract_declares_the_token_and_its_window() {
+    let window = Duration::from_secs(72 * 3600);
+    let space =
+        ikigai_ledger::space_with(ikigai_ledger::SpaceConfig::default().resend_window(window));
+    let Resolution::Hit(resolved) = space.resolve(
+        &Request::new(Verb::Meta, Iri::parse(STATE).unwrap()),
+        &Scope::empty(),
+    ) else {
+        panic!("unresolved")
+    };
+    let action = resolved
+        .endpoint
+        .describe()
+        .action_specs()
+        .into_iter()
+        .find(|a| a.verb == Verb::Sink)
+        .unwrap();
+    assert_eq!(action.resend, Some(Resend::Key("idempotency-key".into())));
+    assert_eq!(action.resend_window_secs, Some(window.as_secs()));
 }
