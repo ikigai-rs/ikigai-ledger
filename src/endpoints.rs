@@ -762,14 +762,18 @@ fn json_face(bytes: Vec<u8>) -> Representation {
 /// A representation in the face the caller asked for, cacheable under the store's write
 /// threads.
 fn face(item_text: String, graph: Option<Graph>, want: &str) -> Result<Representation> {
-    let repr = match want {
+    Ok(cached(uncached_face(item_text, graph, want)?))
+}
+
+/// [`face`] before it is hung from any thread: for a read that names its own threads.
+fn uncached_face(item_text: String, graph: Option<Graph>, want: &str) -> Result<Representation> {
+    Ok(match want {
         TURTLE => Representation::new(
             ReprType::new(TURTLE).with_param("charset", "utf-8"),
             model::turtle(&graph.unwrap_or_default())?,
         ),
         _ => plain(item_text),
-    };
-    Ok(cached(repr))
+    })
 }
 
 /// Cacheable, hung from the store's three write threads.
@@ -796,6 +800,27 @@ fn cached_in(repr: Representation, graph: &str) -> Representation {
         .depends_on(ikigai_store::UPDATE_THREAD)
         .depends_on(ikigai_store::LOAD_THREAD)
         .depends_on(ikigai_store::graph_thread(graph))
+}
+
+/// [`cached_in`] for a read of the selected ledgers' graphs: `items` and `count`, over the
+/// bound ledger or a `ledgers=` union (ledger #4139). Hung from each selected graph's thread,
+/// so a write to a ledger outside the selection leaves it cached. On a live server every
+/// ledger takes lease renewals and comments, and under [`ikigai_store::GRAPH_UPDATE_THREAD`]
+/// each of them cut every listing of every ledger, so gonk's home page recomputed its
+/// listings on almost every load.
+///
+/// ⚠ The same rule as [`cached_in`]: name every ledger graph the read went to. A read of
+/// another graph on the way (an alias `parent=` resolves through the aliases graph) is still
+/// invalidated, because the kernel unions each store sub-request's own threads into this
+/// one, and the store hangs a graph-confined read on that graph's thread.
+/// `tests/listing_cache.rs` keeps both halves.
+fn cached_in_ledgers(repr: Representation, ledgers: &[Ledger]) -> Representation {
+    ledgers.iter().fold(
+        repr.cacheable()
+            .depends_on(ikigai_store::UPDATE_THREAD)
+            .depends_on(ikigai_store::LOAD_THREAD),
+        |repr, ledger| repr.depends_on(ikigai_store::graph_thread(&ledger.graph())),
+    )
 }
 
 /// Which face was asked for. An `as` this endpoint cannot serve is **refused**, never
@@ -1938,7 +1963,10 @@ impl Endpoint for ItemsEndpoint {
             for item in &items {
                 item.triples(&mut graph);
             }
-            return face(String::new(), Some(graph), want);
+            return Ok(cached_in_ledgers(
+                uncached_face(String::new(), Some(graph), want)?,
+                &ledgers,
+            ));
         }
         if want == JSON {
             rendered.sort_by_key(|(position, _)| *position);
@@ -1964,7 +1992,7 @@ impl Endpoint for ItemsEndpoint {
                     })
                     .collect(),
             };
-            return Ok(json_face(json::render(&doc)?));
+            return Ok(cached_in_ledgers(json_repr(json::render(&doc)?), &ledgers));
         }
         // ★ **The footer states the PAGE and the TOTAL, and they are different numbers**
         // (ledger #419). Until 0.6.1 it said `50 item(s)` — the length of a page worded as a
@@ -2056,7 +2084,10 @@ impl Endpoint for ItemsEndpoint {
                 text.push_str(&format!("  {iri} — {}\n", wrong.join(", ")));
             }
         }
-        face(text, None, want)
+        Ok(cached_in_ledgers(
+            uncached_face(text, None, want)?,
+            &ledgers,
+        ))
     }
 
     fn name(&self) -> &str {
@@ -2168,7 +2199,7 @@ impl Endpoint for CountEndpoint {
             total = total.saturating_add(model::count_items(&client, &filter).await?);
         }
         if want == JSON {
-            return Ok(json_face(json::render(&json::CountDocument {
+            let doc = json::render(&json::CountDocument {
                 schema: json::SCHEMA,
                 ledger: Ledger::from_bindings(inv.bindings)?.name().to_string(),
                 ledgers: inv.inline_str("ledgers").is_ok().then(|| {
@@ -2178,9 +2209,13 @@ impl Endpoint for CountEndpoint {
                         .collect()
                 }),
                 total,
-            })?));
+            })?;
+            return Ok(cached_in_ledgers(json_repr(doc), &ledgers));
         }
-        face(format!("{total}\n"), None, want)
+        Ok(cached_in_ledgers(
+            uncached_face(format!("{total}\n"), None, want)?,
+            &ledgers,
+        ))
     }
 
     fn name(&self) -> &str {
