@@ -258,7 +258,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:item:{id}:about` | Sink · Delete | add / remove what it is about, title and body untouched | `about:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:sessions` | Source | every session summary in the ledger, newest first, paged; item ids only | `summaries:{ledger}` or `read:{ledger}` |
 | `…:{ledger}:sessions` | Sink | `plan` or `move` the summaries an earlier version left in the ledger graph into the session graph | `write:{ledger}` |
-| `…:{ledger}:item:{id}:history` | Source | every event on the item, oldest first, with what each edit changed | `read:{ledger}` |
+| `…:{ledger}:item:{id}:history` | Source | every event on the item, in commit order, with what each edit changed | `read:{ledger}` |
 | `…:{ledger}:history` | Sink | an import principal's past claim, release, edit and status events for one item; history only | `write:{ledger}`, and enrolled as `ledger:Importer` |
 | `urn:iki:ledger:ledgers` | Source | which ledgers exist | any `read:*` |
 | `urn:iki:ledger:policy:{name}` | Source · Exists | what a policy weighs | any `read:*` |
@@ -1072,9 +1072,10 @@ comment shown. Every item now ends with `omitted`, the sorted list of what that 
 Under `comments=last` it names `comments` only when the item had more than the one shown.
 
 The work left out is not done. `comments=none` (or `omit=comments`) runs no comments query at
-all; `comments=last` runs one that answers only the latest comment per item, choosing it in
-the query (no later comment on the same item, by time and then comment IRI, the order the
-full list uses) rather than reading every comment and dropping the rest.
+all; `comments=last` runs one that answers only the last comment per item, choosing it in
+the query (the highest `ledger:itemRevision`, or for an item whose comments all predate
+revisions, the latest time and then comment IRI: the order the full list uses, see "Commit
+order") rather than reading every comment and dropping the rest.
 
 These inputs shape the JSON face only. The plain face's rows are item lines with no body or
 comment in them, and the Turtle face is the items' triples, where a missing body would read as
@@ -1941,6 +1942,57 @@ $ source urn:iki:ledger:item:12:history
   raises the epoch so the stale holder's fenced writes are refused. Either ends the stall.
 - ⚠ **`lapse` and `stalled` are now reserved ledger names.**
 
+## Commit order: a per-item revision the store allocates, never a clock
+
+An item's comments, its history, `comments=last` and the hand-back a session summary attaches
+to are in **commit order** (ledger #4199). Through 0.26.0 they were in authored-time order,
+`dcterms:created` then IRI, and `created` is the clock of whichever kernel wrote the record: two
+hosts with skewed clocks writing to one store could list a later comment first, attach a
+session summary to an older hand-back, or show a release before the claim it ended
+(`docs/research/clock-ordering.md`, `tests/skew_research.rs`).
+
+Now every comment and every claim, release, lapse, status and edit event carries
+`ledger:itemRevision`, an integer the **store** allocates in the same update that writes the
+record: the item's own `ledger:itemRevision` (its latest) raised by one, starting at 1. The
+store applies one update request as one transaction under its write lock, so whichever write
+commits second takes the next number, whatever any host's clock says. It is in the graph, so a
+restart continues it, as it continues item numbers. A write that its guards refuse (a fence, a
+taken key, a deleted item) allocates nothing, and nor does a replay.
+
+- ⚠ **Per item, never a clock.** Revisions order the records of ONE item. Two items'
+  revisions are unrelated: do not compare them, and do not order a listing across items by
+  them. Item listings keep their `modified`/`created` sorts, which remain wall time.
+- **Wall time is kept**, for display, source chronology and the UTC daily counts:
+  `dcterms:created` is the authored time (an importer may claim it) and `ledger:committedAt`
+  the committing kernel's clock. Neither orders anything above.
+- **Legacy records keep today's order, labeled approximate.** A record written before ledger
+  #4199, or one an import principal recorded afterward as history only, has no revision, and
+  none is invented for it. Such records list first, in the old order (created, then IRI), then
+  every record with a revision by revision: a legacy record was committed before its item's
+  first revision was allocated, so the two groups keep commit order between them. Within the
+  legacy group the order is as approximate as it always was.
+- **A status event's `ledger:eventSequence` is unchanged**: it still numbers an item's status
+  events for the daily counts and close evidence.
+
+### What a client sees
+
+The JSON face stays `"schema": 1`: the change is additive. A comment (in `item:{id}`, `items`,
+`next`) and a history event gain `item_revision`, the record's revision, and a record read back
+with none gains `"order": "approximate"`. A write's own answer (`commented`, `noted`, a close's
+note) carries neither, since it is rendered before the store allocates the revision. The plain
+and Turtle faces have no new text; the plain face lists in the new order.
+
+A client on the old shape sees the same fields, and ignores the two new ones. What it may
+notice is **order**: on an item written from hosts with skewed clocks, or with an imported
+comment whose claimed date is old, comments and history now come in the order they were
+committed rather than the order their stamps sort in, and `comments=last` names the last one
+committed. A client that wants source chronology sorts by `time` (a comment) or `at` (an
+event) itself.
+
+- ⚠ **One Rust API change**: `model::Comment` gains a public field, `revision`. It is not
+  `#[non_exhaustive]`, so code outside this crate that builds a `model::Comment` with a struct
+  literal must add the field. Nothing else public changes.
+
 ## Who worked on it: claim, release, hand-back and edit events
 
 A claim is current state: a release or a close retracts `claimedBy` and the rest, so until
@@ -2007,7 +2059,8 @@ replaced in place and nothing else remembers them:
   event on another item keeps naming the deleted item's IRI, as a tombstone does. An item's own
   events go with it.
 
-`…:item:{id}:history` shows them all under `read:{ledger}`, in plain text and JSON, oldest first:
+`…:item:{id}:history` shows them all under `read:{ledger}`, in plain text and JSON, in commit order
+(see "Commit order" below):
 each claim, release, close and reopen as well as each edit. It names the other item of a link
 across ledgers by its IRI, which the link already shows this ledger's readers, and looks up
 nothing else of it; the target's history has no event for a link it only mirrors.

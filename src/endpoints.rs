@@ -1108,6 +1108,36 @@ fn batch(operations: &[String]) -> String {
         .join(" ;\n")
 }
 
+/// The operation that gives `node`, a comment or event just written on `item`, the item's next
+/// [`ledger:itemRevision`](v::ITEM_REVISION) (ledger #4199): the item's own revision raised by one,
+/// starting at 1. It goes LAST in the batch that writes `node`, in the same store update.
+///
+/// ★ **Commit order comes from the store, never a clock.** The store applies one update request
+/// as one transaction under its write lock, so of two writers the one whose update commits
+/// second reads the first's revision and takes the next, whatever either host's clock says.
+/// The guard is the node itself: the operation matches only once `node` is in the graph on
+/// `item` and has no revision yet, so it lands exactly when the write's own guards let the node
+/// land, and a replay, whose node is already there, allocates nothing. Every pattern names its
+/// subject, so the store's scoped door copies only the item's and the node's quads.
+///
+/// ⚠ Per item: two items' revisions are unrelated, and no reader compares them.
+pub(crate) fn revise(client: &StoreClient<'_, '_>, item: &str, node: &str) -> String {
+    format!(
+        "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} BIND(COALESCE(?revisionWas, 0) + 1 AS ?revisionNext) }}",
+        client.in_graph(&format!("<{item}> <{}> ?revisionWas", v::ITEM_REVISION)),
+        client.in_graph(&format!(
+            "<{item}> <{rev}> ?revisionNext . <{node}> <{rev}> ?revisionNext",
+            rev = v::ITEM_REVISION
+        )),
+        client.in_graph(&format!(
+            "<{node}> <{on}> <{item}> . FILTER NOT EXISTS {{ <{node}> <{rev}> ?revisionAny }} \
+             OPTIONAL {{ <{item}> <{rev}> ?revisionWas }}",
+            on = v::ON_ITEM,
+            rev = v::ITEM_REVISION
+        )),
+    )
+}
+
 /// Remove every value of a property.
 fn retract(client: &StoreClient<'_, '_>, item: &str, predicate: &str) -> String {
     retract_when(client, item, predicate, "")
@@ -1575,6 +1605,7 @@ async fn write_keyed_comment(
                 insert_on_live(client, &[item], &triples),
                 touch_dated(client, item, now, who.created, ""),
                 handback_update(client, item, &comment, handback, "", now),
+                revise(client, item, &comment),
             ]),
         )
         .await?;
@@ -1658,6 +1689,7 @@ async fn write_keyed_comment(
                 "INSERT {{ {} }} WHERE {{ {free} {holder} {note_where} }}",
                 client.in_graph(&triples)
             ),
+            revise(client, item, &comment),
         ]))
         .await?;
     still_live(client, item).await?;
@@ -1681,6 +1713,8 @@ fn written(iri: &str, item: &str, text: &str, who: &Attribution, now: u64) -> mo
         note: None,
         decision: None,
         acks: Vec::new(),
+        // The store allocates it in the write, after this answer is rendered.
+        revision: None,
     }
 }
 
@@ -4937,7 +4971,12 @@ async fn existing_comment(
             "existing",
             json::item_ref(ledger, item.number, &item.iri),
         );
-        answer.comment = Some(json::comment(found));
+        // A write's answer, the same whether this request wrote the comment or a resend
+        // found it: neither carries the revision, which the store allocates after a write's
+        // answer is rendered (ledger #4199).
+        let mut comment = json::comment(found);
+        comment.item_revision = None;
+        answer.comment = Some(comment);
         answer.key = Some(key.to_string());
         return Ok(json_repr(json::render(&answer)?));
     }
@@ -5640,20 +5679,23 @@ fn release_record(
         when = datetime(now),
     );
     triples.push_str(&who.triples(record, now));
-    format!(
-        "INSERT {{ {} }} WHERE {{ {} }}",
-        client.in_graph(&triples),
-        client.in_graph(&format!(
-            "{live} {guard} <{item}> <{by}> ?holder . OPTIONAL {{ <{item}> <{principal}> ?principal }}\n\
-             BIND(CONCAT({prefix}, STR(?holder), \
-             COALESCE(CONCAT(\" (as \", STR(?principal), \")\"), \"\"), {suffix}) AS ?body)",
-            live = live(item),
-            by = v::CLAIMED_BY,
-            principal = v::CLAIM_PRINCIPAL,
-            prefix = literal(RELEASE_PREFIX),
-            suffix = literal(RELEASE_SUFFIX),
-        ))
-    )
+    batch(&[
+        format!(
+            "INSERT {{ {} }} WHERE {{ {} }}",
+            client.in_graph(&triples),
+            client.in_graph(&format!(
+                "{live} {guard} <{item}> <{by}> ?holder . OPTIONAL {{ <{item}> <{principal}> ?principal }}\n\
+                 BIND(CONCAT({prefix}, STR(?holder), \
+                 COALESCE(CONCAT(\" (as \", STR(?principal), \")\"), \"\"), {suffix}) AS ?body)",
+                live = live(item),
+                by = v::CLAIMED_BY,
+                principal = v::CLAIM_PRINCIPAL,
+                prefix = literal(RELEASE_PREFIX),
+                suffix = literal(RELEASE_SUFFIX),
+            ))
+        ),
+        revise(client, item, record),
+    ])
 }
 
 /// The filter that leaves out an imported `event` (ledger #2843): history only, so it counts
@@ -5759,21 +5801,24 @@ fn release_event_at(
         kind = v::CLAIM_KIND,
         at = v::CLAIMED_AT,
     ));
-    format!(
-        "INSERT {{ {} }} WHERE {{ {} }}",
-        client.in_graph(&triples),
-        client.in_graph(&format!(
-            "{live} {guard}\n<{item}> <{by}> ?holder .\n\
-             OPTIONAL {{ <{item}> <{principal}> ?principal }}\n\
-             OPTIONAL {{ <{item}> <{kind}> ?kind }}\n\
-             OPTIONAL {{ <{item}> <{at}> ?claimedAt }}",
-            live = live(item),
-            by = v::CLAIMED_BY,
-            principal = v::CLAIM_PRINCIPAL,
-            kind = v::CLAIM_KIND,
-            at = v::CLAIMED_AT,
-        ))
-    )
+    batch(&[
+        format!(
+            "INSERT {{ {} }} WHERE {{ {} }}",
+            client.in_graph(&triples),
+            client.in_graph(&format!(
+                "{live} {guard}\n<{item}> <{by}> ?holder .\n\
+                 OPTIONAL {{ <{item}> <{principal}> ?principal }}\n\
+                 OPTIONAL {{ <{item}> <{kind}> ?kind }}\n\
+                 OPTIONAL {{ <{item}> <{at}> ?claimedAt }}",
+                live = live(item),
+                by = v::CLAIMED_BY,
+                principal = v::CLAIM_PRINCIPAL,
+                kind = v::CLAIM_KIND,
+                at = v::CLAIMED_AT,
+            ))
+        ),
+        revise(client, item, event),
+    ])
 }
 
 /// An edit event (ledger #2819): an edit that creates no node of its own (`kind`: `label`,
@@ -5827,6 +5872,7 @@ fn edit_event_naming(
         ends,
         &edit_event_triples(&event, item, kind, who, now),
     )];
+    operations.push(revise(client, item, &event));
     operations.extend(objects.iter().map(|object| {
         format!(
             "INSERT {{ {} }} WHERE {{ {} }}",
@@ -6225,6 +6271,7 @@ fn claim_update(
             client.in_graph(&triples),
             client.in_graph(&format!("{} {open}\n{unclaimed}", live(item)))
         ));
+        ops.push(revise(client, item, &event));
     }
     ops.push(format!(
         "DELETE {{ {} }}\nINSERT {{ {} }}\nWHERE {{ {} }}",
@@ -7418,6 +7465,7 @@ impl Endpoint for LabelEndpoint {
                 &batch(&[
                     removal,
                     touch_dated(&client, &item.iri, now, claimed, &recorded),
+                    revise(&client, &item.iri, &event),
                 ]),
             )
             .await?;

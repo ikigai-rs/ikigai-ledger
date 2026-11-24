@@ -105,7 +105,7 @@ fn edits_in(kernel: &Kernel, graph: &str, number: i64) -> Vec<Recorded> {
         .into_values()
         .map(|mut terms| {
             let kind = terms.remove("editKind").unwrap().remove(0);
-            for bookkeeping in ["onItem", "committer", "committedAt"] {
+            for bookkeeping in ["onItem", "committer", "committedAt", "itemRevision"] {
                 terms.remove(bookkeeping);
             }
             for values in terms.values_mut() {

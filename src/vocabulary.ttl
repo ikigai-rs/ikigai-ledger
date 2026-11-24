@@ -802,6 +802,11 @@ ledger:eventSequence a rdf:Property ;
     rdfs:range xsd:integer ;
     rdfs:comment "The graph-local ordering of an item's status events, disambiguating transitions at the same kernel-clock millisecond. Backfill starts at zero." .
 
+ledger:itemRevision a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "item revision" ;
+    rdfs:comment "An item's durable commit order (ledger #4199). On a ledger:Comment or an event (ledger:StatusEvent, ledger:EditEvent, ledger:ClaimEvent, ledger:ReleaseEvent, ledger:LapseEvent) that is ledger:onItem an item: the position the store gave the record in that item's sequence, allocated in the same update that wrote it, under the store's write lock, so it follows commit order whatever any host's clock says. On the item: the latest revision allocated, which the next record raises by one; starts at 1, never lowered, and persisted with the item. ⚠ PER ITEM: two items' revisions are unrelated and must never be compared as a clock. Wall time stays in dcterms:created (authored, and possibly claimed by an importer) and ledger:committedAt (the committing kernel's clock), for display and source chronology. Unrelated to ledger:revision, the commit an item was filed against. A record written before ledger #4199, or one an import principal recorded as history only, carries none: such legacy records keep the order created, then IRI, which is approximate, and list before every record that has a revision; none is invented for them." .
+
 # ---- aliases (ledger #2828) ----------------------------------------------------
 # Written in ONE deployment-wide graph, urn:iki:alias:graph, never in a ledger's graph:
 # an alias is unique per scheme across every ledger, and uniqueness is decided by one

@@ -103,6 +103,8 @@ macro_rules! term {
 term! {
     /// `ledger:eventSequence`
     EVENT_SEQUENCE => "eventSequence";
+    /// `ledger:itemRevision` — an item's durable commit order, allocated in the recording update (ledger #4199).
+    ITEM_REVISION => "itemRevision";
     /// `ledger:closedAt`
     CLOSED_AT => "closedAt";
     /// `ledger:closedAtSource`
