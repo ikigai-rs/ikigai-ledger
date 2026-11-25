@@ -111,7 +111,7 @@ impl NoteEndpoint {
         let want = wanted_face(inv, &WRITE_FACES)?;
         // The sender is the verified principal, never someone it names.
         for name in ["author", "created"] {
-            if inv.inline_str(name).is_ok() {
+            if inv.optional_str(name)?.is_some() {
                 return Err(Error::InvalidArgument {
                     name: name.to_string(),
                     detail: format!(
@@ -121,11 +121,7 @@ impl NoteEndpoint {
                 });
             }
         }
-        let key = inv
-            .inline_str("key")
-            .ok()
-            .map(model::parse_key)
-            .transpose()?;
+        let key = inv.optional_str("key")?.map(model::parse_key).transpose()?;
         let epoch = parse_epoch(inv)?.ok_or_else(|| Error::InvalidArgument {
             name: "epoch".to_string(),
             detail: "a note is addressed to one claim: `epoch=`, the current claim's epoch \
@@ -290,7 +286,7 @@ impl Endpoint for NotesEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv, &NOTES_FACES)?;
         let epoch = parse_epoch(inv)?;
-        let after = inv.inline_str("after").ok().map(str::trim);
+        let after = inv.optional_str("after")?.map(str::trim);
         let item = require_item(&client, flight::part_id(inv)?).await?;
         let short = item.short();
         let (Some(holder), Some(current)) = (&item.claimed_by, item.claim_epoch) else {
@@ -450,7 +446,7 @@ pub(super) async fn unread(client: &StoreClient<'_, '_>, item: &str, epoch: u64)
 
 /// `acks=` on a comment: the note IRIs it acknowledges, which need `epoch=`.
 pub(super) fn parse_acks(inv: &Invocation<'_>, epoch: Option<u64>) -> Result<Vec<String>> {
-    let Ok(raw) = inv.inline_str("acks") else {
+    let Some(raw) = inv.optional_str("acks")? else {
         return Ok(Vec::new());
     };
     let mut acks = Vec::new();

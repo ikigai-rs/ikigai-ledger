@@ -230,14 +230,15 @@ pub async fn resolve(
 ) -> Result<Attribution> {
     let committer = Attribution::committer(inv)?.committer;
     let author = inv
-        .inline_str("author")
-        .ok()
+        .optional_str("author")?
         .map(str::trim)
         .filter(|a| !a.is_empty());
-    let date_args: Vec<(&str, &str)> = ["created", "modified"]
-        .into_iter()
-        .filter_map(|name| inv.inline_str(name).ok().map(|value| (name, value)))
-        .collect();
+    let mut date_args = Vec::new();
+    for name in ["created", "modified"] {
+        if let Some(value) = inv.optional_str(name)? {
+            date_args.push((name, value));
+        }
+    }
 
     // An importer is looked up at most once, and only when something needs it.
     let mut importer: Option<bool> = None;
@@ -437,7 +438,7 @@ pub async fn resolve_claimed(
     filed: u64,
     now: u64,
 ) -> Result<Option<u64>> {
-    let Ok(value) = inv.inline_str(name) else {
+    let Some(value) = inv.optional_str(name)? else {
         return Ok(None);
     };
     let Some(committer) = Attribution::committer(inv)?.committer else {
