@@ -164,6 +164,7 @@ fn event(iri: String, node: &Node, at: Option<u64>, revision: Option<u64>) -> js
             v::close_reason_name(&reason).map(str::to_string)
         }),
         evidence: node.all(v::EVIDENCE),
+        caused_by: node.all(v::CAUSED_BY),
         epoch: node
             .one(v::LAPSED_EPOCH)
             .and_then(|epoch| epoch.parse().ok()),
@@ -200,6 +201,9 @@ fn closed(event: &json::HistoryEvent) -> String {
     };
     if !rest.is_empty() {
         said.push_str(&format!(", evidence {}", join(&rest)));
+    }
+    if !event.caused_by.is_empty() {
+        said.push_str(&format!(", caused by {}", event.caused_by.join(" ")));
     }
     said
 }

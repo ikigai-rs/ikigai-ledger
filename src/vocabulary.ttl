@@ -344,6 +344,10 @@ ledger:related a rdf:Property ;
     rdfs:label "related" ;
     rdfs:comment "See also. Symmetric in intent; written one way and queried both." .
 
+ledger:causedBy a rdf:Property ;
+    rdfs:label "caused by" ;
+    rdfs:comment "On a defect item, the item that introduced it; on a close event, an item or pull request that introduced it. Informational only; it does not affect readiness." .
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Deletion
 # ═══════════════════════════════════════════════════════════════════════════
@@ -736,7 +740,7 @@ ledger:editTarget a rdf:Property ;
 
 ledger:editLinkType a rdf:Property ;
     rdfs:label "edit link type" ;
-    rdfs:comment "On a ledger:EditEvent of kind link or unlink, the type of the link, as a link predicate (ledger:blocks, ledger:parent, ledger:related)." .
+    rdfs:comment "On a ledger:EditEvent of kind link or unlink, the type of the link, as a link predicate (ledger:blocks, ledger:parent, ledger:related, ledger:causedBy)." .
 
 ledger:editField a rdf:Property ;
     rdfs:range xsd:string ;
@@ -749,7 +753,7 @@ ledger:editField a rdf:Property ;
 
 ledger:Link a rdfs:Class ;
     rdfs:label "cross-ledger link" ;
-    rdfs:comment "An edge from an item to an item of ANOTHER ledger, written in the subject's graph: ledger:onItem the subject, ledger:linkType, ledger:linkTarget, with ledger:committer and ledger:committedAt. Admitted by write on the subject's ledger and urn:cap:ledger:link-in on the target's. An edge within one ledger stays a plain ledger:blocks, ledger:parent or ledger:related triple. Skolemized as {subject}:link:{type}:{target ledger}:{target id}." .
+    rdfs:comment "An edge from an item to an item of ANOTHER ledger, written in the subject's graph: ledger:onItem the subject, ledger:linkType, ledger:linkTarget, with ledger:committer and ledger:committedAt. Admitted by write on the subject's ledger and urn:cap:ledger:link-in on the target's. An edge within one ledger stays a plain ledger:blocks, ledger:parent, ledger:related or ledger:causedBy triple. Skolemized as {subject}:link:{type}:{target ledger}:{target id}." .
 
 ledger:Mirror a rdfs:Class ;
     rdfs:label "cross-ledger mirror" ;
@@ -757,7 +761,7 @@ ledger:Mirror a rdfs:Class ;
 
 ledger:linkType a rdf:Property ;
     rdfs:label "link type" ;
-    rdfs:comment "The edge a ledger:Link or a ledger:Mirror is: ledger:blocks, ledger:parent or ledger:related, as an IRI." .
+    rdfs:comment "The edge a ledger:Link or a ledger:Mirror is: ledger:blocks, ledger:parent, ledger:related or ledger:causedBy, as an IRI." .
 
 ledger:linkTarget a rdf:Property ;
     rdfs:domain ledger:Link ;

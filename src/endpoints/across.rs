@@ -250,6 +250,7 @@ async fn decorate_each(
             let list = match predicate.as_str() {
                 p if p == v::BLOCKS => &mut item.blocks,
                 p if p == v::PARENT => &mut item.parents,
+                p if p == v::CAUSED_BY => &mut item.caused_by,
                 _ => &mut item.related,
             };
             if !list.contains(&target) {

@@ -353,6 +353,8 @@ pub struct Item {
     pub children: Vec<String>,
     /// See-also.
     pub related: Vec<String>,
+    /// Items that introduced the defect reported here.
+    pub caused_by: Vec<String>,
     /// Edges from items of OTHER ledgers into this one, as this ledger's mirror of them holds
     /// them: each subject's IRI and whether it is open, and nothing else (ledger #2829). Filled
     /// by the item's own read only, so a listing carries none. Added in 0.17.0.
@@ -548,6 +550,9 @@ impl Item {
         for child in &self.children {
             out.push_str(&format!("  child:    {child}\n"));
         }
+        for target in &self.caused_by {
+            out.push_str(&format!("  caused by: {target}\n"));
+        }
         for target in &self.related {
             out.push_str(&format!("  related:  {target}\n"));
         }
@@ -731,6 +736,7 @@ impl Item {
             (v::BLOCKS, &self.blocks),
             (v::PARENT, &self.parents),
             (v::RELATED, &self.related),
+            (v::CAUSED_BY, &self.caused_by),
         ] {
             for value in values {
                 if let Ok(node) = NamedNode::new(value) {
@@ -2230,7 +2236,14 @@ pub async fn complete(client: &StoreClient<'_, '_>, items: &mut [Item]) -> Resul
 const COMPLETE_BY_PAGE: usize = 500;
 
 /// The multi-valued predicates a full record carries.
-const MULTIVALUED: &[&str] = &[v::LABEL, v::ABOUT, v::BLOCKS, v::PARENT, v::RELATED];
+const MULTIVALUED: &[&str] = &[
+    v::LABEL,
+    v::ABOUT,
+    v::BLOCKS,
+    v::PARENT,
+    v::RELATED,
+    v::CAUSED_BY,
+];
 
 /// [`fill_multivalued`] for a set too large to name: one scan per predicate in `predicates`
 /// over the whole graph, joined to `items` in Rust, so its cost is linear in the graph. The
@@ -2267,6 +2280,7 @@ async fn fill_by_scan(
                 p if p == v::BLOCKS => &mut item.blocks,
                 p if p == v::PARENT => &mut item.parents,
                 p if p == v::RELATED => &mut item.related,
+                p if p == v::CAUSED_BY => &mut item.caused_by,
                 _ => continue,
             };
             list.push(o.value.clone());
@@ -2299,6 +2313,7 @@ async fn fill_by_scan(
         item.blocks.sort();
         item.parents.sort();
         item.related.sort();
+        item.caused_by.sort();
     }
     Ok(())
 }
@@ -3152,12 +3167,13 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
             "SELECT ?item ?p ?o WHERE {{ {} }}",
             client.in_graph(&format!(
                 "VALUES ?item {{ {values} }}\n?item ?p ?o .\n\
-                 FILTER(?p IN (<{}>, <{}>, <{}>, <{}>, <{}>))",
+                 FILTER(?p IN (<{}>, <{}>, <{}>, <{}>, <{}>, <{}>))",
                 v::LABEL,
                 v::ABOUT,
                 v::BLOCKS,
                 v::PARENT,
                 v::RELATED,
+                v::CAUSED_BY,
             ))
         );
         rows.extend(client.select(&query).await?);
@@ -3208,6 +3224,7 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
                 p if p == v::BLOCKS => item.blocks.push(object.clone()),
                 p if p == v::PARENT => item.parents.push(object.clone()),
                 p if p == v::RELATED => item.related.push(object.clone()),
+                p if p == v::CAUSED_BY => item.caused_by.push(object.clone()),
                 _ => {}
             }
         }
@@ -3216,6 +3233,7 @@ async fn fill_multivalued(client: &StoreClient<'_, '_>, items: &mut [Item]) -> R
         item.blocks.sort();
         item.parents.sort();
         item.related.sort();
+        item.caused_by.sort();
     }
     Ok(())
 }
@@ -3392,6 +3410,7 @@ fn item_from_rows(rows: &[&Row]) -> Option<Item> {
         parents: Vec::new(),
         children: Vec::new(),
         related: Vec::new(),
+        caused_by: Vec::new(),
         mirrored: Vec::new(),
         defects,
         states,
@@ -3508,6 +3527,7 @@ mod tests {
             parents: Vec::new(),
             children: Vec::new(),
             related: Vec::new(),
+            caused_by: Vec::new(),
             mirrored: Vec::new(),
             defects: Vec::new(),
             states: Vec::new(),

@@ -19,7 +19,7 @@
 //! urn:iki:ledger:{ledger}:reopen     Sink                undo a close               write
 //! urn:iki:ledger:{ledger}:claim      Source Sink Delete  epoch check / take / lease  read/write
 //! urn:iki:ledger:{ledger}:defer      Sink Delete         not now / now again        write
-//! urn:iki:ledger:{ledger}:link       Sink Delete         blocks / parent / related  write
+//! urn:iki:ledger:{ledger}:link       Sink Delete         blocks / parent / related / caused-by  write
 //! urn:iki:ledger:{ledger}:label      Sink Delete         tag / untag                write
 //! urn:iki:ledger:{ledger}:purge      Delete              destroy, leaving evidence  purge
 //! urn:iki:ledger:{ledger}:next       Source              the ready set, ranked      read

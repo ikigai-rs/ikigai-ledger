@@ -190,7 +190,7 @@ pub struct Claim {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Link {
-    /// `blocks`, `parent` or `related` — the words `urn:iki:ledger:link type=` takes.
+    /// `blocks`, `parent`, `related` or `caused-by` — the words `urn:iki:ledger:link type=` takes.
     #[serde(rename = "type")]
     pub kind: String,
     /// The item it points at.
@@ -331,7 +331,7 @@ pub struct Item {
     /// When it last changed — `created` standing in when `defects` names
     /// `dcterms:modified`.
     pub modified: String,
-    /// Outbound edges: `blocks` first, then `parent`, then `related`, each sorted by IRI.
+    /// Outbound edges: `blocks` first, then `parent`, then `related`, then `caused-by`, each sorted by IRI.
     pub links: Vec<Link>,
     /// The INBOUND `parent` edges: the items that are part of this one, every status, sorted by
     /// IRI (ledger #1454). Added in 0.12.0; `#[serde(default)]`, so an earlier document reads
@@ -786,6 +786,9 @@ pub struct Answer {
     /// Added in 0.18.0 (ledger #2842).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
+    /// Items or pull requests that introduced the defect.
+    #[serde(default, rename = "causedBy", skip_serializing_if = "Vec::is_empty")]
+    pub caused_by: Vec<String>,
     /// The items in `evidence` a `duplicate` or `superseded` close names as its target.
     /// Added in 0.18.0 (ledger #2842).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -900,7 +903,7 @@ pub struct HistoryEvent {
         deserialize_with = "said_or_null"
     )]
     pub lifecycle_version: Option<Option<String>>,
-    /// A `link` or `unlink`'s type: `blocks`, `parent` or `related`.
+    /// A `link` or `unlink`'s type: `blocks`, `parent`, `related` or `caused-by`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_type: Option<String>,
     /// A `link` or `unlink`'s other item, or an `about` or `unabout`'s targets: IRIs alone.
@@ -920,6 +923,9 @@ pub struct HistoryEvent {
     /// Added in 0.18.0 (ledger #2842).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
+    /// Items or pull requests that introduced the defect.
+    #[serde(default, rename = "causedBy", skip_serializing_if = "Vec::is_empty")]
+    pub caused_by: Vec<String>,
     /// The epoch of the claim a `lapse` recorded; absent for a claim taken before epochs.
     /// Added with lapse events (ledger #3709).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1168,6 +1174,7 @@ pub(crate) fn item(
         ("blocks", &item.blocks),
         ("parent", &item.parents),
         ("related", &item.related),
+        ("caused-by", &item.caused_by),
     ]
     .into_iter()
     .flat_map(|(kind, targets)| {
@@ -1301,6 +1308,7 @@ pub(crate) async fn items(
                 .iter()
                 .chain(&i.parents)
                 .chain(&i.related)
+                .chain(&i.caused_by)
                 .chain(&i.children)
         })
         .cloned()
@@ -1421,6 +1429,7 @@ pub(crate) fn answer(ledger: &Ledger, outcome: &str, item: ItemRef) -> Answer {
         already_closed: None,
         handback: None,
         evidence: Vec::new(),
+        caused_by: Vec::new(),
         targets: Vec::new(),
         recorded: None,
         already_recorded: None,

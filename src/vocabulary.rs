@@ -260,6 +260,8 @@ term! {
     PARENT => "parent";
     /// `ledger:related`
     RELATED => "related";
+    /// `ledger:causedBy` — the item or pull request that introduced a defect.
+    CAUSED_BY => "causedBy";
     /// `ledger:deletedItem`
     DELETED_ITEM => "deletedItem";
     /// `ledger:recoverable`
@@ -412,7 +414,7 @@ term! {
     LINK_CLASS => "Link";
     /// `ledger:Mirror` — what the target's graph knows of such an edge (ledger #2829).
     MIRROR_CLASS => "Mirror";
-    /// `ledger:linkType` — `ledger:blocks`, `ledger:parent` or `ledger:related`.
+    /// `ledger:linkType` — `ledger:blocks`, `ledger:parent`, `ledger:related` or `ledger:causedBy`.
     LINK_TYPE => "linkType";
     /// `ledger:linkTarget` — the item of another ledger a `ledger:Link` points at.
     LINK_TARGET => "linkTarget";
@@ -476,8 +478,12 @@ pub const CLOSE_REASONS: [(&str, &str); 5] = [
 ];
 
 /// The link types, as `(short name, predicate IRI)`.
-pub const LINK_TYPES: [(&str, &str); 3] =
-    [("blocks", BLOCKS), ("parent", PARENT), ("related", RELATED)];
+pub const LINK_TYPES: [(&str, &str); 4] = [
+    ("blocks", BLOCKS),
+    ("parent", PARENT),
+    ("related", RELATED),
+    ("caused-by", CAUSED_BY),
+];
 
 /// The IRI for a close reason's short name.
 pub fn close_reason(name: &str) -> Option<&'static str> {

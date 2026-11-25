@@ -72,6 +72,54 @@ pub(super) async fn resolve(
     Ok(resolved)
 }
 
+/// Resolve causes before closing, accepting item references and GitHub pull request shorthand.
+pub(super) async fn causes(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    closing: &Item,
+) -> Result<Vec<Evidence>> {
+    let mut causes: Vec<Evidence> = Vec::new();
+    for reference in inv.inline_str("causedBy").unwrap_or("").split_whitespace() {
+        let pr = reference.rsplit_once('#').and_then(|(repo, number)| {
+            let (owner, name) = repo.split_once('/')?;
+            if owner.is_empty()
+                || name.is_empty()
+                || name.contains('/')
+                || number.is_empty()
+                || !number.bytes().all(|b| b.is_ascii_digit())
+            {
+                return None;
+            }
+            Some(format!("https://github.com/{owner}/{name}/pull/{number}"))
+        });
+        let target = pr.as_deref().unwrap_or(reference);
+        if pr.is_none()
+            && !names_item(target)
+            && across::other_ledger(client.ledger(), target).is_none()
+        {
+            return Err(Error::InvalidArgument { name: "causedBy".into(), detail: format!("`{reference}` is not an item or owner/repo#N pull request. Nothing was changed") });
+        }
+        let cause = one(inv, client, target).await.map_err(|e| match e {
+            Error::InvalidArgument { detail, .. } => Error::InvalidArgument {
+                name: "causedBy".into(),
+                detail: detail.replace("evidence", "cause"),
+            },
+            Error::NotFound(detail) => Error::NotFound(detail.replace("evidence", "cause")),
+            other => other,
+        })?;
+        if cause.iri == closing.iri {
+            return Err(Error::InvalidArgument {
+                name: "causedBy".into(),
+                detail: "An item cannot cause itself. Nothing was changed".into(),
+            });
+        }
+        if !causes.iter().any(|held| held.iri == cause.iri) {
+            causes.push(cause);
+        }
+    }
+    Ok(causes)
+}
+
 async fn one(
     inv: &Invocation<'_>,
     client: &StoreClient<'_, '_>,
@@ -147,6 +195,7 @@ pub(super) async fn refuse_without_a_close_event(
     client: &StoreClient<'_, '_>,
     item: &Item,
     evidence: &[Evidence],
+    argument: &str,
 ) -> Result<()> {
     if evidence.is_empty() || item.open {
         return Ok(());
@@ -161,12 +210,22 @@ pub(super) async fn refuse_without_a_close_event(
         return Ok(());
     }
     Err(Error::InvalidArgument {
-        name: "evidence".to_string(),
+        name: argument.to_string(),
         detail: format!(
             "{} is closed, but its close was recorded with no status event, so there is nothing \
-             to put the evidence on. Nothing was changed. To record it, reopen the item and \
-             close it again with this evidence",
-            item.short()
+             to put the {} on. Nothing was changed. To record it, reopen the item and \
+             close it again with this {}",
+            item.short(),
+            if argument == "evidence" {
+                "evidence"
+            } else {
+                "cause"
+            },
+            if argument == "evidence" {
+                "evidence"
+            } else {
+                "cause"
+            }
         ),
     })
 }
@@ -181,11 +240,15 @@ pub(super) fn record(
     events: &counts::StatusEvents,
     reason: &str,
     evidence: &[Evidence],
+    causes: &[Evidence],
     guard: &str,
 ) -> String {
     let mut insert = format!("?standing <{}> <{reason}> .", v::CLOSED_REASON);
     for one in evidence {
         insert.push_str(&format!(" ?standing <{}> <{}> .", v::EVIDENCE, one.iri));
+    }
+    for one in causes {
+        insert.push_str(&format!(" ?standing <{}> <{}> .", v::CAUSED_BY, one.iri));
     }
     format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} }}",

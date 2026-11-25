@@ -12,7 +12,7 @@
 //! urn:iki:ledger:{ledger}:reopen         Sink                undo a close
 //! urn:iki:ledger:{ledger}:claim          Source Sink Delete  is an epoch current / take it / hand it back
 //! urn:iki:ledger:{ledger}:defer          Sink Delete         not now / now again
-//! urn:iki:ledger:{ledger}:link           Sink Delete         blocks / parent / related
+//! urn:iki:ledger:{ledger}:link           Sink Delete         blocks / parent / related / caused-by
 //! urn:iki:ledger:{ledger}:label          Sink Delete         tag / untag
 //! urn:iki:ledger:{ledger}:purge          Delete              destroy, leaving a tombstone
 //! urn:iki:ledger:{ledger}:next           Source              the ready set, ranked
@@ -3275,11 +3275,15 @@ impl Selector {
     }
 
     /// The edges pointing at the item that go with it: every one but another item's history.
-    fn inbound_filter(predicate: &str, also: &str) -> String {
+    fn inbound_filter(subject: &str, predicate: &str, also: &str) -> String {
         format!(
-            "FILTER({predicate} NOT IN (<{}>, <{}>{also}))",
+            "FILTER({predicate} NOT IN (<{}>, <{}>{also}) && \
+             ({predicate} != <{}> || NOT EXISTS {{ {subject} <{}> <{}> }}))",
             v::EDIT_TARGET,
-            v::EVIDENCE
+            v::EVIDENCE,
+            v::CAUSED_BY,
+            v::ext::TYPE,
+            v::STATUS_EVENT_CLASS
         )
     }
 
@@ -3293,7 +3297,7 @@ impl Selector {
                     format!("{{ {item} ?p ?o BIND({item} AS ?s) }}"),
                     format!(
                         "{{ ?s ?p {item} {} BIND({item} AS ?o) }}",
-                        Self::inbound_filter("?p", "")
+                        Self::inbound_filter("?s", "?p", "")
                     ),
                 ];
                 if !dependents.is_empty() {
@@ -3306,10 +3310,13 @@ impl Selector {
             }
             Selector::Whole { item } => format!(
                 "?s ?p ?o . FILTER(?s = {item} || (?o = {item} && ?p NOT IN (<{target}>, \
-                 <{evidence}>)) || EXISTS {{ {dependent} }})",
+                 <{evidence}>) && (?p != <{caused_by}> || NOT EXISTS {{ ?s <{type_}> <{status_event}> }})) || EXISTS {{ {dependent} }})",
                 dependent = Self::dependent_pattern("?s", item),
                 target = v::EDIT_TARGET,
                 evidence = v::EVIDENCE,
+                caused_by = v::CAUSED_BY,
+                type_ = v::ext::TYPE,
+                status_event = v::STATUS_EVENT_CLASS,
             ),
         }
     }
@@ -3336,6 +3343,7 @@ impl Selector {
                     format!(
                         "{{ ?s1 ?p1 {item} {} }}",
                         Self::inbound_filter(
+                            "?s1",
                             "?p1",
                             &format!(", <{}>, <{}>", v::ON_ITEM, v::SESSION_ITEM),
                         )
@@ -5092,7 +5100,9 @@ impl CloseEndpoint {
         })?;
         // What closed it (ledger #2842), every value checked before anything is written.
         let evidence = evidence::resolve(inv, client, &item).await?;
-        evidence::refuse_without_a_close_event(client, &item, &evidence).await?;
+        let causes = evidence::causes(inv, client, &item).await?;
+        evidence::refuse_without_a_close_event(client, &item, &evidence, "evidence").await?;
+        evidence::refuse_without_a_close_event(client, &item, &causes, "causedBy").await?;
         // A holder's fenced close (ledger #3205) closes only under the claim it names.
         check_fence(&item, epoch)?;
         // The configured write shapes (ledger #3724), on the close's would-be status event.
@@ -5119,6 +5129,13 @@ impl CloseEndpoint {
                         event.clone(),
                         named(v::EVIDENCE),
                         named(&one.iri),
+                    ));
+                }
+                for cause in &causes {
+                    triples.push(oxrdf::Triple::new(
+                        event.clone(),
+                        named(v::CAUSED_BY),
+                        named(&cause.iri),
                     ));
                 }
                 crate::shapes::ntriples(&triples)
@@ -5241,7 +5258,9 @@ impl CloseEndpoint {
                 ),
                 // After the status, so it finds the close that stands: this one's event, or, when
                 // the item was already closed, that close's.
-                evidence::record(client, &item.iri, &events, reason, &evidence, &fence),
+                evidence::record(
+                    client, &item.iri, &events, reason, &evidence, &causes, &fence,
+                ),
                 // A close dated at the source moves `modified` only forward (ledger #2928).
                 touch_dated(client, &item.iri, now, claimed, &fence),
                 // And a hand-back is answered: closed work awaits nobody (ledger #1199).
@@ -5309,19 +5328,31 @@ impl CloseEndpoint {
                 answer.released = released.clone();
                 answer.already_closed = (!closed_here).then_some(true);
                 evidence::answer(&mut answer, name, &evidence);
+                answer.caused_by = causes.iter().map(|cause| cause.iri.clone()).collect();
                 return Ok(json_repr(json::render(&answer)?));
             }
-            let head = evidence::receipt(&item, name, &evidence);
+            let mut head = evidence::receipt(&item, name, &evidence);
+            if !causes.is_empty() {
+                head.push_str(&format!(
+                    ", caused by {}",
+                    causes
+                        .iter()
+                        .map(|cause| cause.iri.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             let mut said = match (&released, closed_here) {
                 (Some(holder), _) => format!("{head}, released {holder}\n"),
                 (None, true) => format!("{head}\n"),
-                (None, false) if evidence.is_empty() => {
+                (None, false) if evidence.is_empty() && causes.is_empty() => {
                     format!("{head}; it was already closed, so only the verdict changed\n")
                 }
-                (None, false) => format!(
+                (None, false) if causes.is_empty() => format!(
                 "{head}; it was already closed, so the verdict changed and this evidence joined \
                  that close\n"
             ),
+                (None, false) => format!("{head}; it was already closed, so the verdict changed and the supplied details joined that close\n"),
             };
             said.push_str(&across::unreached(&item, &unreached));
             Ok(plain(said))
@@ -5395,6 +5426,12 @@ impl CloseEndpoint {
                                 "When the item closed at its source, for an import principal (ledger:Importer in the host's participants graph) only: an xsd:dateTime no later than now and no earlier than the item's filing. Dates closedAt and the close's status event, so the daily counts place it on that day, both marked closedAtSource import (ledger #2819). Anyone else sending it is refused.",
                             )
                             .class(v::ext::XSD_DATETIME)
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("causedBy")
+                            .summary("Items or owner/repo#N pull requests that introduced the defect, separated by spaces. Recorded on the close event; informational and does not affect readiness.")
+                            .class(v::ext::XSD_STRING)
                             .optional(),
                     )
                     .input(
@@ -7355,7 +7392,7 @@ impl Endpoint for LinkEndpoint {
             ArgSpec::new("type")
                 .summary(
                     "blocks (the object cannot start until the subject finishes), parent \
-                     (structural, does not block), or related.",
+                     (structural, does not block), related, or caused-by (informational).",
                 )
                 .class(v::ext::XSD_STRING)
                 .one_of(v::LINK_TYPES.iter().map(|(short, _)| *short))

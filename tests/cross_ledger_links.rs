@@ -963,3 +963,114 @@ fn a_next_row_carries_the_links_across_and_the_mirrors_its_item_face_shows() {
     assert_eq!(excluded["iri"], serde_json::json!(target), "{doc}");
     assert_eq!(excluded["mirrored"][0]["type"], "blocks", "{doc}");
 }
+
+#[test]
+fn caused_by_cross_ledger_is_informational() {
+    let kernel = kernel();
+    file(&kernel, SUBJECT, "Report defect");
+    let target = file(&kernel, TARGET, "Introduce defect");
+    sink(
+        &kernel,
+        &at(SUBJECT, "link"),
+        &[("item", "1"), ("content", &target), ("type", "caused-by")],
+    );
+    assert!(next(&kernel, TARGET).starts_with(" 1. acme#1"));
+    let detail = source(
+        &kernel,
+        &at(SUBJECT, "item:1"),
+        &[("as", "application/json")],
+    );
+    assert!(detail.contains("caused-by"), "{detail}");
+}
+
+#[test]
+fn caused_by_is_shown_in_all_item_faces_and_edit_history() {
+    let kernel = kernel();
+    let target = file(&kernel, SUBJECT, "Introduce defect");
+    file(&kernel, SUBJECT, "Report defect");
+    sink(
+        &kernel,
+        &at(SUBJECT, "link"),
+        &[("item", "2"), ("content", "#1"), ("type", "caused-by")],
+    );
+    let item = at(SUBJECT, "item:2");
+    assert!(source(&kernel, &item, &[]).contains(&format!("caused by: {target}")));
+    assert!(source(&kernel, &item, &[("as", "text/turtle")]).contains("ledger:causedBy"));
+    let history = source(
+        &kernel,
+        &at(SUBJECT, "item:2:history"),
+        &[("as", "application/json")],
+    );
+    assert!(
+        history.contains("caused-by") && history.contains(&target),
+        "{history}"
+    );
+}
+
+#[test]
+fn close_records_causes_on_its_status_event() {
+    let kernel = kernel();
+    let cause = file(&kernel, TARGET, "Introduced defect");
+    file(&kernel, SUBJECT, "Defect");
+    let answer = sink(
+        &kernel,
+        &at(SUBJECT, "close"),
+        &[
+            ("item", "1"),
+            ("causedBy", "acme#1 owner/repo#42"),
+            ("as", "application/json"),
+        ],
+    );
+    let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+    assert_eq!(
+        answer["causedBy"],
+        serde_json::json!([cause, "https://github.com/owner/repo/pull/42"])
+    );
+    let history = source(
+        &kernel,
+        &at(SUBJECT, "item:1:history"),
+        &[("as", "application/json")],
+    );
+    assert!(
+        history.contains(&cause) && history.contains("https://github.com/owner/repo/pull/42"),
+        "{history}"
+    );
+    let plain = source(&kernel, &at(SUBJECT, "item:1:history"), &[]);
+    assert!(plain.contains("caused by"), "{plain}");
+}
+
+#[test]
+fn deleting_a_cause_removes_the_link_but_preserves_close_history() {
+    let kernel = kernel();
+    let cause = file(&kernel, SUBJECT, "Cause");
+    file(&kernel, SUBJECT, "Defect");
+    sink(
+        &kernel,
+        &at(SUBJECT, "link"),
+        &[("item", "2"), ("content", "#1"), ("type", "caused-by")],
+    );
+    sink(
+        &kernel,
+        &at(SUBJECT, "close"),
+        &[("item", "2"), ("causedBy", "#1")],
+    );
+    delete(&kernel, &at(SUBJECT, "item:1"), &[]);
+    let item = source(&kernel, &at(SUBJECT, "item:2"), &[]);
+    assert!(!item.contains("caused by:"), "{item}");
+    let history = source(&kernel, &at(SUBJECT, "item:2:history"), &[]);
+    assert!(history.contains(&format!("caused by {cause}")), "{history}");
+}
+
+#[test]
+fn invalid_close_cause_refuses_without_closing() {
+    let kernel = kernel();
+    file(&kernel, SUBJECT, "Defect");
+    let result = try_verb(
+        &kernel,
+        Verb::Sink,
+        &at(SUBJECT, "close"),
+        &[("item", "1"), ("causedBy", "urn:example:not-a-pr")],
+    );
+    assert!(matches!(result, Err(Error::InvalidArgument { ref name, .. }) if name == "causedBy"));
+    assert!(source(&kernel, &at(SUBJECT, "item:1"), &[]).contains("  open  "));
+}
