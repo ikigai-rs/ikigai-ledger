@@ -98,6 +98,7 @@ impl ClaimKind {
 /// use ikigai_ledger::claim::{ClaimKind, ClaimKindStamper};
 /// use std::sync::Arc;
 /// // A host whose door stamps a `principal` argument naming a signed-in person:
+/// // optional-arg: deliberate: this host treats an unreadable principal as a machine.
 /// let stamper: ClaimKindStamper = Arc::new(|inv| match inv.inline_str("principal") {
 ///     Ok(p) if p.starts_with("urn:example:person:") => ClaimKind::Person,
 ///     _ => ClaimKind::Machine,

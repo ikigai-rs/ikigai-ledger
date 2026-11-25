@@ -288,14 +288,13 @@ impl Endpoint for CountsEndpoint {
             return Err(unsupported("ledger-counts", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
-        let want = if inv.inline_str("as").is_ok() {
+        let want = if inv.optional_str("as")?.is_some() {
             wanted_face(inv, &FACES)?
         } else {
             CSV
         };
         let days = inv
-            .inline_str("days")
-            .ok()
+            .optional_str("days")?
             .map(|s| {
                 s.parse::<u64>()
                     .ok()
@@ -494,7 +493,7 @@ async fn backfill_all(
     client: &StoreClient<'_, '_>,
     inv: &Invocation<'_>,
 ) -> Result<Representation> {
-    if inv.inline_str("comment").is_ok() {
+    if inv.optional_str("comment")?.is_some() {
         return Err(Error::InvalidArgument {
             name: "comment".into(),
             detail: "comment is only supported for a single item; content=all uses updated".into(),
@@ -612,6 +611,7 @@ impl Endpoint for BackfillEndpoint {
             return Err(unsupported("ledger-backfill-closed-at", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        inv.optional_str("comment")?;
         if inv.inline_str("content")? == "all" {
             return backfill_all(&client, inv).await;
         }
@@ -636,7 +636,7 @@ impl Endpoint for BackfillEndpoint {
         }
         // No inference from arbitrary comment prose: legacy comments do not record their
         // originating action. The operator identifies the close's OWN comment explicitly.
-        let at = if let Ok(comment) = inv.inline_str("comment") {
+        let at = if let Some(comment) = inv.optional_str("comment")? {
             let comment = crate::sparql::iri(comment, "comment")?;
             let rows = client
                 .select(&format!(

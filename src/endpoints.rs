@@ -866,7 +866,7 @@ fn cached_in_ledgers(repr: Representation, ledgers: &[Ledger]) -> Representation
 /// Which face was asked for. An `as` this endpoint cannot serve is **refused**, never
 /// substituted — the caller asked a question and a different answer is not a better one.
 fn wanted_face(inv: &Invocation<'_>, faces: &[&'static str]) -> Result<&'static str> {
-    match inv.inline_str("as").ok() {
+    match inv.optional_str("as")? {
         None => Ok(PLAIN),
         Some(asked) => faces
             .iter()
@@ -1845,7 +1845,7 @@ pub(crate) fn unsupported(id: &str, verb: Verb) -> Error {
 /// Explicit selection is a union, not a change to the singular resource binding.
 /// Check both grants before issuing any graph request; omitted ledgers reveal nothing.
 fn listing_ledgers(inv: &Invocation<'_>) -> Result<Vec<Ledger>> {
-    let Ok(names) = inv.inline_str("ledgers") else {
+    let Some(names) = inv.optional_str("ledgers")? else {
         return Ok(vec![ledger_for(inv, Need::Read)?]);
     };
     let mut ledgers = names
@@ -1957,11 +1957,11 @@ impl Endpoint for ItemsEndpoint {
             return Err(unsupported("ledger-items", inv.request.verb));
         }
         let ledgers = listing_ledgers(inv)?;
-        let union = inv.inline_str("ledgers").is_ok();
+        let union = inv.optional_str("ledgers")?.is_some();
         let bound = Ledger::from_bindings(inv.bindings)?;
         let want = wanted_face(inv, &READ_FACES)?;
         let shape = listing_shape(inv, want)?;
-        let order = inv.inline_str("sort").ok();
+        let order = inv.optional_str("sort")?;
         let relevance = order.is_some_and(|order| order.trim() == "relevance");
         let sort = listing_sort::Sort::parse(order.filter(|_| !relevance))?;
         let mut filter = parsed_listing_filter(inv)?;
@@ -2358,7 +2358,7 @@ impl Endpoint for CountEndpoint {
             let doc = json::render(&json::CountDocument {
                 schema: json::SCHEMA,
                 ledger: Ledger::from_bindings(inv.bindings)?.name().to_string(),
-                ledgers: inv.inline_str("ledgers").is_ok().then(|| {
+                ledgers: inv.optional_str("ledgers")?.is_some().then(|| {
                     ledgers
                         .iter()
                         .map(|ledger| ledger.name().to_string())
@@ -2513,7 +2513,7 @@ fn text_arg() -> ArgSpec {
 /// same arguments, refusals included.
 async fn listing_filter(inv: &Invocation<'_>, client: &StoreClient<'_, '_>) -> Result<Filter> {
     // Resolved, so `parent=12`, `parent=#12` and the IRI mean one item, as `item=` does.
-    let parent = match inv.inline_str("parent").ok().map(str::trim) {
+    let parent = match inv.optional_str("parent")?.map(str::trim) {
         None | Some("") => None,
         Some(reference) => Some(item_iri(client, reference, "parent").await?),
     };
@@ -2524,9 +2524,11 @@ async fn listing_filter(inv: &Invocation<'_>, client: &StoreClient<'_, '_>) -> R
 
 /// Validate filters even when no selected ledger is readable, without querying it.
 fn parsed_listing_filter(inv: &Invocation<'_>) -> Result<Filter> {
+    // Validate even if the selected ledgers contain no readable graph.
+    inv.optional_str("parent")?;
     Ok(Filter {
         parent: None,
-        status: match inv.inline_str("status").unwrap_or("open") {
+        status: match inv.optional_str("status")?.unwrap_or("open") {
             "closed" => Status::Closed,
             "all" => Status::All,
             "open" => Status::Open,
@@ -2537,23 +2539,19 @@ fn parsed_listing_filter(inv: &Invocation<'_>) -> Result<Filter> {
                 })
             }
         },
-        kind: inv.inline_str("kind").ok().map(str::to_string),
-        labels: split_labels(inv.inline_str("labels").ok()),
-        without: split_labels(inv.inline_str("without").ok()),
+        kind: inv.optional_str("kind")?.map(str::to_string),
+        labels: split_labels(inv.optional_str("labels")?),
+        without: split_labels(inv.optional_str("without")?),
         priority: parse_priority_filter(inv, "priority")?,
         without_priority: parse_priority_filter(inv, "without_priority")?,
-        about: inv.inline_str("about").ok().map(str::to_string),
-        key: inv
-            .inline_str("key")
-            .ok()
-            .map(model::parse_key)
-            .transpose()?,
-        holder: match inv.inline_str("holder").ok() {
+        about: inv.optional_str("about")?.map(str::to_string),
+        key: inv.optional_str("key")?.map(model::parse_key).transpose()?,
+        holder: match inv.optional_str("holder")? {
             None | Some("any") => Holder::Any,
             Some("none") => Holder::None,
             Some(name) => Holder::Named(name.to_string()),
         },
-        deferred: match inv.inline_str("deferred").unwrap_or("include") {
+        deferred: match inv.optional_str("deferred")?.unwrap_or("include") {
             "include" => Deferred::Include,
             "exclude" => Deferred::Exclude,
             "only" => Deferred::Only,
@@ -2566,7 +2564,7 @@ fn parsed_listing_filter(inv: &Invocation<'_>) -> Result<Filter> {
                 })
             }
         },
-        text: inv.inline_str("text").ok().map(str::to_string),
+        text: inv.optional_str("text")?.map(str::to_string),
         search: parsed_search(inv)?,
         limit: 0,
         offset: 0,
@@ -2679,9 +2677,9 @@ fn parse_limit(inv: &Invocation<'_>, default: usize) -> Result<usize> {
 /// A count of items named `name`, or `default` when absent — refused when present but not a
 /// count, as [`parse_limit`] is (`offset=ten` must not quietly read as the first page).
 fn parse_count(inv: &Invocation<'_>, name: &str, default: usize) -> Result<usize> {
-    match inv.inline_str(name) {
-        Err(_) => Ok(default),
-        Ok(text) => text.trim().parse().map_err(|_| Error::InvalidArgument {
+    match inv.optional_str(name)? {
+        None => Ok(default),
+        Some(text) => text.trim().parse().map_err(|_| Error::InvalidArgument {
             name: name.to_string(),
             detail: format!("`{text}` is not a count of items"),
         }),
@@ -2818,7 +2816,7 @@ impl Endpoint for ItemEndpoint {
                 // nothing" it was refused, which made every scalar edit from the command line
                 // impossible without resending the title and body verbatim. A blank title is
                 // refused anyway, so a blank `content` cannot mean a title edit: it means none.
-                let given = inv.inline_str("content").ok();
+                let given = inv.optional_str("content")?;
                 if let Some(content) = given.filter(|c| !c.trim().is_empty()) {
                     let (title, body) = split_content(content)?;
                     let (title, body) = (literal(&title), literal(&body));
@@ -2827,17 +2825,17 @@ impl Endpoint for ItemEndpoint {
                     updates.push(replace_one(&client, &item.iri, v::BODY, &body));
                     fields.push(edited_field(&item.iri, "body", v::BODY, &body));
                 }
-                if let Ok(priority) = inv.inline_str("priority") {
+                if let Some(priority) = inv.optional_str("priority")? {
                     let priority = integer(parse_priority(priority)?);
                     updates.push(replace_one(&client, &item.iri, v::PRIORITY, &priority));
                     fields.push(edited_field(&item.iri, "priority", v::PRIORITY, &priority));
                 }
-                if let Ok(revision) = inv.inline_str("revision") {
+                if let Some(revision) = inv.optional_str("revision")? {
                     let revision = literal(revision);
                     updates.push(replace_one(&client, &item.iri, v::REVISION, &revision));
                     fields.push(edited_field(&item.iri, "revision", v::REVISION, &revision));
                 }
-                if let Ok(about) = inv.inline_str("about") {
+                if let Some(about) = inv.optional_str("about")? {
                     for target in about.split_whitespace() {
                         let target = sparql::iri(target, "about")?;
                         updates.push(insert_on_live(
@@ -2891,7 +2889,7 @@ impl Endpoint for ItemEndpoint {
                 let now = now_ms(inv)?;
                 let item = require_item(&client, id).await?;
                 across::refuse_delete_with_links(&client, &item).await?;
-                let reason = inv.inline_str("reason").unwrap_or("").to_string();
+                let reason = inv.optional_str("reason")?.unwrap_or("").to_string();
                 let who = attribution::resolve(
                     inv,
                     &client,
@@ -4010,17 +4008,13 @@ impl Endpoint for AppendEndpoint {
         // Every argument is checked before anything is written: a bad `as` or a bad key
         // refused AFTER filing would leave an item the caller was told was not filed.
         let want = wanted_face(inv, &WRITE_FACES)?;
-        let key = inv
-            .inline_str("key")
-            .ok()
-            .map(model::parse_key)
-            .transpose()?;
-        let raised = inv.inline_str("raised").ok().map(parse_date).transpose()?;
+        let key = inv.optional_str("key")?.map(model::parse_key).transpose()?;
+        let raised = inv.optional_str("raised")?.map(parse_date).transpose()?;
         // ⚠ The label grammar, as the label endpoint holds it (ledger #2634): `labels=` splits
         // only on commas, so `labels="a b"` stored ONE label with a space, and that was where
         // every out-of-grammar label in the live ledger came from. One bad label refuses the
         // whole append, before anything is written.
-        let labels = split_labels(inv.inline_str("labels").ok());
+        let labels = split_labels(inv.optional_str("labels")?);
         for label in &labels {
             check_label("labels", label)?;
         }
@@ -4056,7 +4050,7 @@ impl Endpoint for AppendEndpoint {
         );
         triples.push_str(&who.triples(&iri, now));
         triples.push_str(&who.date_sources(&iri));
-        if let Ok(kind) = inv.inline_str("kind") {
+        if let Some(kind) = inv.optional_str("kind")? {
             // ⚠ A LEVEL is a subclass of `ledger:Item`, never one of this crate's own
             // bookkeeping classes. An item typed `ledger:Counter` was a second counter
             // to `urn:iki:ledger:ledgers`, which then reported every count doubled — an
@@ -4080,14 +4074,14 @@ impl Endpoint for AppendEndpoint {
         if !body.is_empty() {
             triples.push_str(&format!("\n<{iri}> <{}> {} .", v::BODY, literal(&body)));
         }
-        if let Ok(priority) = inv.inline_str("priority") {
+        if let Some(priority) = inv.optional_str("priority")? {
             triples.push_str(&format!(
                 "\n<{iri}> <{}> {} .",
                 v::PRIORITY,
                 integer(parse_priority(priority)?)
             ));
         }
-        if let Ok(revision) = inv.inline_str("revision") {
+        if let Some(revision) = inv.optional_str("revision")? {
             triples.push_str(&format!(
                 "\n<{iri}> <{}> {} .",
                 v::REVISION,
@@ -4104,7 +4098,7 @@ impl Endpoint for AppendEndpoint {
         for label in &labels {
             triples.push_str(&format!("\n<{iri}> <{}> {} .", v::LABEL, literal(label)));
         }
-        for target in inv.inline_str("about").unwrap_or("").split_whitespace() {
+        for target in inv.optional_str("about")?.unwrap_or("").split_whitespace() {
             triples.push_str(&format!(
                 "\n<{iri}> <{}> {} .",
                 v::ABOUT,
@@ -4571,10 +4565,7 @@ impl CommentEndpoint {
         if self.decision {
             // An argument supplied in the wrong representation must not become absent.
             for name in ["as", "key", "epoch", "author", "created", "modified"] {
-                match inv.inline_str(name) {
-                    Ok(_) | Err(Error::MissingArgument(_)) => {}
-                    Err(error) => return Err(error),
-                }
+                inv.optional_str(name)?;
             }
         }
         let want = wanted_face(inv, &WRITE_FACES)?;
@@ -4589,11 +4580,7 @@ impl CommentEndpoint {
                     .to_string(),
             });
         }
-        let key = inv
-            .inline_str("key")
-            .ok()
-            .map(model::parse_key)
-            .transpose()?;
+        let key = inv.optional_str("key")?.map(model::parse_key).transpose()?;
         let epoch = parse_epoch(inv)?;
         let acks = if self.decision {
             Vec::new()
@@ -5079,6 +5066,8 @@ impl CloseEndpoint {
         client: &StoreClient<'_, '_>,
         token: Option<&replay::Token>,
     ) -> Result<Representation> {
+        // Refuse an unreadable note before changing the item.
+        inv.optional_str("content")?;
         let want = wanted_face(inv, &WRITE_FACES)?;
         let epoch = parse_epoch(inv)?;
         let now = now_ms(inv)?;
@@ -5086,7 +5075,7 @@ impl CloseEndpoint {
         if let Some(token) = token {
             token.on_item(&item.iri);
         }
-        let name = inv.inline_str("reason").unwrap_or("done");
+        let name = inv.optional_str("reason")?.unwrap_or("done");
         // Every mirror of it in another ledger follows the close, so the caller must be able
         // to write them all; refused before anything is written (ledger #2829).
         across::require_mirror_grants(inv, client, &item).await?;
@@ -5299,8 +5288,7 @@ impl CloseEndpoint {
             }
         }
         let note = inv
-            .inline_str("content")
-            .ok()
+            .optional_str("content")?
             .map(str::trim)
             .filter(|note| !note.is_empty());
         // ★ The answer is rendered before the note is written (ledger #4059), so a request
@@ -5461,6 +5449,8 @@ impl ReopenEndpoint {
         client: &StoreClient<'_, '_>,
         token: Option<&replay::Token>,
     ) -> Result<Representation> {
+        // Refuse an unreadable note before changing the item.
+        inv.optional_str("content")?;
         let now = now_ms(inv)?;
         let item = require_item(client, inv.inline_str("item")?).await?;
         if let Some(token) = token {
@@ -5567,8 +5557,7 @@ impl ReopenEndpoint {
         };
         let unreached = across::sync(inv, client, &item.iri, None, true, now).await?;
         let note = inv
-            .inline_str("content")
-            .ok()
+            .optional_str("content")?
             .map(str::trim)
             .filter(|note| !note.is_empty());
         let noted = note.is_some();
@@ -6019,7 +6008,7 @@ fn same_claimant_clause(item: &str, caller: Option<&str>) -> String {
 /// `epoch=`: the claim epoch a holder's write is fenced with (ledger #3205), or `None` when
 /// the write is not fenced and behaves as it always did.
 fn parse_epoch(inv: &Invocation<'_>) -> Result<Option<u64>> {
-    match inv.inline_str("epoch").ok().map(str::trim) {
+    match inv.optional_str("epoch")?.map(str::trim) {
         None => Ok(None),
         Some(text) => match text.parse::<u64>() {
             Ok(epoch) if epoch > 0 => Ok(Some(epoch)),
@@ -6343,7 +6332,7 @@ fn claim_update(
 
 /// `true`, `false`, or a refusal naming the argument.
 fn parse_flag(inv: &Invocation<'_>, name: &str) -> Result<bool> {
-    match inv.inline_str(name).ok() {
+    match inv.optional_str(name)? {
         None | Some("false") => Ok(false),
         Some("true") => Ok(true),
         Some(other) => Err(Error::InvalidArgument {
@@ -6389,8 +6378,7 @@ impl Endpoint for ClaimEndpoint {
                 }
                 // Every argument is checked before anything is read or written.
                 let lease = inv
-                    .inline_str("lease")
-                    .ok()
+                    .optional_str("lease")?
                     .map(crate::claim::parse_lease)
                     .transpose()?;
                 let takeover = parse_flag(inv, "takeover")?;
@@ -6404,7 +6392,7 @@ impl Endpoint for ClaimEndpoint {
                             .to_string(),
                     });
                 }
-                let from = inv.inline_str("from").ok().map(str::trim);
+                let from = inv.optional_str("from")?.map(str::trim);
                 match (takeover, from) {
                     (true, None) | (true, Some("")) => {
                         return Err(Error::InvalidArgument {
@@ -6425,7 +6413,7 @@ impl Endpoint for ClaimEndpoint {
                     }
                     _ => {}
                 }
-                let purpose = inv.inline_str("purpose").ok();
+                let purpose = inv.optional_str("purpose")?;
                 let epoch = parse_epoch(inv)?;
                 // ★ The host's decision, never the caller's: no `kind` input is declared, and
                 // one sent anyway is not read. See `crate::claim`.
@@ -6681,9 +6669,11 @@ impl ClaimEndpoint {
         client: &StoreClient<'_, '_>,
         token: Option<&replay::Token>,
     ) -> Result<Representation> {
+        // Refuse an unreadable note before changing the item.
+        inv.optional_str("content")?;
         {
             {
-                let from = match inv.inline_str("from").ok().map(str::trim) {
+                let from = match inv.optional_str("from")?.map(str::trim) {
                     Some("") => {
                         return Err(Error::InvalidArgument {
                             name: "from".to_string(),
@@ -6825,8 +6815,8 @@ impl ClaimEndpoint {
                     }
                 }
                 let answer = plain(format!("{} released\n", item.short()));
-                match inv.inline_str("content").map(str::trim) {
-                    Ok(note) if !note.is_empty() => {
+                match inv.optional_str("content")?.map(str::trim) {
+                    Some(note) if !note.is_empty() => {
                         write_note(
                             client,
                             &item.iri,
@@ -7101,6 +7091,8 @@ impl DeferEndpoint {
         client: &StoreClient<'_, '_>,
         token: Option<&replay::Token>,
     ) -> Result<Representation> {
+        // Refuse an unreadable note before changing the item.
+        inv.optional_str("content")?;
         let now = now_ms(inv)?;
         let item = require_item(client, inv.inline_str("item")?).await?;
         if let Some(token) = token {
@@ -7140,8 +7132,8 @@ impl DeferEndpoint {
         )
         .await?;
         let answer = plain(format!("{} {said}\n", item.short()));
-        match inv.inline_str("content").map(str::trim) {
-            Ok(note) if !note.is_empty() => {
+        match inv.optional_str("content")?.map(str::trim) {
+            Some(note) if !note.is_empty() => {
                 write_note(client, &item.iri, note, &who, now, token, |_| Ok(answer)).await
             }
             _ => Ok(answer),
@@ -7230,7 +7222,7 @@ impl Endpoint for LinkEndpoint {
         let want = wanted_face(inv, &WRITE_FACES)?;
         let now = now_ms(inv)?;
         let from = require_item(&client, inv.inline_str("item")?).await?;
-        let name = inv.inline_str("type").unwrap_or("related");
+        let name = inv.optional_str("type")?.unwrap_or("related");
         let predicate = v::link_predicate(name).ok_or_else(|| Error::InvalidArgument {
             name: "type".to_string(),
             detail: format!(
@@ -7441,8 +7433,8 @@ impl Endpoint for LabelEndpoint {
         if inv.request.verb == Verb::Delete
             && (inv.request.args.contains_key("label")
                 || inv
-                    .inline_str("content")
-                    .is_ok_and(|content| content.trim().starts_with("label=")))
+                    .optional_str("content")?
+                    .is_some_and(|content| content.trim().starts_with("label=")))
         {
             return Err(Error::InvalidArgument {
                 name: "label".to_string(),
@@ -7829,7 +7821,7 @@ impl Endpoint for PurgeEndpoint {
         }
         session::require_session_graph(inv, true, "a purge, which destroys its summaries there,")?;
         let reference = inv.inline_str("content")?;
-        let reason = inv.inline_str("reason").unwrap_or("");
+        let reason = inv.optional_str("reason")?.unwrap_or("");
         let who =
             attribution::resolve(inv, &client, self.participants.as_deref(), Dates::None, now)
                 .await?;
@@ -7941,11 +7933,7 @@ struct NextEndpoint {
 /// ★ A value that cannot be read is an error here, never `None`: `drain=` and `state=` narrow what
 /// a step is offered, and reading a bad one as absent would offer it the whole ledger.
 fn present_str<'a>(inv: &'a Invocation<'_>, name: &str) -> Result<Option<&'a str>> {
-    match inv.inline_str(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(Error::MissingArgument(_)) => Ok(None),
-        Err(unreadable) => Err(unreadable),
-    }
+    inv.optional_str(name)
 }
 
 /// A drain name a caller wrote, checked against the ledger's lifecycle, in the words
@@ -7977,8 +7965,8 @@ impl Endpoint for NextEndpoint {
         let shape = listing_shape(inv, want)?;
         let now = now_ms(inv)?;
         let name = inv
-            .inline_str("policy")
-            .unwrap_or_else(|_| self.policies.default_name());
+            .optional_str("policy")?
+            .unwrap_or_else(|| self.policies.default_name());
         let policy = self
             .policies
             .get(name)
@@ -7999,11 +7987,11 @@ impl Endpoint for NextEndpoint {
             .transpose()?;
         let filter = Filter {
             status: Status::Open,
-            kind: inv.inline_str("kind").ok().map(str::to_string),
-            labels: split_labels(inv.inline_str("labels").ok()),
-            without: split_labels(inv.inline_str("without").ok()),
-            about: inv.inline_str("about").ok().map(str::to_string),
-            text: inv.inline_str("text").ok().map(str::to_string),
+            kind: inv.optional_str("kind")?.map(str::to_string),
+            labels: split_labels(inv.optional_str("labels")?),
+            without: split_labels(inv.optional_str("without")?),
+            about: inv.optional_str("about")?.map(str::to_string),
+            text: inv.optional_str("text")?.map(str::to_string),
             search: parsed_search(inv)?,
             ..Filter::default()
         };
@@ -8603,5 +8591,37 @@ mod tests {
         assert!(parse_priority("4").is_ok());
         assert!(parse_priority("5").is_err());
         assert!(parse_priority("high").is_err());
+    }
+}
+
+#[cfg(test)]
+mod optional_reader_tests {
+    use super::*;
+    use ikigai_core::{ArgRef, Bindings, Capability, ContentId, Iri, Request};
+
+    #[test]
+    fn inline_readers_refuse_references_and_bodies() {
+        let bindings = Bindings::new();
+        let capability = Capability::root();
+        for arg in [
+            ArgRef::Reference(Iri::parse("urn:example:value").unwrap()),
+            ArgRef::Content(ContentId::of(b"1")),
+        ] {
+            for name in ["as", "limit", "epoch", "takeover"] {
+                let request = Request::new(Verb::Source, Iri::parse("urn:example").unwrap())
+                    .with_arg(name, arg.clone());
+                let inv = Invocation::detached(&request, &bindings, &capability);
+                let result = match name {
+                    "as" => wanted_face(&inv, &READ_FACES).map(|_| ()),
+                    "limit" => parse_count(&inv, name, 50).map(|_| ()),
+                    "epoch" => parse_epoch(&inv).map(|_| ()),
+                    _ => parse_flag(&inv, name).map(|_| ()),
+                };
+                assert!(
+                    matches!(result, Err(Error::InvalidArgument { name: ref got, ref detail }) if got == name && !detail.is_empty()),
+                    "{name}: {result:?}"
+                );
+            }
+        }
     }
 }

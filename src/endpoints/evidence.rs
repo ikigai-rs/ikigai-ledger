@@ -49,7 +49,11 @@ pub(super) async fn resolve(
     closing: &Item,
 ) -> Result<Vec<Evidence>> {
     let mut resolved: Vec<Evidence> = Vec::new();
-    for reference in inv.inline_str("evidence").unwrap_or("").split_whitespace() {
+    for reference in inv
+        .optional_str("evidence")?
+        .unwrap_or("")
+        .split_whitespace()
+    {
         let one = one(inv, client, reference).await?;
         if one.iri == closing.iri {
             return Err(Error::InvalidArgument {

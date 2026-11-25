@@ -567,6 +567,8 @@ impl StateEndpoint {
         id: &str,
         token: Option<&replay::Token>,
     ) -> Result<Representation> {
+        // Refuse an unreadable note before changing the state.
+        inv.optional_str("content")?;
         // Every argument is checked before anything is read or written.
         let to = named_state(lifecycle, "to", inv.inline_str("to")?)?;
         let from = named_state(lifecycle, "from", inv.inline_str("from")?)?;
@@ -681,7 +683,7 @@ impl StateEndpoint {
             // ⚠ The note is a second update, after the move: should it fail, the move and
             // its record stand, and a retry under the token answers the move without
             // posting the note.
-            if let Ok(note) = inv.inline_str("content") {
+            if let Some(note) = inv.optional_str("content")? {
                 if !note.trim().is_empty() {
                     write_comment(client, &item.iri, note.trim(), &who, now).await?;
                 }
@@ -1008,7 +1010,7 @@ impl Endpoint for DoctorEndpoint {
         let lifecycle = self.lifecycles.for_ledger(client.ledger());
         let now = now_ms(inv)?;
         let awaiting_age =
-            crate::claim::parse_lease(inv.inline_str("awaiting-age").unwrap_or("24h"))
+            crate::claim::parse_lease(inv.optional_str("awaiting-age")?.unwrap_or("24h"))
                 .map_err(|error| match error {
                     Error::InvalidArgument { detail, .. } => Error::InvalidArgument {
                         name: "awaiting-age".to_string(),

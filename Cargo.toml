@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-ledger"
-version = "0.26.1"
+version = "0.26.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -31,7 +31,8 @@ description = "The work ledger for ikigai: NAMED ledgers — one named graph and
 # the release every consumer in the cascade pins. 0.4.2 is the floor since ledger #4059: its
 # idempotency toolkit (`IdempotencyKey`, `Request::fingerprint_without`, `Replay`,
 # `ActionSpec::resend_window`) is what `idempotency-key=` is built on.
-ikigai-core = "0.4.2"
+# Core 0.4.3 provides the optional argument readers that distinguish absence from errors.
+ikigai-core = "0.4.3"
 # The store's namespace, capability constants and term constructors, named rather than
 # copied: this crate declares `urn:cap:store:{read,write}:graph:*` on its own actions
 # because a ledger read and write really do need them (sub-requests carry the CALLER's
