@@ -3,6 +3,8 @@ mod common;
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Request, Verb};
 
+type Args<'a> = &'a [(&'a str, &'a str)];
+
 #[test]
 fn invalid_face_is_refused_instead_of_selecting_plain() {
     let kernel = common::kernel();
@@ -100,7 +102,7 @@ fn read_filters_accept_absence_and_valid_values_and_refuse_invalid_text() {
 
 #[test]
 fn invalid_write_arguments_do_not_change_the_item() {
-    let cases: &[(Verb, &str, &[(&str, &str)], &str)] = &[
+    let cases: &[(Verb, &str, Args<'_>, &str)] = &[
         (Verb::Sink, "close", &[("item", "#1")], "content"),
         (Verb::Sink, "close", &[("item", "#1")], "evidence"),
         (Verb::Sink, "close", &[("item", "#1")], "reason"),
@@ -181,7 +183,7 @@ fn invalid_write_arguments_do_not_change_the_item() {
 #[test]
 fn write_endpoints_accept_absent_and_valid_optional_values() {
     // A fresh ledger per call avoids a successful write affecting the next case.
-    let cases: &[(Verb, &str, &[(&str, &str)], &str, &str)] = &[
+    let cases: &[(Verb, &str, Args<'_>, &str, &str)] = &[
         (Verb::Sink, "append", &[("content", "New")], "labels", "bug"),
         (
             Verb::Sink,
@@ -497,5 +499,49 @@ fn optional_notes_accept_absence_and_text_on_reopen_release_and_state_move() {
             let result = issue(&kernel, verb, &iri, args, extra);
             assert!(result.is_ok(), "{resource} {value:?}: {result:?}");
         }
+    }
+}
+
+#[test]
+fn write_resources_refuse_an_unreadable_face_before_writing() {
+    let cases: &[(Verb, &str, Args<'_>)] = &[
+        (Verb::Sink, "append", &[("content", "New")]),
+        (
+            Verb::Sink,
+            "comment",
+            &[("item", "#1"), ("content", "note")],
+        ),
+        (Verb::Sink, "close", &[("item", "#1")]),
+        (Verb::Sink, "link", &[("item", "#1"), ("content", "#2")]),
+        (Verb::Sink, "lapse", &[]),
+        (Verb::Sink, "history", &[("item", "#1"), ("content", "")]),
+        (
+            Verb::Sink,
+            "item:1:state",
+            &[("from", "filed"), ("to", "queued")],
+        ),
+    ];
+    for &(verb, resource, args) in cases {
+        let kernel = common::kernel();
+        common::append(&kernel, "First", &[]);
+        common::append(&kernel, "Second", &[]);
+        let before = common::source(&kernel, "urn:iki:ledger:item:1", &[]);
+        let iri = format!("urn:iki:ledger:{resource}");
+        let result = issue(
+            &kernel,
+            verb,
+            &iri,
+            args,
+            Some(("as", ArgRef::Inline(vec![0xff]))),
+        );
+        assert!(
+            matches!(result, Err(Error::InvalidArgument { ref name, .. }) if name == "as"),
+            "{resource}: {result:?}"
+        );
+        assert_eq!(
+            before,
+            common::source(&kernel, "urn:iki:ledger:item:1", &[]),
+            "{resource}"
+        );
     }
 }
