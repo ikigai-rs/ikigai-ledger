@@ -249,22 +249,25 @@ async fn candidates(client: &StoreClient<'_, '_>, filter: &Filter) -> Option<Str
     )
     .await?;
     complete(client, &graph, &weights).await?;
-    if filter.search.phrase.is_none() {
-        // A character such as ² is alphanumeric to the tokenizer, but is outside
-        // the regex word class. A whole-word match could end before it and be
-        // absent from the index's hit set. This probe is independent of the term.
-        let values = predicates
-            .iter()
-            .map(|p| format!("<{p}>"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let pattern = sparql::literal(r"[\p{Number}--\w]");
-        let query = format!("ASK {{ {} }}", client.in_graph(&format!(
-            "VALUES ?predicate {{ {values} }} ?subject ?predicate ?text . FILTER(REGEX(STR(?text), {pattern}))"
-        )));
-        if client.ask(&query).await.ok()? {
-            return None;
-        }
+    // The tokenizer uses Rust's Unicode tables, which can know about alphanumerics
+    // that REGEX still treats as unassigned separators. For whole-word searches,
+    // REGEX also treats some assigned numbers (such as ²) as outside of \w.
+    let boundary = if filter.search.phrase.is_some() {
+        r"\p{Unassigned}"
+    } else {
+        r"[\p{Unassigned}[\p{Number}--\w]]"
+    };
+    let values = predicates
+        .iter()
+        .map(|p| format!("<{p}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let pattern = sparql::literal(boundary);
+    let query = format!("ASK {{ {} }}", client.in_graph(&format!(
+        "VALUES ?predicate {{ {values} }} ?subject ?predicate ?text . FILTER(REGEX(STR(?text), {pattern}))"
+    )));
+    if client.ask(&query).await.ok()? {
+        return None;
     }
     let subjects: BTreeSet<_> = hits.iter().map(|hit| hit.subject.as_str()).collect();
     // Blank subjects and unusually large IRI lists are handled by the ordinary scan.
@@ -330,20 +333,26 @@ async fn ranked_scores(
     }
     let terms = filter.terms();
     let phrase = filter.search.phrase.as_deref();
-    let words = terms
+    // Deduplicate as the analyzer lowercases, but give it the original spellings
+    // so it tokenizes before lowercasing (İ becomes i plus a combining dot).
+    let mut distinct = BTreeMap::new();
+    for word in terms
         .iter()
         .copied()
         .chain(phrase)
         .flat_map(model::text_words)
-        .map(|word| {
-            word.chars()
-                .flat_map(char::to_lowercase)
-                .collect::<String>()
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(" ");
+    {
+        let lower = word
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        let spelling = distinct.entry(lower).or_insert(word);
+        // Its length filter also runs before lowercasing.
+        if word.len() < spelling.len() {
+            *spelling = word;
+        }
+    }
+    let words = distinct.into_values().collect::<Vec<_>>().join(" ");
     let query = match phrase {
         Some(phrase) if terms.is_empty() => ("phrase", phrase),
         _ => ("words", words.as_str()),

@@ -1117,3 +1117,97 @@ fn term_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         })
         .collect()
 }
+
+#[test]
+fn unicode_boundary_search_agrees_with_and_without_an_index() {
+    // Sidetic letters were added in Unicode 17. A tokenizer that knows about
+    // them can join this letter to "marker", even if REGEX sees a boundary.
+    let scan = kernel();
+    let index = indexed(ikigai_store::DurableStore::in_memory().unwrap());
+    wait_for_index(&index);
+    for kernel in [&scan, &index] {
+        append(kernel, "Marker\u{10940}", &[]);
+    }
+    commit_index(&index, 1);
+    for args in [
+        &[("phrase", "marker")][..],
+        &[("text", "marker"), ("whole_word", "true")][..],
+    ] {
+        for endpoint in ["urn:iki:ledger:items", "urn:iki:ledger:count"] {
+            assert_eq!(
+                source(&index, endpoint, args),
+                source(&scan, endpoint, args),
+                "{endpoint} {args:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn relevance_passes_dotted_i_to_the_index_as_one_token() {
+    let kernel = indexed(ikigai_store::DurableStore::in_memory().unwrap());
+    wait_for_index(&kernel);
+    append(&kernel, "İstanbul", &[]);
+    commit_index(&kernel, 1);
+    let doc = items(&kernel, &[("text", "İstanbul"), ("sort", "relevance")]);
+    assert_eq!(titles(&doc), ["İstanbul"]);
+    assert!(row(&doc, "İstanbul")["score"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn relevance_pages_filtered_rows_and_refuses_a_partially_indexed_union() {
+    let kernel = indexed(ikigai_store::DurableStore::in_memory().unwrap());
+    wait_for_index(&kernel);
+    append(&kernel, "Lease ran out", &[]);
+    append(&kernel, "Second\n\nLease ran out", &[]);
+    append(&kernel, "Third", &[]);
+    comment(&kernel, "default", "3", "Lease ran out");
+    append(&kernel, "Lease nearly ran out", &[]);
+    append(&kernel, "Lease ran out yesterday", &[]);
+    delete(&kernel, "urn:iki:ledger:item:5", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:other:append",
+        &[("content", "Lease ran out elsewhere")],
+    );
+    commit_index(&kernel, 6);
+
+    let args = [
+        ("phrase", "lease.*ran (out)"),
+        ("match", "title,body,comments"),
+    ];
+    assert_eq!(source(&kernel, "urn:iki:ledger:count", &args).trim(), "3");
+    let mut ranked = args.to_vec();
+    ranked.push(("sort", "relevance"));
+    let full = items(&kernel, &ranked);
+    assert_eq!(full["total"], 3);
+    assert_eq!(full["items"][0]["title"], "Lease ran out");
+    assert_eq!(titles(&full), ["Lease ran out", "Second", "Third"]);
+    for offset in 0..=3 {
+        let offset_arg = offset.to_string();
+        let mut page_args = ranked.clone();
+        page_args.extend([("limit", "1"), ("offset", offset_arg.as_str())]);
+        let page = items(&kernel, &page_args);
+        let expected: Vec<_> = full["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(offset)
+            .take(1)
+            .map(|row| row["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles(&page), expected, "offset {offset}");
+        assert_eq!(page["total"], full["total"]);
+    }
+    ranked.push(("ledgers", "default,other"));
+    assert!(matches!(
+        try_verb(&kernel, Verb::Source, "urn:iki:ledger:items", &ranked),
+        Err(Error::Unavailable(_))
+    ));
+    for phrase in ["", ".*()+?"] {
+        assert_eq!(
+            refused(&kernel, "urn:iki:ledger:items", &[("phrase", phrase)]).0,
+            "phrase"
+        );
+    }
+}
