@@ -514,6 +514,7 @@ fn write_resources_refuse_an_unreadable_face_before_writing() {
         (Verb::Sink, "close", &[("item", "#1")]),
         (Verb::Sink, "link", &[("item", "#1"), ("content", "#2")]),
         (Verb::Sink, "lapse", &[]),
+        (Verb::Sink, "sweep-replays", &[]),
         (Verb::Sink, "history", &[("item", "#1"), ("content", "")]),
         (
             Verb::Sink,

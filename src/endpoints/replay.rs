@@ -384,6 +384,130 @@ impl Token {
     }
 }
 
+/// The maximum number of receipt subjects an update can remove from one graph.
+const SWEEP_BATCH: usize = 128;
+
+/// Host-scheduled maintenance. A ledger tick handles one batch from each of its two graphs.
+#[derive(Clone)]
+pub(super) struct SweepEndpoint {
+    pub(super) window: Duration,
+}
+
+#[async_trait]
+impl Endpoint for SweepEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(unsupported("ledger-sweep-replays", inv.request.verb));
+        }
+        let ledger = ledger_for(inv, Need::Write)?;
+        wanted_face(inv, &[PLAIN])?;
+        let graphs = [ledger.graph(), ledger.deleted_graph()];
+        // Check every grant before writing to either graph.
+        for graph in &graphs {
+            for scope in [
+                ikigai_store::cap_read_graph(graph),
+                ikigai_store::cap_write_graph(graph),
+            ] {
+                if !inv.capability.allows(&scope) {
+                    return Err(Error::Denied(
+                        format!(
+                            "Grant `{scope}` before sweeping {}. No replay receipts were removed.",
+                            ledger.name()
+                        )
+                        .into(),
+                    ));
+                }
+            }
+        }
+        let now = now_ms(inv)?;
+        // Replay::is_live uses a strict upper bound, so a receipt exactly at the cutoff
+        // is expired. If the window reaches before the clock's epoch, none can be expired.
+        if let Some(cutoff) =
+            now.checked_sub(u64::try_from(self.window.as_millis()).unwrap_or(u64::MAX))
+        {
+            for graph in &graphs {
+                sweep_batch(inv, graph, cutoff).await?;
+            }
+        }
+        Ok(plain(format!(
+            "{}: replay receipt sweep complete\n",
+            ledger.name()
+        )))
+    }
+
+    fn name(&self) -> &str {
+        "ledger-sweep-replays"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("ledger-sweep-replays")
+            .title("Remove expired request receipts")
+            .summary(
+                "Host-scheduled maintenance for one ledger. Each call sweeps up to 128 expired \
+                 receipts from each of the live and deleted graphs. Needs read and write grants \
+                 for both graphs and the ledger's write grant.",
+            )
+            .verb(Verb::Meta)
+            .action(write_scopes(
+                ActionSpec::new(Verb::Sink)
+                    .input(ledger_arg("sweep-replays"))
+                    .input(as_arg(&[PLAIN]))
+                    .output(PLAIN),
+                CAP_WRITE,
+            ))
+    }
+}
+
+async fn sweep_batch(inv: &Invocation<'_>, graph: &str, cutoff: u64) -> Result<()> {
+    // The timestamp is written with the same millisecond value as Replay::recorded_at.
+    let cutoff = datetime(cutoff);
+    let created = v::ext::CREATED;
+    let expired = format!(
+        "?receipt a <{}> ; <{created}> ?recorded . FILTER(?recorded <= {cutoff})",
+        v::REPLAY_CLASS,
+    );
+    // An archived subject can hold multiple timestamps if the same token was reused and
+    // archived again. Keep it if any timestamp is live or cannot be compared.
+    let keep = format!("?receipt <{created}> ?other . FILTER(COALESCE(?other > {cutoff}, true))");
+    let rows = crate::sparql::select_in(
+        inv,
+        graph,
+        &format!(
+            "SELECT DISTINCT ?receipt WHERE {{
+               GRAPH <{graph}> {{
+                 {expired}
+                 FILTER(isIRI(?receipt))
+                 FILTER NOT EXISTS {{ {keep} }}
+               }}
+             }} LIMIT {SWEEP_BATCH}"
+        ),
+    )
+    .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let subjects = rows
+        .iter()
+        .map(|row| crate::sparql::iri(&row["receipt"].value, "receipt"))
+        .collect::<Result<Vec<_>>>()?
+        .join(" ");
+    let candidates = format!("VALUES ?receipt {{ {subjects} }}");
+    // Recheck expiry under the write lock. The VALUES in both patterns let the scoped
+    // store door copy only the candidate subjects, even on a large graph.
+    crate::sparql::update_in(
+        inv,
+        graph,
+        &format!(
+            "DELETE {{ GRAPH <{graph}> {{ ?receipt ?p ?o }} }}
+             WHERE {{ GRAPH <{graph}> {{
+                 {{ {candidates} ?receipt ?p ?o . {expired} }}
+                 MINUS {{ {candidates} {keep} }}
+             }} }}"
+        ),
+    )
+    .await
+}
+
 /// Lowercase hex.
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
