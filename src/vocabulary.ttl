@@ -819,7 +819,7 @@ ledger:Transition a rdfs:Class ;
 ledger:transitionSeq a rdf:Property ;
     rdfs:range xsd:integer ;
     rdfs:label "transition sequence" ;
-    rdfs:comment "An entry's place in its ledger's transition feed: the previous entry's plus one, from 1, allocated under the store's write lock, so it is commit order and never authored time. Also on the recorded node, so a replay allocates nothing. PER LEDGER: two ledgers' sequences are unrelated." .
+    rdfs:comment "An entry's place in its ledger's transition feed: the previous entry's plus one, from 1, allocated under the store's write lock, so it is commit order and never authored time. On the entry only: the recorded node keeps its own shape, and the entry names it with ledger:transitionEvent, which is also what keeps a replay from allocating a second entry. PER LEDGER: two ledgers' sequences are unrelated." .
 
 ledger:transitionHead a rdf:Property ;
     rdfs:range xsd:integer ;
@@ -829,6 +829,10 @@ ledger:transitionHead a rdf:Property ;
 ledger:transitionKind a rdf:Property ;
     rdfs:label "transition kind" ;
     rdfs:comment "What an entry records, as a literal: filed, claimed, released, handed back, lapsed, closed or reopened." .
+
+ledger:transitionItem a rdf:Property ;
+    rdfs:label "transition item" ;
+    rdfs:comment "On a ledger:Transition entry, the item its transition happened to. Deliberately not ledger:onItem: an entry is not one of the item's records (a comment or an event), so readers that gather an item's records by ledger:onItem (history, the doctor, delete and purge) never see it. An entry stays in the feed after its item is deleted or purged: the feed is append-only, and an entry holds only the item's IRI, the kind and the time." .
 
 ledger:transitionEvent a rdf:Property ;
     rdfs:label "transition event" ;

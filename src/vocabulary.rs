@@ -115,6 +115,8 @@ term! {
     TRANSITION_KIND => "transitionKind";
     /// `ledger:transitionEvent` — the node whose write the entry records.
     TRANSITION_EVENT => "transitionEvent";
+    /// `ledger:transitionItem` — the item an entry's transition happened to; not `ledger:onItem`, as an entry is not one of the item's records.
+    TRANSITION_ITEM => "transitionItem";
     /// `ledger:closedAt`
     CLOSED_AT => "closedAt";
     /// `ledger:closedAtSource`

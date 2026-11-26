@@ -80,3 +80,43 @@ fn each_ledger_numbers_its_own() {
 fn transition_is_a_reserved_ledger_name() {
     assert!(ikigai_ledger::ledger::RESERVED.contains(&"transition"));
 }
+
+/// The sequence lives on the entry only: a claim, release or status event keeps the shape its
+/// readers know (no `transitionSeq`), and an entry is not one of its item's records (no
+/// `ledger:onItem`), so history, the doctor and the data-safety counts never see it.
+#[test]
+fn an_entry_stays_apart_from_the_records_it_numbers() {
+    let kernel = kernel();
+    append(&kernel, "Fix the widget", &[]);
+    sink(
+        &kernel,
+        "urn:iki:ledger:claim",
+        &[("item", "#1"), ("content", "worker-1")],
+    );
+    sink(&kernel, "urn:iki:ledger:close", &[("item", "#1")]);
+    assert!(source(&kernel, FEED, &[]).starts_with("4 transition(s)"));
+    let numbered_nodes = select(
+        &kernel,
+        "SELECT ?n WHERE { GRAPH <urn:iki:ledger:graph:default> { \
+         ?n <https://ikigai-rs.dev/ns/ledger#transitionSeq> ?s \
+         FILTER NOT EXISTS { ?n a <https://ikigai-rs.dev/ns/ledger#Transition> } } }",
+    );
+    assert!(!numbered_nodes.contains("urn:"), "{numbered_nodes}");
+    let entries_on_items = select(
+        &kernel,
+        "SELECT ?n WHERE { GRAPH <urn:iki:ledger:graph:default> { \
+         ?n a <https://ikigai-rs.dev/ns/ledger#Transition> ; \
+         <https://ikigai-rs.dev/ns/ledger#onItem> ?i } }",
+    );
+    assert!(!entries_on_items.contains("urn:"), "{entries_on_items}");
+    // The same query shape does see the entries, so the two absences above are not vacuous.
+    let entries = select(
+        &kernel,
+        "SELECT ?n WHERE { GRAPH <urn:iki:ledger:graph:default> { \
+         ?n a <https://ikigai-rs.dev/ns/ledger#Transition> } }",
+    );
+    assert!(
+        entries.contains("urn:iki:ledger:default:transition:seq:4"),
+        "{entries}"
+    );
+}

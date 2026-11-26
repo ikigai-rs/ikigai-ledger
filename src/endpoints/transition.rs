@@ -23,9 +23,13 @@ const MAX_LIMIT: usize = 500;
 
 /// The operation that gives `node`, just written on `item`, its entry in the ledger's
 /// transition feed, when `node` records a transition. It goes after [`super::revise`]'s
-/// revision in the same update. The guard is the node itself, as there: a node that is
-/// already in the feed, or is not in the graph (its write's own guards refused it), or is
-/// not a transition (a plain comment, an edit), allocates nothing.
+/// revision in the same update. A node that is already in the feed (an entry names it as its
+/// `transitionEvent`), or is not in the graph (its write's own guards refused it), or is not
+/// a transition (a plain comment, an edit), allocates nothing.
+///
+/// The sequence lives on the entry only, never on the node: an event keeps the shape its
+/// readers (history, attribution) already know, and the entry's `transitionEvent` is the one
+/// link between them.
 pub(crate) fn record(client: &StoreClient<'_, '_>, item: &str, node: &str) -> String {
     let ledger = client.ledger();
     let feed = format!("{}transition", ledger.prefix());
@@ -41,21 +45,21 @@ pub(crate) fn record(client: &StoreClient<'_, '_>, item: &str, node: &str) -> St
             head = v::TRANSITION_HEAD
         )),
         insert = client.in_graph(&format!(
-            "<{feed}> <{head}> ?seq . <{node}> <{seq_p}> ?seq .\n\
+            "<{feed}> <{head}> ?seq .\n\
              ?entry <{type_}> <{class}> ; <{seq_p}> ?seq ; <{on_p}> <{item}> ; \
              <{kind_p}> ?kind ; <{event_p}> <{node}> ; <{created}> ?at .",
             head = v::TRANSITION_HEAD,
             seq_p = v::TRANSITION_SEQ,
             type_ = v::ext::TYPE,
             class = v::TRANSITION_CLASS,
-            on_p = v::ON_ITEM,
+            on_p = v::TRANSITION_ITEM,
             kind_p = v::TRANSITION_KIND,
             event_p = v::TRANSITION_EVENT,
             created = v::ext::CREATED,
         )),
         where_ = client.in_graph(&format!(
             "{on} <{node}> <{type_}> ?class .\n\
-             FILTER NOT EXISTS {{ <{node}> <{seq_p}> ?seqAny }}\n\
+             FILTER NOT EXISTS {{ ?seen <{event_p}> <{node}> }}\n\
              OPTIONAL {{ <{node}> <{status}> ?status }}\n\
              OPTIONAL {{ <{node}> <{hand_back}> ?handBack }}\n\
              OPTIONAL {{ <{node}> <{created}> ?at }}\n\
@@ -72,7 +76,7 @@ pub(crate) fn record(client: &StoreClient<'_, '_>, item: &str, node: &str) -> St
              BIND(COALESCE(?headWas, 0) + 1 AS ?seq)\n\
              BIND(IRI(CONCAT(\"{feed}:seq:\", STR(?seq))) AS ?entry)",
             type_ = v::ext::TYPE,
-            seq_p = v::TRANSITION_SEQ,
+            event_p = v::TRANSITION_EVENT,
             status = v::STATUS,
             hand_back = v::HAND_BACK,
             created = v::ext::CREATED,
@@ -137,7 +141,7 @@ async fn read(client: &StoreClient<'_, '_>, after: u64, limit: usize) -> Result<
                 "VALUES ?entry {{ {subjects}}} ?entry <{seq}> ?seq ; <{on}> ?item ; \
                  <{kind}> ?kind ; <{event}> ?event . OPTIONAL {{ ?entry <{created}> ?at }}",
                 seq = v::TRANSITION_SEQ,
-                on = v::ON_ITEM,
+                on = v::TRANSITION_ITEM,
                 kind = v::TRANSITION_KIND,
                 event = v::TRANSITION_EVENT,
                 created = v::ext::CREATED,
