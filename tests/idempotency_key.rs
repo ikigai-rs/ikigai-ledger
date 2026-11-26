@@ -13,11 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use common::*;
+use futures::channel::oneshot;
 use futures::executor::block_on;
 use ikigai_core::{
-    ArgRef, Capability, Clock, Error, Fallback, Iri, Kernel, Request, Resend, Resolution, Scope,
-    Space, Time, Verb,
+    ArgRef, Capability, Clock, Endpoint, Error, Fallback, Invocation, Iri, Kernel, Representation,
+    Request, Resend, Resolution, Scope, Space, Time, Verb,
 };
 use ikigai_store::DurableStore;
 
@@ -583,6 +585,7 @@ fn the_contract_declares_the_token_and_its_window() {
     let space =
         ikigai_ledger::space_with(ikigai_ledger::SpaceConfig::default().resend_window(window));
     for (iri, verb) in [
+        ("urn:iki:ledger:append", Verb::Sink),
         ("urn:iki:ledger:comment", Verb::Sink),
         ("urn:iki:ledger:note", Verb::Sink),
         ("urn:iki:ledger:decision", Verb::Sink),
@@ -800,4 +803,341 @@ fn the_state_contract_declares_the_token_and_its_window() {
         .unwrap();
     assert_eq!(action.resend, Some(Resend::Key("idempotency-key".into())));
     assert_eq!(action.resend_window_secs, Some(window.as_secs()));
+}
+
+#[test]
+fn append_replays_the_lost_filing_answer_without_spending_another_number() {
+    for face in ["text/plain", "application/json"] {
+        let link = link();
+        let cap = writer("urn:test:filing");
+        let append = request(
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &with_token(&[("content", "The append repro"), ("as", face)], TOKEN),
+        );
+        let (lost, retry) = link.lose_and_retry(&append, &cap);
+        assert_eq!(text(&lost), text(&retry), "{face}");
+        let before = graph(&link.kernel);
+        assert_eq!(link.send(append, &cap).unwrap(), lost);
+        assert_eq!(graph(&link.kernel), before, "replay writes nothing");
+        let next = request(
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &[("content", "The next filing")],
+        );
+        assert!(text(&link.send(next, &cap).unwrap()).starts_with("#2 "));
+    }
+}
+
+#[test]
+fn append_tokens_are_scoped_to_the_principal_and_ledger() {
+    let link = link();
+    let a = writer("urn:test:filing-a");
+    let b = writer("urn:test:filing-b");
+    let args = with_token(&[("content", "Independent filing")], TOKEN);
+    let append = request(Verb::Sink, "urn:iki:ledger:append", &args);
+    let first = link.send(append.clone(), &a).unwrap();
+    let second = link.send(append.clone(), &b).unwrap();
+    assert!(text(&first).starts_with("#1 "));
+    assert!(text(&second).starts_with("#2 "));
+    let other = request(Verb::Sink, "urn:iki:ledger:other:append", &args);
+    let same_principal_other_ledger = Capability::scoped([
+        "urn:cap:ledger:write:other".to_string(),
+        graph_read("other"),
+        graph_write("other"),
+    ])
+    .with_principal("urn:test:filing-a")
+    .unwrap();
+    let third = link
+        .send(other.clone(), &same_principal_other_ledger)
+        .unwrap();
+    assert!(text(&third).starts_with("other#1 "));
+    assert_eq!(link.send(append.clone(), &a).unwrap(), first);
+    assert_eq!(link.send(append, &b).unwrap(), second);
+    assert_eq!(
+        link.send(other, &same_principal_other_ledger).unwrap(),
+        third
+    );
+}
+
+#[test]
+fn append_tokens_reject_mismatches_but_do_not_record_validation_failures_or_denials() {
+    let link = link();
+    let cap = writer("urn:test:filing");
+    let append = |args| {
+        request(
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &with_token(args, TOKEN),
+        )
+    };
+    let first = append(&[("content", "First"), ("key", "named")]);
+    let wrong_graph = Capability::scoped([
+        "urn:cap:ledger:write:default".to_string(),
+        graph_read("default"),
+        graph_write("other"),
+    ])
+    .with_principal("urn:test:filing")
+    .unwrap();
+    let before = graph(&link.kernel);
+    let malformed = request(
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &with_token(&[("content", "First")], "has space"),
+    );
+    assert!(matches!(
+        link.send(malformed, &cap),
+        Err(Error::InvalidArgument { name, .. }) if name == "idempotency-key"
+    ));
+    assert!(matches!(
+        link.send(first.clone(), &wrong_graph),
+        Err(Error::Denied(_))
+    ));
+    let invalid = append(&[("content", "First"), ("labels", "has space")]);
+    assert!(matches!(
+        link.send(invalid, &cap),
+        Err(Error::InvalidArgument { name, .. }) if name == "labels"
+    ));
+    assert_eq!(graph(&link.kernel), before);
+    let answer = link.send(first.clone(), &cap).unwrap();
+    assert!(!text(&answer).contains("existing"));
+    assert!(matches!(
+        link.send(first.clone(), &wrong_graph),
+        Err(Error::Denied(_))
+    ));
+    let before = graph(&link.kernel);
+    for args in [
+        &[("content", "Changed"), ("key", "named")][..],
+        &[("content", "First"), ("key", "another-name")][..],
+        &[
+            ("content", "First"),
+            ("key", "named"),
+            ("as", "application/json"),
+        ][..],
+    ] {
+        let error = link.send(append(args), &cap).unwrap_err();
+        assert!(matches!(&error, Error::InvalidArgument { name, .. } if name == "idempotency-key"));
+        assert!(error
+            .to_string()
+            .contains("was used for a different request"));
+    }
+    assert_eq!(link.send(first, &cap).unwrap(), answer);
+    assert_eq!(graph(&link.kernel), before);
+}
+
+#[test]
+fn append_replays_the_first_existing_answer_even_after_the_item_changes() {
+    let link = link();
+    let cap = Capability::root();
+    let args = [("content", "Named item"), ("key", "permanent-name")];
+    link.send(request(Verb::Sink, "urn:iki:ledger:append", &args), &cap)
+        .unwrap();
+    let tokened = request(
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &with_token(&args, TOKEN),
+    );
+    let (lost, retry) = link.lose_and_retry(&tokened, &cap);
+    assert_eq!(lost, retry);
+    assert!(text(&lost).ends_with(" existing open\n"));
+    sink(&link.kernel, "urn:iki:ledger:close", &[("item", "#1")]);
+    assert_eq!(link.send(tokened, &cap).unwrap(), lost);
+    let ordinary = link
+        .send(request(Verb::Sink, "urn:iki:ledger:append", &args), &cap)
+        .unwrap();
+    assert!(text(&ordinary).ends_with(" existing closed\n"));
+}
+
+#[test]
+fn append_replaces_an_expired_receipt_and_keeps_its_next_answer() {
+    let (kernel, hands) = kernel_with(
+        ikigai_ledger::SpaceConfig::default().resend_window(Duration::from_secs(48 * 3600)),
+    );
+    let link = LossyLink::new(kernel);
+    let cap = Capability::root();
+    let append = request(
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &with_token(&[("content", "Filing again after expiry")], TOKEN),
+    );
+    let first = link.send(append.clone(), &cap).unwrap();
+    hands.jump(Duration::from_secs(25 * 3600));
+    assert_eq!(link.send(append.clone(), &cap).unwrap(), first);
+    hands.jump(Duration::from_secs(24 * 3600));
+    let second = link.send(append.clone(), &cap).unwrap();
+    assert!(text(&second).starts_with("#2 "));
+    assert_eq!(link.send(append, &cap).unwrap(), second);
+    let records = select(
+        &link.kernel,
+        "SELECT ?record WHERE { GRAPH <urn:iki:ledger:graph:default> { ?r \
+         <https://ikigai-rs.dev/ns/ledger#replayRecord> ?record } }",
+    );
+    let records: serde_json::Value = serde_json::from_str(&records).unwrap();
+    assert_eq!(records["results"]["bindings"].as_array().unwrap().len(), 1);
+}
+
+/// Stop the first graph update before it reaches the store. On release, commit it
+/// and optionally lose the store's answer before the append can do any follow-up.
+struct PauseUpdate<E> {
+    inner: E,
+    pause: Arc<Mutex<Option<UpdateGate>>>,
+}
+
+struct UpdateGate {
+    arrived: oneshot::Sender<()>,
+    proceed: oneshot::Receiver<bool>,
+}
+
+impl Space for PauseUpdate<Arc<dyn Space>> {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let resolved = self.inner.resolve(request, scope);
+        if request.target.as_str() != "urn:iki:store:graph-update" {
+            return resolved;
+        }
+        resolved.map_endpoint(|inner| {
+            Arc::new(PauseUpdate {
+                inner,
+                pause: Arc::clone(&self.pause),
+            }) as Arc<dyn Endpoint>
+        })
+    }
+}
+
+#[async_trait]
+impl Endpoint for PauseUpdate<Arc<dyn Endpoint>> {
+    async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        let gate = self.pause.lock().unwrap().take();
+        let lose = match gate {
+            Some(gate) => {
+                gate.arrived.send(()).unwrap();
+                gate.proceed.await.unwrap()
+            }
+            None => false,
+        };
+        let answer = self.inner.invoke(inv).await?;
+        if lose {
+            return Err(Error::Timeout(
+                "lost the store acknowledgment after commit".into(),
+            ));
+        }
+        Ok(answer)
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> ikigai_core::Description {
+        self.inner.describe()
+    }
+}
+
+fn paused_append() -> (Kernel, Kernel, oneshot::Receiver<()>, oneshot::Sender<bool>) {
+    let (arrived, arrival) = oneshot::channel();
+    let (release, proceed) = oneshot::channel();
+    let store = Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>;
+    let gated = Arc::new(PauseUpdate {
+        inner: Arc::clone(&store),
+        pause: Arc::new(Mutex::new(Some(UpdateGate { arrived, proceed }))),
+    });
+    let clock = Arc::new(Hands(Arc::new(AtomicU64::new(1_795_000_000_000))));
+    let kernel = |store| {
+        let space = Fallback::new(vec![
+            store,
+            Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
+        ]);
+        Kernel::with_meta_renderer(Arc::new(space), Arc::new(ikigai_vocab::TurtleRenderer))
+            .with_clock(clock.clone())
+    };
+    (kernel(gated), kernel(store), arrival, release)
+}
+
+#[test]
+fn append_records_the_answer_before_it_can_lose_the_store_acknowledgment() {
+    let (kernel, independent, arrival, release) = paused_append();
+    let cap = Capability::root();
+    let append = request(
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &with_token(&[("content", "Atomic filing")], TOKEN),
+    );
+    let (first, ()) = block_on(async {
+        futures::join!(kernel.issue(append.clone(), &cap), async {
+            arrival.await.unwrap();
+            assert!(matches!(
+                kernel.issue(append.clone(), &cap).await,
+                Err(Error::RetryAfter { .. })
+            ));
+            release.send(true).unwrap();
+        })
+    });
+    assert!(matches!(first, Err(Error::Timeout(_))), "{first:?}");
+    let rows = select(
+        &independent,
+        "SELECT ?item WHERE { GRAPH <urn:iki:ledger:graph:default> { ?item a \
+         <https://ikigai-rs.dev/ns/ledger#Item> } }",
+    );
+    let rows: serde_json::Value = serde_json::from_str(&rows).unwrap();
+    let items = rows["results"]["bindings"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    let iri = items[0]["item"]["value"].as_str().unwrap();
+    let before = graph(&independent);
+    let retry = block_on(independent.issue(append, &cap)).unwrap();
+    assert_eq!(text(&retry.bytes), format!("#1 {iri}\n"));
+    assert_eq!(graph(&independent), before);
+}
+
+#[test]
+fn append_reconciles_counter_natural_key_and_token_races_at_commit() {
+    for (racer_args, second_number, existing) in [
+        (vec![("content", "Racer for the counter")], "#2 ", false),
+        (
+            vec![("content", "Racer for the key"), ("key", "name")],
+            "#1 ",
+            true,
+        ),
+        (
+            with_token(&[("content", "Filing"), ("key", "name")], TOKEN),
+            "#1 ",
+            false,
+        ),
+    ] {
+        let (kernel, independent, arrival, release) = paused_append();
+        let cap = Capability::root();
+        let append = request(
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &with_token(&[("content", "Filing"), ("key", "name")], TOKEN),
+        );
+        let racer = request(Verb::Sink, "urn:iki:ledger:append", &racer_args);
+        let same_request = racer.args == append.args;
+        let (first, winner) = block_on(async {
+            futures::join!(kernel.issue(append.clone(), &cap), async {
+                arrival.await.unwrap();
+                let result = independent.issue(racer, &cap).await;
+                release.send(false).unwrap();
+                result
+            })
+        });
+        let first = first.unwrap().bytes;
+        assert!(text(&first).starts_with(second_number), "{}", text(&first));
+        assert_eq!(text(&first).contains(" existing "), existing);
+        if same_request {
+            assert_eq!(first, winner.unwrap().bytes);
+        } else {
+            assert!(text(&winner.unwrap().bytes).starts_with("#1 "));
+        }
+        assert_eq!(block_on(kernel.issue(append, &cap)).unwrap().bytes, first);
+        let next = block_on(kernel.issue(
+            request(Verb::Sink, "urn:iki:ledger:append", &[("content", "Next")]),
+            &cap,
+        ))
+        .unwrap();
+        let next_number = if second_number == "#2 " { "#3 " } else { "#2 " };
+        assert!(
+            text(&next.bytes).starts_with(next_number),
+            "{}",
+            text(&next.bytes)
+        );
+    }
 }

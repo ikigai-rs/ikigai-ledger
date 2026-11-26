@@ -7,7 +7,6 @@ use ikigai_core::{Error, Iri, Request, Resend, Resolution, Scope, Space, Verb};
 #[test]
 fn only_writes_with_replay_identity_declare_safe_resends() {
     let space = ikigai_ledger::space();
-    let mut keyed = 0;
     let mut tokened = 0;
     for entry in space.entries().unwrap() {
         let iri = entry
@@ -44,7 +43,6 @@ fn only_writes_with_replay_identity_declare_safe_resends() {
             } else if action.verb == Verb::Sink
                 && action.inputs.iter().any(|input| input.name == "key")
             {
-                keyed += 1;
                 assert_eq!(
                     action.resend,
                     Some(Resend::Key("key".into())),
@@ -61,8 +59,7 @@ fn only_writes_with_replay_identity_declare_safe_resends() {
             }
         }
     }
-    assert!(keyed >= 1);
-    assert!(tokened >= 8);
+    assert!(tokened >= 9);
 }
 
 fn graph(kernel: &ikigai_core::Kernel) -> String {
@@ -164,7 +161,7 @@ fn a_move_replay_conflicts_and_from_does_not_identify_a_request_after_a_cycle() 
 #[test]
 fn turtle_meta_exposes_resend_safety_to_clients() {
     let kernel = kernel();
-    for (endpoint, key) in [("append", "key"), ("comment", "idempotency-key")] {
+    for endpoint in ["append", "comment"] {
         let meta = ok(
             &kernel,
             Verb::Meta,
@@ -172,7 +169,8 @@ fn turtle_meta_exposes_resend_safety_to_clients() {
             &[],
         );
         assert!(meta.contains("ik:resendKey <"), "{meta}");
-        assert!(meta.contains(&format!(":input:{key}>")), "{meta}");
+        assert!(meta.contains(":input:idempotency-key>"), "{meta}");
+        assert!(meta.contains("ik:resendWindow"), "{meta}");
         assert!(!meta.contains("ik:resendSafe true"));
     }
     let meta = ok(&kernel, Verb::Meta, "urn:iki:ledger:history", &[]);
