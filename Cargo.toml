@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-ledger"
-version = "0.26.2"
+version = "0.26.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
