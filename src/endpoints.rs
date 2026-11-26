@@ -680,6 +680,7 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             LedgerGrammar::action("append"),
             AppendEndpoint {
                 participants: participants.clone(),
+                tokens: tokens.clone(),
             },
         )
         .bind(
@@ -4004,6 +4005,7 @@ async fn clear_archive(client: &StoreClient<'_, '_>, item: &str) -> Result<usize
 #[derive(Clone)]
 struct AppendEndpoint {
     participants: Participants,
+    tokens: replay::Tokens,
 }
 
 #[async_trait]
@@ -4013,6 +4015,40 @@ impl Endpoint for AppendEndpoint {
             return Err(unsupported("ledger-append", inv.request.verb));
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Write)?);
+        if inv.request.args.contains_key(replay::ARG) {
+            let grant = ikigai_store::cap_write_graph(&client.ledger().graph());
+            if !inv.capability.allows(&grant) {
+                return Err(Error::Denied(
+                    format!(
+                        "an append with a request token requires the graph write grant `{grant}`"
+                    )
+                    .into(),
+                ));
+            }
+        }
+        let token = match replay::begin_append(inv, &client, &self.tokens).await? {
+            replay::Begin::Answered(answer) => return answer,
+            replay::Begin::Run(token) => token,
+        };
+        self.append(inv, &client, token.as_ref()).await
+    }
+
+    fn name(&self) -> &str {
+        "ledger-append"
+    }
+
+    fn describe(&self) -> Description {
+        self.contract()
+    }
+}
+
+impl AppendEndpoint {
+    async fn append(
+        &self,
+        inv: &Invocation<'_>,
+        client: &StoreClient<'_, '_>,
+        token: Option<&replay::Token>,
+    ) -> Result<Representation> {
         // Every argument is checked before anything is written: a bad `as` or a bad key
         // refused AFTER filing would leave an item the caller was told was not filed.
         let want = wanted_face(inv, &WRITE_FACES)?;
@@ -4032,7 +4068,7 @@ impl Endpoint for AppendEndpoint {
         // author or date files nothing.
         let who = attribution::resolve(
             inv,
-            &client,
+            client,
             self.participants.as_deref(),
             Dates::CreatedAndModified,
             now,
@@ -4139,6 +4175,22 @@ impl Endpoint for AppendEndpoint {
             None => String::new(),
         };
 
+        if let Some(token) = token {
+            return self
+                .append_with_receipt(
+                    client,
+                    token,
+                    now,
+                    want,
+                    &iri,
+                    key.as_deref(),
+                    &fingerprint,
+                    &triples,
+                    &key_guard,
+                )
+                .await;
+        }
+
         // ★ A TAKEN KEY IS ANSWERED WITHOUT A WRITE (ledger #822). The guarded update below
         // would change nothing, but it is still a successful Sink at
         // `urn:iki:store:graph-update`, and the kernel cuts that thread after every
@@ -4156,8 +4208,8 @@ impl Endpoint for AppendEndpoint {
         // core question (see the report on ledger #822), not this module's.
         // `tests/noop_keyed_append.rs` keeps both halves.
         if let Some(key) = &key {
-            if let Some(found) = model::find_by_key(&client, key).await? {
-                return existing_answer(&client, want, &found, key, &fingerprint).await;
+            if let Some(found) = model::find_by_key(client, key).await? {
+                return existing_answer(client, want, &found, key, &fingerprint).await;
             }
         }
 
@@ -4172,48 +4224,32 @@ impl Endpoint for AppendEndpoint {
         // name (`acme#12`) as soon as there is more than the default. Sharing one counter
         // across ledgers would have leaked the other ledgers' activity through the gaps
         // in the sequence, which is a small thing to leak and an unnecessary one.
-        let counter = client.ledger().counter();
-        let update = format!(
-            "DELETE {{ {delete} }}\nINSERT {{ {insert} }}\nWHERE {{\n  \
-             {{ {{ SELECT ?last WHERE {{ {last_q} }} ORDER BY DESC(?last) LIMIT 1 }}\n    \
-             UNION\n    {{ BIND({zero} AS ?last) FILTER NOT EXISTS {{ {any_q} }} }} }}\n  \
-             OPTIONAL {{ {old_q} }}\n  BIND(?last + 1 AS ?new){key_guard}\n}}",
-            delete = client.in_graph(&format!("<{counter}> <{}> ?old", v::LAST_NUMBER)),
-            insert = client.in_graph(&format!(
-                "<{counter}> <{type_}> <{class}> ; <{last}> ?new .\n{triples}",
-                type_ = v::ext::TYPE,
-                class = v::COUNTER_CLASS,
-                last = v::LAST_NUMBER,
-            )),
-            last_q = client.in_graph(&format!("<{counter}> <{}> ?last", v::LAST_NUMBER)),
-            zero = integer(0),
-            any_q = client.in_graph(&format!("<{counter}> <{}> ?any", v::LAST_NUMBER)),
-            old_q = client.in_graph(&format!("<{counter}> <{}> ?old", v::LAST_NUMBER)),
-        );
-        client.update(&update).await?;
+        client
+            .update(&append_update(client, &triples, "", &key_guard))
+            .await?;
 
         // Which item the key names now says what happened: the one just minted (filed), or
         // one that was there first (existing, and nothing was written).
         if let Some(key) = &key {
-            let found = model::find_by_key(&client, key).await?.ok_or_else(|| {
+            let found = model::find_by_key(client, key).await?.ok_or_else(|| {
                 Error::Endpoint(format!(
                     "a keyed append for `{key}` neither filed an item nor found one: the store \
                      accepted an update that changed nothing, which should be impossible"
                 ))
             })?;
             if found.item != iri {
-                return existing_answer(&client, want, &found, key, &fingerprint).await;
+                return existing_answer(client, want, &found, key, &fingerprint).await;
             }
         }
 
-        let item = model::load_item(&client, &iri).await?.ok_or_else(|| {
+        let item = model::load_item(client, &iri).await?.ok_or_else(|| {
             Error::Endpoint(format!(
                 "the item was written but does not read back at {iri}: the store accepted \
                  an update that changed nothing, which should be impossible"
             ))
         })?;
         append_answer(
-            &client,
+            client,
             want,
             "filed",
             "open",
@@ -4224,14 +4260,10 @@ impl Endpoint for AppendEndpoint {
         )
     }
 
-    fn name(&self) -> &str {
-        "ledger-append"
-    }
-
-    fn describe(&self) -> Description {
+    fn contract(&self) -> Description {
         let spec = write_scopes(
-            ikigai_core::ActionSpec::new(Verb::Sink)
-                .resend_safe_with_key("key")
+            replay::declare(
+                ActionSpec::new(Verb::Sink)
                 .input(ledger_arg("append"))
                 .summary(
                     "File a new item. The number is allocated from the ledger's counter in \
@@ -4351,6 +4383,9 @@ impl Endpoint for AppendEndpoint {
                 .input(as_arg(&WRITE_FACES))
                 .output(PLAIN)
                 .output(JSON),
+                self.tokens.window,
+                "the filing",
+            ),
             CAP_WRITE,
         );
         Description::new("ledger-append")
@@ -4362,6 +4397,106 @@ impl Endpoint for AppendEndpoint {
             .verb(Verb::Meta)
             .action(spec)
     }
+
+    /// The receipt must contain the number before the update, so render it against an
+    /// observed counter and let the same WHERE that allocates the number check the observation.
+    /// A lost race spends no number and installs no receipt. If a natural key is already taken,
+    /// there is no filing to commit, but its first answer still needs a guarded receipt.
+    #[allow(clippy::too_many_arguments)]
+    async fn append_with_receipt(
+        &self,
+        client: &StoreClient<'_, '_>,
+        token: &replay::Token,
+        now: u64,
+        want: &str,
+        iri: &str,
+        key: Option<&str>,
+        fingerprint: &str,
+        triples: &str,
+        key_guard: &str,
+    ) -> Result<Representation> {
+        let window = self.tokens.window;
+        let (delete, guard) = token.replacement(client, now, window);
+        for _ in 0..8 {
+            let found = match key {
+                Some(key) => model::find_by_key(client, key)
+                    .await?
+                    .map(|found| (found, key)),
+                None => None,
+            };
+            let update = if let Some((found, key)) = found {
+                let answer = existing_answer(client, want, &found, key, fingerprint).await?;
+                let record = client.in_graph(&token.triples(&answer, now));
+                format!("DELETE {{ {delete} }} INSERT {{ {record} }} WHERE {{ {guard} }}")
+            } else {
+                let rows = client
+                    .select(&format!(
+                        "SELECT ?last WHERE {{ {} }} ORDER BY DESC(?last) LIMIT 1",
+                        append_counter(client, "?last")
+                    ))
+                    .await?;
+                let last = match rows.first() {
+                    None => 0,
+                    Some(row) => row
+                        .get("last")
+                        .and_then(sparql::Binding::as_i64)
+                        .ok_or_else(|| {
+                            Error::Endpoint("the append counter is not an integer".into())
+                        })?,
+                };
+                let number = last.checked_add(1).ok_or_else(|| {
+                    Error::Endpoint("the append counter cannot allocate another number".into())
+                })?;
+                let answer = append_answer(client, want, "filed", "open", number, iri, key, false)?;
+                let record = token.triples(&answer, now);
+                append_update(
+                    client,
+                    &format!("{triples}{record}"),
+                    &delete,
+                    &format!("{key_guard} FILTER(?last = {}) {guard}", integer(last)),
+                )
+            };
+            client.update(&update).await?;
+            // The receipt itself is the commit witness, not the item (which can be
+            // deleted immediately). A different space may have installed it first.
+            if let Some(answer) = token.live_answer(client, now, window).await? {
+                return answer;
+            }
+        }
+        Err(Error::RetryAfter {
+            delay: Some(std::time::Duration::from_millis(250)),
+            detail: "Concurrent filings kept changing the ledger before append could commit. Retry the same request".into(),
+        })
+    }
+}
+
+fn append_counter(client: &StoreClient<'_, '_>, value: &str) -> String {
+    client.in_graph(&format!(
+        "<{}> <{}> {value}",
+        client.ledger().counter(),
+        v::LAST_NUMBER
+    ))
+}
+
+/// The number is allocated per ledger under the same store lock as the filing and its receipt.
+fn append_update(client: &StoreClient<'_, '_>, triples: &str, delete: &str, guard: &str) -> String {
+    let counter = client.ledger().counter();
+    format!(
+        "DELETE {{ {old_q} {delete} }}\nINSERT {{ {insert} }}\nWHERE {{\n  \
+         {{ {{ SELECT ?last WHERE {{ {last_q} }} ORDER BY DESC(?last) LIMIT 1 }}\n    \
+         UNION\n    {{ BIND({zero} AS ?last) FILTER NOT EXISTS {{ {any_q} }} }} }}\n  \
+         OPTIONAL {{ {old_q} }}\n  BIND(?last + 1 AS ?new){guard}\n}}",
+        insert = client.in_graph(&format!(
+            "<{counter}> <{type_}> <{class}> ; <{last}> ?new .\n{triples}",
+            type_ = v::ext::TYPE,
+            class = v::COUNTER_CLASS,
+            last = v::LAST_NUMBER,
+        )),
+        last_q = append_counter(client, "?last"),
+        zero = integer(0),
+        any_q = append_counter(client, "?any"),
+        old_q = append_counter(client, "?old"),
+    )
 }
 
 /// The keyed append's "nothing was filed": the item the key already names, with its

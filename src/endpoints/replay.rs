@@ -3,6 +3,9 @@
 //! `reopen`, `defer` and `claim`'s release, and (ledger #4061) the state compare-and-set,
 //! `item:{id}:state`, whose record rides in the compare-and-set's own update.
 //!
+//! Append (ledger #4057) guards the filing and its receipt in the same update, and keeps
+//! that receipt independent of the item so that a retry cannot recreate a deleted filing.
+//!
 //! A client that sent one of these writes and does not know whether it landed (a timeout, a
 //! dropped connection) sends it again under the same token. The retry is answered with the
 //! FIRST answer, byte for byte, and writes nothing: no second comment, no second note, no
@@ -35,7 +38,7 @@
 //! the record by a second update; that update guards nothing, since the write it describes
 //! has already landed or did not happen.
 //!
-//! A record is a `ledger:Replay` in the ledger's graph that belongs to its item by
+//! An item-bound `ledger:Replay` in the ledger's graph belongs to its item by
 //! `ledger:onItem`, so a delete archives it and a purge destroys it with the item: it can hold
 //! the comment's text (the JSON face says it), and a purge is the promise that the text is gone.
 
@@ -69,7 +72,7 @@ pub(crate) fn arg(what: &str) -> ArgSpec {
              answer byte for byte and writes nothing, so {what} is recorded once. A repeat with \
              any other argument changed is refused (InvalidArgument), and one while the first \
              is still running is answered RetryAfter. Not the same as `key=`, which names the \
-             comment itself for as long as it lives."
+             item or comment itself for as long as it lives."
         ))
         .class(v::ext::XSD_STRING)
         .optional()
@@ -163,6 +166,25 @@ pub(crate) async fn begin(
     endpoint: &str,
     tokens: &Tokens,
 ) -> Result<Begin> {
+    begin_with(inv, client, endpoint, tokens, false).await
+}
+
+/// Append retires an expired receipt only in the update that installs its replacement.
+pub(super) async fn begin_append(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    tokens: &Tokens,
+) -> Result<Begin> {
+    begin_with(inv, client, "append", tokens, true).await
+}
+
+async fn begin_with(
+    inv: &Invocation<'_>,
+    client: &StoreClient<'_, '_>,
+    endpoint: &str,
+    tokens: &Tokens,
+    replace_at_commit: bool,
+) -> Result<Begin> {
     let Some(key) = IdempotencyKey::from_request(inv.request, ARG)? else {
         return Ok(Begin::Run(None));
     };
@@ -171,13 +193,15 @@ pub(crate) async fn begin(
     let scope = ReplayScope::new(
         format!("{}{endpoint}", ledger.prefix()),
         inv.capability.principal(),
-        key.clone(),
+        key,
     );
     let digest = scope.content_id().to_string();
     let digest = digest.strip_prefix("b3:").unwrap_or(&digest);
     let node = format!("{}replay:{digest}", ledger.prefix());
     let Some(flight) = Flight::take(&tokens.flights, format!("{} {node}", ledger.graph())) else {
-        return Ok(Begin::Answered(Err(key.in_flight(Some(IN_FLIGHT_DELAY)))));
+        return Ok(Begin::Answered(Err(scope
+            .key
+            .in_flight(Some(IN_FLIGHT_DELAY)))));
     };
     let fingerprint = inv.request.fingerprint_without(ARG);
     let token = Token {
@@ -189,28 +213,65 @@ pub(crate) async fn begin(
     };
     match token.stored(client).await? {
         Some(record) if record.is_live(Time::from_millis(now), tokens.window) => {
-            if !record.matches(token.fingerprint) {
-                return Ok(Begin::Answered(Err(key.mismatch(ARG))));
-            }
-            let answer = match record.representation() {
-                Some(repr) => Ok(repr),
-                None => Err(record.error().unwrap_or_else(|| {
-                    Error::Endpoint("a replay record holds neither an answer nor an error".into())
-                })),
-            };
-            Ok(Begin::Answered(answer))
+            Ok(Begin::Answered(token.answer(&record)))
         }
-        // After its window the token is a new request; the stale record goes now, so the
-        // write's own insert is the only record under this node.
-        Some(_) => {
+        Some(_) if !replace_at_commit => {
             client.update(&token.removal(client)).await?;
             Ok(Begin::Run(Some(token)))
         }
-        None => Ok(Begin::Run(Some(token))),
+        _ => Ok(Begin::Run(Some(token))),
     }
 }
 
 impl Token {
+    fn answer(&self, record: &Replay) -> Result<Representation> {
+        if !record.matches(self.fingerprint) {
+            return Err(self.scope.key.mismatch(ARG));
+        }
+        match record.representation() {
+            Some(repr) => Ok(repr),
+            None => Err(record.error().unwrap_or_else(|| {
+                Error::Endpoint("a replay record holds neither an answer nor an error".into())
+            })),
+        }
+    }
+
+    /// Read the receipt committed under this token, including a winner in another space.
+    pub(super) async fn live_answer(
+        &self,
+        client: &StoreClient<'_, '_>,
+        now: u64,
+        window: Duration,
+    ) -> Result<Option<Result<Representation>>> {
+        Ok(self
+            .stored(client)
+            .await?
+            .filter(|record| record.is_live(Time::from_millis(now), window))
+            .map(|record| self.answer(&record)))
+    }
+
+    /// Append's DELETE and WHERE fragments: retire an expired receipt at commit, but
+    /// never overwrite one still inside its window, even across independent spaces.
+    pub(super) fn replacement(
+        &self,
+        client: &StoreClient<'_, '_>,
+        now: u64,
+        window: Duration,
+    ) -> (String, String) {
+        let old = client.in_graph(&format!("<{}> ?receiptP ?receiptO", self.node));
+        let recent = now
+            .checked_sub(u64::try_from(window.as_millis()).unwrap_or(u64::MAX))
+            .map(|cutoff| format!("FILTER(?recorded > {})", datetime(cutoff)))
+            .unwrap_or_default();
+        let live = client.in_graph(&format!(
+            "<{}> <{}> ?recorded . {recent}",
+            self.node,
+            v::ext::CREATED
+        ));
+        let guard = format!("FILTER NOT EXISTS {{ {live} }} OPTIONAL {{ {old} }}");
+        (old, guard)
+    }
+
     /// Say which item the record belongs to, so it goes with the item on a delete or a purge.
     pub(crate) fn on_item(&self, item: &str) {
         *self.item.lock().unwrap_or_else(|e| e.into_inner()) = Some(item.to_string());

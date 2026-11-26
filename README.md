@@ -513,18 +513,17 @@ their fields and need no migration.
 
 ### Resending writes after a lost answer
 
-The action contract declares `resend_safe_with_key("key")` on `append`: a client may resend
-the same request with a nonblank `key`. A replay writes nothing and answers `existing` in plain
-text or `"outcome": "existing"` in JSON. `item=key:…` only selects an item; it does not make
-another write safe to resend. Keys belong to one ledger, with the lifetimes described above.
+On `append`, `key=` is the permanent name of an item. A later append with that name files
+nothing and answers `existing` in plain text or `"outcome": "existing"` in JSON.
+`item=key:…` only selects an item and does not make another write safe to resend.
 
-**Request tokens** (ledger #4059). `comment`, `note`, `decision`, `close`, `reopen`, `defer`
-(both verbs) and a claim's release take `idempotency-key=`, and their contracts declare
-`resend_safe_with_key("idempotency-key")` with the window as `ik:resendWindow`. A token is
+**Request tokens** (ledger #4059 and #4057). `append`, `comment`, `note`, `decision`, `close`,
+`reopen`, `defer` (both verbs) and a claim's release take `idempotency-key=`. Their contracts
+declare `resend_safe_with_key("idempotency-key")` with the window as `ik:resendWindow`. A token is
 one attempt at one write: ASCII letters, digits, `-` `.` `_` `~` `:`, at most 256 characters.
 A repeat under it, from the same principal, within the window, answers the first answer byte
-for byte and writes nothing, so a retried close, reopen, deferral or release no longer posts
-its `content=` note twice. The rules:
+for byte and writes nothing. A retried append files only once, and a retried close, reopen,
+deferral or release no longer posts its `content=` note twice. The rules:
 
 - The token is scoped per endpoint resource, principal and token. `comment`, `note` and
   `decision` share one scope, as they share `key=`'s namespace.
@@ -535,12 +534,14 @@ its `content=` note twice. The rules:
 - A repeat while the first attempt still runs in this process is answered `RetryAfter`.
 - The window is 24 hours unless the host sets `SpaceConfig::resend_window`, and never less.
   After it, the token is a new request.
-- The record (`ledger:Replay`) is written in the same store update as the comment it guards,
-  so the two land together or not at all. It belongs to its item, so a delete archives it and
-  a purge destroys it.
+- A filing or comment and its `ledger:Replay` land in the same store update. A comment's
+  record belongs to its item, so a delete archives it and a purge destroys it. An append
+  receipt contains the item identity and status but not its title or body. It stays in the
+  ledger graph through deletion or purge so a retry of a lost filing does not recreate it.
 
-`key=` on a comment is a different thing: it names the comment for as long as the comment
-lives, and its replay answers `existing`. A call may carry both.
+On append and comment, a caller may send both `key=` and `idempotency-key=`. Only the token
+declares a safe resend to clients. If the natural key was already taken on the first attempt,
+the token remembers that first `existing` answer, even if the item's status changes.
 
 The history import Sink declares `resend_safe()`: every accepted event already has a
 caller-supplied source ID in its Turtle content. Replaying a batch records no new events;

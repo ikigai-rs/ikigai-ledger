@@ -240,3 +240,30 @@ fn concurrent_transitions_from_one_state_apply_once_on_the_durable_store() {
         let _ = std::fs::remove_dir_all(&path);
     }
 }
+
+#[test]
+fn an_append_receipt_replays_after_restart_and_item_purge() {
+    let path = scratch("append-receipt");
+    let args = [
+        ("content", "The filing whose answer was lost"),
+        ("idempotency-key", "retry-after-restart"),
+        ("as", "application/json"),
+    ];
+    let first = {
+        let kernel = kernel_over(DurableStore::open(&path).unwrap());
+        let first = sink(&kernel, "urn:iki:ledger:append", &args);
+        ok(
+            &kernel,
+            Verb::Delete,
+            "urn:iki:ledger:item:1",
+            &[("purge", "true")],
+        );
+        first
+    };
+    {
+        let kernel = kernel_over(DurableStore::open(&path).unwrap());
+        assert_eq!(sink(&kernel, "urn:iki:ledger:append", &args), first);
+        assert_eq!(append(&kernel, "The next filing", &[]), "#2");
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
