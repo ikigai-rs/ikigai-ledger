@@ -447,10 +447,9 @@ fn page_query_filter_last(limit: usize) -> String {
     )
 }
 
-/// `model::load` with no page (what `next` reads through `load_open_items`): every open item
-/// with its 28 optional single-valued properties, sorted.
-fn load_query() -> String {
-    let optionals = [
+/// The 28 optional single-valued properties `model::load_counted` reads for each item.
+fn record_optionals() -> String {
+    [
         (v::ext::CREATED, "created"),
         (v::ext::MODIFIED, "modified"),
         (v::BODY, "body"),
@@ -479,15 +478,62 @@ fn load_query() -> String {
     ]
     .iter()
     .map(|(p, var)| format!("OPTIONAL {{ ?item <{p}> ?{var} }}\n"))
-    .collect::<String>();
+    .collect::<String>()
+        + &format!(
+            "OPTIONAL {{ ?item <{}> ?kind . FILTER(?kind != <{}>) }}\n",
+            v::ext::TYPE,
+            v::ITEM_CLASS
+        )
+}
+
+/// `model::load` with no page (what `next` reads through `load_open_items`): every open item
+/// with its 28 optional single-valued properties, sorted.
+fn load_query() -> String {
     format!(
-        "SELECT * WHERE {{ GRAPH <{GRAPH}> {{ {}{optionals}\
-         OPTIONAL {{ ?item <{ty}> ?kind . FILTER(?kind != <{class}>) }}\n{} }} }} \
+        "SELECT * WHERE {{ GRAPH <{GRAPH}> {{ {}{}{} }} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         listed(),
+        record_optionals(),
         open_clause(),
-        ty = v::ext::TYPE,
-        class = v::ITEM_CLASS,
+    )
+}
+
+/// `model::load_page` for the open filter at `limit`, the one query an `items` listing
+/// issues: the count, and under one OPTIONAL the [`page_query`] sub-select and the page's
+/// records, inside the records' graph group, so the records join onto the page's rows.
+fn listing_query(limit: usize) -> String {
+    format!(
+        "SELECT * WHERE {{ {} OPTIONAL {{ GRAPH <{GRAPH}> {{ {{ {} }}\n{}{}{} }} }} }} \
+         ORDER BY DESC({RECENCY}) DESC(?number)",
+        count_subquery(),
+        page_query(limit),
+        listed(),
+        record_optionals(),
+        open_clause(),
+    )
+}
+
+/// [`listing_query`] as it was spelled before ledger #3258's second change: the page
+/// sub-select BESIDE the records' graph group, so the records of every item were read
+/// before the join kept the page's. Kept for the comparison.
+fn listing_query_page_beside(limit: usize) -> String {
+    format!(
+        "SELECT * WHERE {{ {} OPTIONAL {{ {{ {} }}\nGRAPH <{GRAPH}> {{ {}{}{} }} }} }} \
+         ORDER BY DESC({RECENCY}) DESC(?number)",
+        count_subquery(),
+        page_query(limit),
+        listed(),
+        record_optionals(),
+        open_clause(),
+    )
+}
+
+/// `model::count_subquery` for the open filter: the total, bound as `?listed`.
+fn count_subquery() -> String {
+    format!(
+        "{{ SELECT (COUNT(DISTINCT ?item) AS ?listed) WHERE {{ GRAPH <{GRAPH}> {{ {}{} }} }} }}",
+        listed(),
+        open_clause()
     )
 }
 
@@ -711,11 +757,22 @@ fn scale_round() {
             select(&kernel, &page_query_filter_last(50)),
             "the page's rows depend on where its filter clauses sit"
         );
+        // And the listing answers the same rows with its page inside the records' group.
+        assert_eq!(
+            select(&kernel, &listing_query(50)),
+            select(&kernel, &listing_query_page_beside(50)),
+            "the listing's rows depend on where its page sub-select sits"
+        );
         let parts: Vec<(&str, Vec<String>)> = vec![
             ("q: count (open)", vec![count_query()]),
             ("q: page limit=1", vec![page_query(1)]),
             ("q: page limit=50", vec![page_query(50)]),
             ("q: page, filter last", vec![page_query_filter_last(50)]),
+            ("q: listing limit=50", vec![listing_query(50)]),
+            (
+                "q: listing, page beside",
+                vec![listing_query_page_beside(50)],
+            ),
             ("q: load every open", vec![load_query()]),
             ("q: fill every open", fills),
             ("q: defects (2 scans)", vec![missing, values]),

@@ -2060,6 +2060,14 @@ async fn load_counted(
     let listed = if counted { " ?listed" } else { "" };
     // Keep the count even when the page is past the end. The OPTIONAL covers both the
     // selected subjects and their records; neither is read again after this snapshot.
+    //
+    // ★ **The page sub-select INSIDE the records' graph group, ahead of their patterns**
+    // (ledger #3258). Written as a sibling of that group, the evaluator read the records,
+    // with their 28 OPTIONALs, of every item in the ledger and only then joined the page's
+    // 50 rows. At 10x that was 1.4 s of the listing's 1.65 s query. Joined in the same
+    // group, the records are read for the page's items alone, and the query is 0.25 s, the
+    // count and the page's own sort. The sub-select names its own graph, so it reads what
+    // it read before.
     let (page, start, end) = if matches!(selection, ItemSelection::Page) {
         (page_pattern(client, filter)?, "OPTIONAL {", "}")
     } else {
@@ -2070,10 +2078,10 @@ async fn load_counted(
         "SELECT ?item ?kind ?number ?title ?body ?status ?reason ?priority ?deferred ?author \
          ?revision ?raised ?key ?holder ?purpose ?created ?modified ?state ?claimKind ?lease ?expires \
          ?principal ?epoch ?awaiting ?authorSource ?committer ?committedAt ?createdSource \
-         ?modifiedSource ?claimedModified{listed} WHERE {{ {count}{start}{page}{}{end} }} \
+         ?modifiedSource ?claimedModified{listed} WHERE {{ {count}{start}{}{end} }} \
          ORDER BY DESC({RECENCY}) DESC(?number)",
         client.in_graph(&format!(
-            "{values}{lead}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
+            "{page}{values}{lead}?item <{type_}> <{item_class}> ;\n  <{number}> ?number ;\n  <{title}> ?title ;\n  \
              <{status}> ?status .\n\
              OPTIONAL {{ ?item <{created}> ?created }}\n\
              OPTIONAL {{ ?item <{modified}> ?modified }}\n\
