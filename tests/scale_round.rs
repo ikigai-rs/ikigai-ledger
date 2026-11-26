@@ -419,9 +419,23 @@ fn count_query() -> String {
     )
 }
 
-/// `model::page_iris` for the open filter at `limit`: GROUP BY and ORDER BY over every
-/// open item before the LIMIT.
+/// `model::page_pattern` for the open filter at `limit`: the filter clauses, then the two
+/// timestamp OPTIONALs, then GROUP BY and ORDER BY over every open item before the LIMIT.
 fn page_query(limit: usize) -> String {
+    format!(
+        "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ GRAPH <{GRAPH}> {{ \
+         {}{}OPTIONAL {{ ?item <{}> ?created }}\nOPTIONAL {{ ?item <{}> ?modified }}\n }} }} \
+         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET 0",
+        listed(),
+        open_clause(),
+        v::ext::CREATED,
+        v::ext::MODIFIED,
+    )
+}
+
+/// [`page_query`] as it was spelled before ledger #3258: the OPTIONALs ahead of the filter
+/// clauses, so they join onto every item, closed ones included. Kept for the comparison.
+fn page_query_filter_last(limit: usize) -> String {
     format!(
         "SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ GRAPH <{GRAPH}> {{ \
          {}OPTIONAL {{ ?item <{}> ?created }}\nOPTIONAL {{ ?item <{}> ?modified }}\n{} }} }} \
@@ -691,10 +705,17 @@ fn scale_round() {
         };
         let [missing, values] = defect_queries();
         let fills = fill_queries(&open_iris);
+        // The reordered page (ledger #3258) answers exactly what the old spelling answered.
+        assert_eq!(
+            select(&kernel, &page_query(50)),
+            select(&kernel, &page_query_filter_last(50)),
+            "the page's rows depend on where its filter clauses sit"
+        );
         let parts: Vec<(&str, Vec<String>)> = vec![
             ("q: count (open)", vec![count_query()]),
             ("q: page limit=1", vec![page_query(1)]),
             ("q: page limit=50", vec![page_query(50)]),
+            ("q: page, filter last", vec![page_query_filter_last(50)]),
             ("q: load every open", vec![load_query()]),
             ("q: fill every open", fills),
             ("q: defects (2 scans)", vec![missing, values]),
