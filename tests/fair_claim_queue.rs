@@ -393,7 +393,7 @@ fn run(strategy: Strategy, lanes: usize, seed: u64) -> Outcome {
             } else if real && t >= next_try {
                 // Woken, or at its poll: read the queue, and claim only if offered.
                 if ledger.offered_to().as_deref() == Some(names[i].as_str()) {
-                    Some(ledger.claim(&names[i]).map_err(|()| ()).map(Ok))
+                    Some(ledger.claim(&names[i]).map(Ok))
                 } else {
                     state[i] = State::Waiting {
                         since,

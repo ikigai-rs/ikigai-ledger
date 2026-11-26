@@ -774,8 +774,7 @@ impl WaitEndpoint {
         if item.claimed_by.is_none() && queue.offered_to_another(&holder, caller).is_none() {
             let mut request = ikigai_core::Request::new(
                 Verb::Sink,
-                Iri::parse(&ledger.resource("claim"))
-                    .map_err(|e| Error::Endpoint(e.to_string()))?,
+                Iri::parse(ledger.resource("claim")).map_err(|e| Error::Endpoint(e.to_string()))?,
             )
             .with_arg(
                 "item",
@@ -1278,19 +1277,6 @@ impl Endpoint for OffersEndpoint {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_offer_bound_is_the_poll_plus_a_margin_between_a_floor_and_a_ceiling() {
-        assert_eq!(offer_bound(None), 60_000);
-        assert_eq!(offer_bound(Some(10_000)), 60_000);
-        assert_eq!(offer_bound(Some(120_000)), 150_000);
-        assert_eq!(offer_bound(Some(600_000)), 300_000);
-    }
-}
-
 /// One standing offer in a ledger, for `next`.
 pub(crate) struct Standing {
     item: String,
@@ -1373,4 +1359,17 @@ pub(crate) fn exclude_offered(
         }
     }
     offers.iter().map(|o| o.ends).min()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_offer_bound_is_the_poll_plus_a_margin_between_a_floor_and_a_ceiling() {
+        assert_eq!(offer_bound(None), 60_000);
+        assert_eq!(offer_bound(Some(10_000)), 60_000);
+        assert_eq!(offer_bound(Some(120_000)), 150_000);
+        assert_eq!(offer_bound(Some(600_000)), 300_000);
+    }
 }
