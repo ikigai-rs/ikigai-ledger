@@ -97,7 +97,12 @@ const CLOSE_REASONS: &[&str] = &[
     v::CLOSE_REASONS[3].1,
     v::CLOSE_REASONS[4].1,
 ];
-const LINK_TYPES: &[&str] = &[v::LINK_TYPES[0].1, v::LINK_TYPES[1].1, v::LINK_TYPES[2].1];
+const LINK_TYPES: &[&str] = &[
+    v::LINK_TYPES[0].1,
+    v::LINK_TYPES[1].1,
+    v::LINK_TYPES[2].1,
+    v::LINK_TYPES[3].1,
+];
 const EDIT_KINDS: &[&str] = &[
     "label", "unlabel", "state", "link", "unlink", "about", "unabout", "edit", "defer", "resume",
 ];
@@ -133,6 +138,7 @@ const CLOSE_SHAPE: &[Slot] = &[
     STATUS,
     slot(v::CLOSED_REASON, Value::OneOfIris(CLOSE_REASONS), 0, 1),
     slot(v::EVIDENCE, Value::Iri, 0, usize::MAX),
+    slot(v::CAUSED_BY, Value::Iri, 0, usize::MAX),
 ];
 const LABEL_SHAPE: &[Slot] = &[
     CREATED,

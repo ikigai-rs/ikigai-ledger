@@ -244,7 +244,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:claim` | Source | whether a claim epoch is still current on an item | `read:{ledger}` |
 | `…:{ledger}:claim` | Sink · Delete | take it (optionally on a lease) / hand it back / take over an expired lease | `claim:{ledger}` or `write:{ledger}` |
 | `…:{ledger}:defer` | Sink · Delete | not now / now again | `write:{ledger}` |
-| `…:{ledger}:link` | Sink · Delete | blocks / parent / related | `write:{ledger}` |
+| `…:{ledger}:link` | Sink · Delete | blocks / parent / related / caused-by | `write:{ledger}` |
 | `…:{ledger}:label` | Sink · Delete | tag / untag | `write:{ledger}` |
 | `…:{ledger}:purge` | Delete | destroy, leaving a tombstone | `purge:{ledger}` |
 | `…:{ledger}:next` | Source | the ready set, ranked | `read:{ledger}` |
@@ -821,9 +821,20 @@ $ source urn:iki:ledger:item:12
 - `tests/children.rs`. On 0.11.1 `parent=` was not an argument, and an unknown argument is
   ignored, so `items parent=1` listed every item.
 
+## Recording what introduced a defect
+
+`link item=2 type=caused-by content=#1` records that defect #2 was introduced by item #1.
+It is informational and does not affect readiness. It can cross ledgers under the same
+`link-in` grant as `related`, without a mirror. Item faces and link edit history name the target.
+
+A close can also carry `causedBy=#1` or `causedBy=owner/repo#42`; space separates multiple
+causes. Item references resolve under the same grants as close evidence. GitHub pull request
+shorthand is stored as its `https://github.com/owner/repo/pull/42` IRI. Causes are recorded on
+the standing close event and remain in its history across a reopen or deletion of a target.
+
 ## Links across ledgers: an edge admitted by `link-in`, mirrored in the target
 
-Since 0.17.0 (ledger #2829) `blocks`, `parent` and `related` may point at an item of ANOTHER
+Since 0.17.0 (ledger #2829) `blocks`, `parent`, `related` and `caused-by` may point at an item of ANOTHER
 ledger. A ledger stays a boundary for content; only the edge crosses, and the target ledger learns
 the subject's IRI and whether it is open, nothing else:
 
@@ -850,7 +861,7 @@ $ source urn:iki:ledger:acme:item:7                                    # under a
 - **The mirror** is a `ledger:Mirror` in the target's graph (`onItem` the target, `linkType`,
   `mirrorOf` the subject's IRI, `subjectOpen`, `linkPresent`, `mirrorVersion`), written by the
   ledger after every link, unlink, close and reopen of the subject. `blocks` and `parent` are
-  mirrored and `related` is not. The target's `next` reads its own graph only and excludes an item
+  mirrored; `related` and `caused-by` are not. The target's `next` reads its own graph only and excludes an item
   with an open blocker elsewhere (`blocked_elsewhere` in JSON); a store write cuts its cache like
   any other. The target's item faces show `blocked-by:` and `child:` lines (`mirrored` in JSON, on
   `item:{id}` and, since 0.18.0, on every `items` and `next` row),
