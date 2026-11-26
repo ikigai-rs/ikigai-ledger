@@ -31,6 +31,8 @@ use ikigai_core::{Clock, Error, Fallback, Kernel, Space, Time, Verb};
 
 const CLAIM: &str = "urn:iki:ledger:claim";
 const COMMENT: &str = "urn:iki:ledger:comment";
+/// The real queue's resource for the one item (ledger #4455).
+const WAIT: &str = "urn:iki:ledger:wait:item:1";
 const T0: u64 = 1_789_430_400_000;
 
 /// How often a polling lane asks again: the reported run's interval.
@@ -101,6 +103,31 @@ impl Ledger {
             CLAIM,
             &[("item", "1"), ("from", lane), ("epoch", &epoch)],
         );
+    }
+}
+
+impl Ledger {
+    /// The real queue (ledger #4455): join or renew a place. `Ok(Some(epoch))` when the join
+    /// claimed the item at once (it was free and nobody else was offered it), `Ok(None)` for a
+    /// place, `Err(())` for a `Conflict`.
+    fn join(&self, lane: &str, poll: Option<&str>) -> std::result::Result<Option<u64>, ()> {
+        let mut args = vec![("content", lane), ("ttl", "3m")];
+        if let Some(poll) = poll {
+            args.push(("poll", poll));
+        }
+        match try_verb(&self.kernel, Verb::Sink, WAIT, &args) {
+            Ok(answer) if answer.contains(" claimed by ") => Ok(Some(epoch_of(&answer))),
+            Ok(_) => Ok(None),
+            Err(Error::Conflict(_)) => Err(()),
+            Err(other) => panic!("join by {lane}: {other}"),
+        }
+    }
+
+    /// Who the real queue says the item is offered to, as a woken lane reads it.
+    fn offered_to(&self) -> Option<String> {
+        let text = source(&self.kernel, WAIT, &[("as", "application/json")]);
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        doc["offer"]["waiter"].as_str().map(str::to_string)
     }
 }
 
@@ -198,6 +225,12 @@ enum Strategy {
     Wake,
     Queue,
     QueuePolled,
+    /// The REAL queue (ledger #4455): `urn:iki:ledger:wait:item:1`, renewed every 60 s; the
+    /// release writes the offer; the woken lane reads the queue and claims if it is offered.
+    Resource,
+    /// The real queue, never woken: each lane reads the queue at its 120 s poll and joins with
+    /// `poll=120s`, so its offer lasts 150 s.
+    ResourcePolled,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -290,6 +323,19 @@ fn run(strategy: Strategy, lanes: usize, seed: u64) -> Outcome {
                             }
                         }
                         Strategy::Queue | Strategy::QueuePolled => {}
+                        // The release wrote the offer; the lane it names is woken.
+                        Strategy::Resource => {
+                            if let Some(lane) = ledger.offered_to() {
+                                let head = names.iter().position(|n| *n == lane).unwrap();
+                                if let State::Waiting { since, .. } = state[head] {
+                                    state[head] = State::Waiting {
+                                        since,
+                                        next_try: t + rng.between(1, 5),
+                                    };
+                                }
+                            }
+                        }
+                        Strategy::ResourcePolled => {}
                     }
                 }
                 State::Working { until } if t >= until => {
@@ -339,6 +385,71 @@ fn run(strategy: Strategy, lanes: usize, seed: u64) -> Outcome {
             let State::Waiting { since, next_try } = state[i] else {
                 continue;
             };
+            let real = matches!(strategy, Strategy::Resource | Strategy::ResourcePolled);
+            let poll = (strategy == Strategy::ResourcePolled).then_some("120s");
+            let attempt = if real && since == t {
+                // Arriving: a join, which claims a free item nobody else is offered.
+                Some(ledger.join(&names[i], poll).map(|e| e.ok_or(())))
+            } else if real && t >= next_try {
+                // Woken, or at its poll: read the queue, and claim only if offered.
+                if ledger.offered_to().as_deref() == Some(names[i].as_str()) {
+                    Some(ledger.claim(&names[i]).map_err(|()| ()).map(Ok))
+                } else {
+                    state[i] = State::Waiting {
+                        since,
+                        next_try: if poll.is_some() { t + POLL_S } else { NEVER },
+                    };
+                    None
+                }
+            } else if real && (t - since) % 60 == 0 {
+                // The renewal is a join: on an item offered to this lane, it claims.
+                Some(ledger.join(&names[i], poll).map(|e| e.ok_or(())))
+            } else {
+                None
+            };
+            if real {
+                match attempt {
+                    None => {}
+                    // A place taken or renewed: wait (to be woken, or to the next poll).
+                    Some(Ok(Err(()))) => {
+                        if since == t {
+                            state[i] = State::Waiting {
+                                since,
+                                next_try: if poll.is_some() { t + POLL_S } else { NEVER },
+                            };
+                        }
+                    }
+                    Some(Err(())) => {
+                        out.refusals += 1;
+                        state[i] = State::Waiting {
+                            since,
+                            next_try: if poll.is_some() { t + POLL_S } else { NEVER },
+                        };
+                    }
+                    Some(Ok(Ok(epoch))) => {
+                        let wait = t - since;
+                        out.waits.push(wait);
+                        if !first_done[i] {
+                            first_done[i] = true;
+                            out.first_waits.push(wait);
+                        }
+                        out.inversions += state
+                            .iter()
+                            .filter(
+                                |s| matches!(s, State::Waiting { since: other, .. } if *other < since),
+                            )
+                            .count();
+                        let hold = rng.between(8 * 60, 20 * 60);
+                        out.held += hold.min(RUN_S - t);
+                        state[i] = State::Holding {
+                            until: t + hold,
+                            epoch,
+                        };
+                        holder = Some(i);
+                    }
+                }
+                continue;
+            }
             if t < next_try {
                 continue;
             }
@@ -398,6 +509,7 @@ fn run(strategy: Strategy, lanes: usize, seed: u64) -> Outcome {
                             Strategy::Queue | Strategy::QueuePolled => {
                                 panic!("an offered claim was refused at {t}")
                             }
+                            Strategy::Resource | Strategy::ResourcePolled => unreachable!(),
                         },
                     };
                 }
@@ -476,6 +588,8 @@ fn replay_the_reported_run_poll_wake_and_queue() {
             Strategy::Wake,
             Strategy::Queue,
             Strategy::QueuePolled,
+            Strategy::Resource,
+            Strategy::ResourcePolled,
         ] {
             rows.push(measure(strategy, lanes));
         }
@@ -514,6 +628,7 @@ fn replay_the_reported_run_poll_wake_and_queue() {
             row(Strategy::Queue),
             row(Strategy::QueuePolled),
         );
+        let (resource, resource_polled) = (row(Strategy::Resource), row(Strategy::ResourcePolled));
         // The load is the reported one: the team's 0.7 utilization rule fires.
         assert!(poll.utilization > 0.6, "{poll:?}");
         // Polling refuses, and leaves the item idle up to a poll after each release.
@@ -533,6 +648,23 @@ fn replay_the_reported_run_poll_wake_and_queue() {
         // Polling under a queue is still correct (no refusals, no overtakes), only slower.
         assert_eq!((polled.refusals, polled.inversions), (0, 0), "{polled:?}");
         assert!(polled.idle_per_window <= POLL_S, "{polled:?}");
+        // ★ The real resource (ledger #4455) keeps the model's promise: no refusal, no
+        // overtake, and a wake's idle gap; polled, still no refusal and no overtake.
+        assert_eq!(
+            (resource.refusals, resource.inversions),
+            (0, 0),
+            "{resource:?}"
+        );
+        assert!(resource.idle_per_window <= 5, "{resource:?}");
+        assert_eq!(
+            (resource_polled.refusals, resource_polled.inversions),
+            (0, 0),
+            "{resource_polled:?}"
+        );
+        assert!(
+            resource_polled.idle_per_window <= POLL_S,
+            "{resource_polled:?}"
+        );
     }
 }
 

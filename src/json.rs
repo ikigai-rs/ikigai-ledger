@@ -676,14 +676,16 @@ pub struct Ranking {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Exclusion {
-    /// `claimed`, `lease-expired`, `awaiting-dispatcher` (since 0.8.0), `deferred` or
-    /// `blocked`.
+    /// `claimed`, `lease-expired`, `awaiting-dispatcher` (since 0.8.0), `deferred`,
+    /// `blocked`, or `offered` (since 0.26.4: released to a waiter in its claim queue).
     pub why: String,
     /// The plain face's sentence (`blocked by #3`).
     pub reason: String,
-    /// The holder, when `why` is `claimed` or `lease-expired`.
+    /// The holder, when `why` is `claimed` or `lease-expired`; the waiter it is offered to,
+    /// when `why` is `offered`.
     pub holder: Option<String>,
-    /// When the lease ran out, when `why` is `lease-expired`. Added in 0.5.0.
+    /// When the lease ran out, when `why` is `lease-expired` (added in 0.5.0); when the offer
+    /// ends, when `why` is `offered`.
     #[serde(default)]
     pub expires: Option<String>,
     /// The open blockers' numbers, when `why` is `blocked`.
@@ -1079,6 +1081,103 @@ pub struct EpochCheck {
     pub highest: u64,
 }
 
+/// The queue of `source urn:iki:ledger:{ledger}:wait:item:{id}` (ledger #4455, added in
+/// 0.26.4): the live waiters in order, and the standing offer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WaitQueue {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// The item waited on.
+    pub item: ItemRef,
+    /// When the queue was read, by the kernel clock: a place lapses with nothing written.
+    pub checked_at: String,
+    /// The live waiters, first asked first.
+    pub waiters: Vec<Waiter>,
+    /// The offer that stands on the item; `null` when none does.
+    #[serde(default)]
+    pub offer: Option<WaitOffer>,
+}
+
+/// One live waiter in a [`WaitQueue`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Waiter {
+    /// Its place, from 1.
+    pub place: usize,
+    /// Its `ledger:waitSeq`: the item's own count, which never goes down.
+    pub seq: i64,
+    /// The holder label it will claim under.
+    pub waiter: String,
+    /// The principal it joined as; `null` when its capability carried none.
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// When it asked.
+    #[serde(default)]
+    pub asked_at: Option<String>,
+    /// When its place lapses unless renewed.
+    pub expires: String,
+    /// The poll interval it joined with, as an `xsd:dayTimeDuration`; `null` when none.
+    #[serde(default)]
+    pub poll: Option<String>,
+    /// Whether the standing offer is to this waiter.
+    pub offered: bool,
+}
+
+/// The offer that stands on an item (ledger #4455).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WaitOffer {
+    /// Who may claim the item until it ends.
+    pub waiter: String,
+    /// The principal that waiter joined as; `null` when none.
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// The place's IRI.
+    pub place: String,
+    /// When the offer ends.
+    pub expires: String,
+    /// The claim epoch whose release made it.
+    pub after_epoch: u64,
+}
+
+/// The answer of `sink urn:iki:ledger:{ledger}:wait:item:{id}` (ledger #4455): a place, or the
+/// claim a join on a free item took at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WaitAnswer {
+    /// [`SCHEMA`].
+    pub schema: u32,
+    /// The ledger's name.
+    pub ledger: String,
+    /// The item waited on.
+    pub item: ItemRef,
+    /// The holder label.
+    pub waiter: String,
+    /// The principal it joined as; `null` when none.
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// `true` when the join claimed the item at once.
+    pub claimed: bool,
+    /// The claim's epoch, when `claimed`.
+    #[serde(default)]
+    pub epoch: Option<u64>,
+    /// Its place, from 1, when not `claimed`.
+    #[serde(default)]
+    pub place: Option<usize>,
+    /// How many live waiters there are, when not `claimed`.
+    #[serde(default)]
+    pub of: Option<usize>,
+    /// When its place lapses unless renewed, when not `claimed`.
+    #[serde(default)]
+    pub expires: Option<String>,
+    /// The offer that stands on the item, if any.
+    #[serde(default)]
+    pub offer: Option<WaitOffer>,
+}
+
 // ------------------------------------------------------------------ building them
 
 /// One compact line of JSON and a newline — what every document here is served as.
@@ -1382,6 +1481,12 @@ pub(crate) async fn next(
                 Excluded::Deferred => ("deferred", None, Vec::new(), None),
                 Excluded::Blocked(numbers) => ("blocked", None, numbers.clone(), None),
                 Excluded::BlockedAcross { here, .. } => ("blocked", None, here.clone(), None),
+                Excluded::Offered { waiter, ends } => (
+                    "offered",
+                    Some(waiter.clone()),
+                    Vec::new(),
+                    Some(sparql::iso8601(*ends)),
+                ),
             };
             let blocked_elsewhere = match why {
                 Excluded::BlockedAcross { elsewhere, .. } => elsewhere.clone(),

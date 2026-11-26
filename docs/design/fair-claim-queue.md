@@ -1,7 +1,11 @@
 # Design: a fair claim queue
 
-Status: **design spike** (ledger #4433). This note changes no ledger behavior and proposes no
-public API yet. The prototype is test-only: `tests/fair_claim_queue.rs`.
+Status: **built** in 0.26.4 (ledger #4455), as recommendation 2 below names it; the spike was
+ledger #4433. `tests/claim_queue.rs` tests the real resource, and `tests/fair_claim_queue.rs`
+replays the run against it as the `Resource` and `ResourcePolled` rows ("Measured again", at the
+end). The open questions took the defaults the build was given: a waiter that lets an offer pass
+leaves the queue and may join again at the end; `items` and the doctor do not show queue length
+yet; a join on a free item nobody else is offered claims it at once.
 
 ## The claim, reproduced
 
