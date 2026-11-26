@@ -1955,20 +1955,25 @@ fn listed_pattern() -> String {
 
 /// Select page subjects before joining their records, so multiple values of a property
 /// cannot split one item across pages. The count and records join this in the same query.
+///
+/// ★ **The filter clauses BEFORE the two timestamp OPTIONALs** (ledger #3258). Written the
+/// other way round, the evaluator left-joined `created` and `modified` onto every item in
+/// the ledger, closed ones included, and only then kept the matches: at 10x (11,320 open of
+/// 36,320 items) that join was 0.21 s of the page's 0.22 s, and grouping and sorting were
+/// the rest. Filtered first, it is about 0.07 s. The filter clauses bind only `?item`,
+/// `?title` and variables of their own, never `?created` or `?modified`, so the order
+/// changes the cost and not the rows.
 fn page_pattern(client: &StoreClient<'_, '_>, filter: &Filter) -> Result<String> {
     Ok(format!(
         "{{ SELECT ?item (MAX({RECENCY}) AS ?recency) (MAX(?number) AS ?n) WHERE {{ {page} }} \
          GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) ?item LIMIT {limit} OFFSET {offset} }}",
-        page = client.in_graph(&filtered(
-            filter,
-            &format!(
-                "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
-                 OPTIONAL {{ ?item <{modified}> ?modified }}\n",
-                listed_pattern(),
-                created = v::ext::CREATED,
-                modified = v::ext::MODIFIED,
-            )
-        )?),
+        page = client.in_graph(&format!(
+            "{}OPTIONAL {{ ?item <{created}> ?created }}\n\
+             OPTIONAL {{ ?item <{modified}> ?modified }}\n",
+            filtered(filter, &listed_pattern())?,
+            created = v::ext::CREATED,
+            modified = v::ext::MODIFIED,
+        )),
         limit = page_limit(filter),
         offset = filter.offset,
     ))
