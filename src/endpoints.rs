@@ -754,6 +754,12 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
                 lifecycles: Arc::clone(&lifecycles),
             },
         )
+        .bind(
+            LedgerGrammar::action("sweep-replays"),
+            replay::SweepEndpoint {
+                window: tokens.window,
+            },
+        )
         .bind(LedgerGrammar::action("stalled"), lapse::StalledEndpoint)
         .bind(
             LedgerGrammar::action("lapse"),

@@ -97,6 +97,9 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   recorded 1 lapse(s)` and the same sentence per lapse, indented, ending `; labeled needs-person`
   when the ledger's route added a label; a sweep that wrote nothing says so and why. An item's
   history names a lapse in words: `lapse worker-1 at epoch 1, whose lease ran out at …`.
+- **Replay receipt sweep** (`src/endpoints/replay.rs`): `sweep-replays` names the ledger
+  and says the sweep completed without claiming how many receipts were removed. A missing
+  graph grant names the exact grant to add and says no receipts were removed.
 - **The doctor and lifecycles**: the doctor's findings, each with a
   `remedy for <check> on <item>:` line; a
   lifecycle's states, one per line (`Lifecycle::plain` in `src/lifecycle.rs`), each saying in

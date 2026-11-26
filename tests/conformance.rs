@@ -327,6 +327,7 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
             Fixture::new("ledger-backfill-closed-at", Verb::Sink)
                 .arg("content", "key:urn:test:backfill"),
         )
+        .fixture(Fixture::new("ledger-sweep-replays", Verb::Sink))
         // What the reads promise.
         .cacheable("ledger-items")
         .cacheable("ledger-count")
@@ -353,6 +354,11 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
             "ledger-lapse",
             Check::Pipeline,
             "the sweep takes no body: it records every lapse in its ledger",
+        )
+        .opt_out_check(
+            "ledger-sweep-replays",
+            Check::Pipeline,
+            "the receipt sweep takes no body",
         )
         .opt_out_check(
             "ledger-doctor",
@@ -435,6 +441,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-reopen",
             "ledger-sessions",
             "ledger-stalled",
+            "ledger-sweep-replays",
         ],
         "{report}"
     );

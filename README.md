@@ -251,6 +251,7 @@ called `default`. The capability column names the grant for **that** ledger.
 | `…:{ledger}:doctor` | Source | what is structurally wrong, every problem at once; repairs nothing | `read:{ledger}` |
 | `…:{ledger}:stalled` | Source | the open items held on a lease that has run out and not handed back, oldest lapse first | `read:{ledger}` |
 | `…:{ledger}:lapse` | Sink | the dispatcher's sweep: record each lapse once in its item's history, and add the ledger's route label if the host set one; releases nothing | `close:{ledger}` or `write:{ledger}` |
+| `…:{ledger}:sweep-replays` | Sink | remove one bounded batch of expired request receipts from each of the live and deleted graphs | `write:{ledger}`, plus store read and write grants for both graphs |
 | `…:{ledger}:item:{id}:state` | Source · Sink | the one lifecycle state; a compare-and-set transition | `read` / `write` of `{ledger}` |
 | `…:{ledger}:item:{id}:state:{value}` | Exists | is it in that state? | `read:{ledger}` |
 | `…:{ledger}:item:{id}:holder:{holder}` | Exists | is it held by that holder? | `read:{ledger}` |
@@ -537,7 +538,22 @@ deferral or release no longer posts its `content=` note twice. The rules:
 - A filing or comment and its `ledger:Replay` land in the same store update. A comment's
   record belongs to its item, so a delete archives it and a purge destroys it. An append
   receipt contains the item identity and status but not its title or body. It stays in the
-  ledger graph through deletion or purge so a retry of a lost filing does not recreate it.
+  ledger graph through deletion or purge so a retry of a lost filing within the window does
+  not recreate it.
+
+**Schedule expiry in the host.** Like the lease lapse sweep, the ledger exposes a Sink and
+starts no timer. Schedule `sink urn:iki:ledger:{ledger}:sweep-replays` per ledger (or
+`sink urn:iki:ledger:sweep-replays` for the default ledger) under `write:{ledger}` with
+store read and write grants for both the ledger graph and its graveyard. Use the same
+resend-window configuration as the writers. Each tick considers up to 128 receipt subjects
+per graph and removes each batch in one guarded store update. It rechecks expiry in that
+update so a live replacement is not removed. If a token was archived more than once under
+the same subject, the sweep waits until all of its timestamps have expired.
+
+A receipt stops answering at the end of its resend window, whether or not the sweep has
+run. Expired receipts can remain until a scheduled tick reaches them, so set a cadence
+that can keep up with new receipts. The sweep does not delete items, comments, tombstones,
+or permanent `key=` mappings. Existing stores need no migration.
 
 On append and comment, a caller may send both `key=` and `idempotency-key=`. Only the token
 declares a safe resend to clients. If the natural key was already taken on the first attempt,

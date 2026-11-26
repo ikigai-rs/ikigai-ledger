@@ -43,9 +43,13 @@ impl Clock for Hands {
 
 /// A kernel over a store and a ledger built with `config`, and its clock.
 fn kernel_with(config: ikigai_ledger::SpaceConfig) -> (Kernel, Hands) {
+    kernel_with_store(config, DurableStore::in_memory().unwrap())
+}
+
+fn kernel_with_store(config: ikigai_ledger::SpaceConfig, store: DurableStore) -> (Kernel, Hands) {
     let hands = Hands(Arc::new(AtomicU64::new(1_795_000_000_000)));
     let space = Fallback::new(vec![
-        Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>,
+        Arc::new(ikigai_store::space(store)) as Arc<dyn Space>,
         Arc::new(ikigai_ledger::space_with(config)) as Arc<dyn Space>,
     ]);
     let kernel =
@@ -1033,6 +1037,10 @@ impl Endpoint for PauseUpdate<Arc<dyn Endpoint>> {
 }
 
 fn paused_append() -> (Kernel, Kernel, oneshot::Receiver<()>, oneshot::Sender<bool>) {
+    paused_update(&Hands(Arc::new(AtomicU64::new(1_795_000_000_000))))
+}
+
+fn paused_update(hands: &Hands) -> (Kernel, Kernel, oneshot::Receiver<()>, oneshot::Sender<bool>) {
     let (arrived, arrival) = oneshot::channel();
     let (release, proceed) = oneshot::channel();
     let store = Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>;
@@ -1040,7 +1048,7 @@ fn paused_append() -> (Kernel, Kernel, oneshot::Receiver<()>, oneshot::Sender<bo
         inner: Arc::clone(&store),
         pause: Arc::new(Mutex::new(Some(UpdateGate { arrived, proceed }))),
     });
-    let clock = Arc::new(Hands(Arc::new(AtomicU64::new(1_795_000_000_000))));
+    let clock = Arc::new(hands.clone());
     let kernel = |store| {
         let space = Fallback::new(vec![
             store,
@@ -1140,4 +1148,198 @@ fn append_reconciles_counter_natural_key_and_token_races_at_commit() {
             text(&next.bytes)
         );
     }
+}
+
+const SWEEP: &str = "urn:iki:ledger:sweep-replays";
+const LIVE_GRAPH: &str = "urn:iki:ledger:graph:default";
+const DELETED_GRAPH: &str = "urn:iki:ledger:graph:default:deleted";
+
+fn receipt_count(kernel: &Kernel, graph: &str) -> usize {
+    let rows = select(
+        kernel,
+        &format!(
+            "SELECT (COUNT(DISTINCT ?r) AS ?count) WHERE {{ GRAPH <{graph}> {{ ?r a \
+             <https://ikigai-rs.dev/ns/ledger#Replay> }} }}"
+        ),
+    );
+    let rows: serde_json::Value = serde_json::from_str(&rows).unwrap();
+    rows["results"]["bindings"][0]["count"]["value"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn periodic_maintenance_removes_expired_receipts() {
+    let (kernel, hands) = kernel_with(
+        ikigai_ledger::SpaceConfig::default().resend_window(Duration::from_secs(48 * 3600)),
+    );
+    let link = LossyLink::new(kernel);
+    let cap = Capability::root();
+    let filing = |token| {
+        request(
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &with_token(&[("content", "A filing")], token),
+        )
+    };
+    let old = filing(TOKEN);
+    let first = link.send(old.clone(), &cap).unwrap();
+    hands.jump(Duration::from_secs(25 * 3600));
+    let live = filing("live");
+    let second = link.send(live.clone(), &cap).unwrap();
+    sink(&link.kernel, SWEEP, &[]);
+    assert_eq!(receipt_count(&link.kernel, LIVE_GRAPH), 2);
+    assert_eq!(link.send(old.clone(), &cap).unwrap(), first);
+
+    hands.jump(Duration::from_secs(24 * 3600));
+    let before = graph(&link.kernel);
+    sink(&link.kernel, SWEEP, &[]);
+    assert_eq!(
+        receipt_count(&link.kernel, LIVE_GRAPH),
+        1,
+        "expired receipt remains"
+    );
+    let after = graph(&link.kernel);
+    // An append receipt has three triples. All three are removed, and only those three.
+    let bindings = |data: &str| {
+        serde_json::from_str::<serde_json::Value>(data).unwrap()["results"]["bindings"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let before = bindings(&before);
+    let after = bindings(&after);
+    assert_eq!(before.len() - after.len(), 3);
+    assert!(after.iter().all(|row| before.contains(row)));
+    assert_eq!(link.send(live, &cap).unwrap(), second);
+    assert!(text(&link.send(old, &cap).unwrap()).starts_with("#3 "));
+}
+
+#[test]
+fn sweep_keeps_an_archived_subject_until_its_newest_receipt_expires() {
+    let (kernel, hands) = kernel_with(ikigai_ledger::SpaceConfig::default());
+    for (item, iri) in [
+        ("#1", "urn:iki:ledger:item:1"),
+        ("#2", "urn:iki:ledger:item:2"),
+    ] {
+        sink(&kernel, "urn:iki:ledger:append", &[("content", "A filing")]);
+        sink(
+            &kernel,
+            "urn:iki:ledger:comment",
+            &[
+                ("item", item),
+                ("content", "A comment"),
+                ("idempotency-key", TOKEN),
+            ],
+        );
+        delete(&kernel, iri, &[]);
+        if item == "#1" {
+            hands.jump(Duration::from_secs(25 * 3600));
+        }
+    }
+    assert_eq!(receipt_count(&kernel, DELETED_GRAPH), 1);
+    // Both attempts archived under the same receipt IRI, but only the first is expired.
+    let comments = select(
+        &kernel,
+        "SELECT ?c WHERE { GRAPH <urn:iki:ledger:graph:default:deleted> {
+            ?c a <https://ikigai-rs.dev/ns/ledger#Comment>
+        } }",
+    );
+    sink(&kernel, SWEEP, &[]);
+    assert_eq!(receipt_count(&kernel, DELETED_GRAPH), 1);
+    hands.jump(Duration::from_secs(25 * 3600));
+    sink(&kernel, SWEEP, &[]);
+    assert_eq!(receipt_count(&kernel, DELETED_GRAPH), 0);
+    assert_eq!(
+        select(
+            &kernel,
+            "SELECT ?c WHERE { GRAPH <urn:iki:ledger:graph:default:deleted> {
+                ?c a <https://ikigai-rs.dev/ns/ledger#Comment>
+            } }",
+        ),
+        comments
+    );
+}
+
+#[test]
+fn one_tick_removes_only_one_batch_from_a_large_graph() {
+    let (kernel, _) = kernel_with_store(
+        ikigai_ledger::SpaceConfig::default(),
+        DurableStore::in_memory()
+            .unwrap()
+            .with_max_scoped_copy_quads(512),
+    );
+    let rows = (0..1025)
+        .map(|i| {
+            format!(
+                "<urn:test:receipt:{i}> a <https://ikigai-rs.dev/ns/ledger#Replay> ;
+                 <https://ikigai-rs.dev/ns/ledger#replayRecord> \"unused\" ;
+                 <http://purl.org/dc/terms/created>
+                     \"2020-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> ."
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    sink(
+        &kernel,
+        "urn:iki:store:graph-update",
+        &[
+            ("graph", LIVE_GRAPH),
+            (
+                "content",
+                &format!("INSERT DATA {{ GRAPH <{LIVE_GRAPH}> {{ {rows} }} }}"),
+            ),
+        ],
+    );
+    let sweep = request(Verb::Sink, SWEEP, &[]);
+    assert_eq!(receipt_count(&kernel, LIVE_GRAPH), 1025);
+    let incomplete = writer("urn:test:sweeper");
+    assert!(matches!(
+        block_on(kernel.issue(sweep.clone(), &incomplete)),
+        Err(Error::Denied(_))
+    ));
+    assert_eq!(receipt_count(&kernel, LIVE_GRAPH), 1025);
+    let maintainer = Capability::scoped([
+        "urn:cap:ledger:write:default".into(),
+        graph_read("default"),
+        graph_write("default"),
+        graveyard_read("default"),
+        graveyard_write("default"),
+    ]);
+    block_on(kernel.issue(sweep.clone(), &maintainer)).unwrap();
+    assert_eq!(receipt_count(&kernel, LIVE_GRAPH), 897);
+    block_on(kernel.issue(sweep, &maintainer)).unwrap();
+    assert_eq!(receipt_count(&kernel, LIVE_GRAPH), 769);
+}
+
+#[test]
+fn a_receipt_replaced_after_selection_survives_the_guarded_delete() {
+    let hands = Hands(Arc::new(AtomicU64::new(1_795_000_000_000)));
+    let (gated, independent, arrival, release) = paused_update(&hands);
+    let cap = Capability::root();
+    let append = request(
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &with_token(&[("content", "Replaced before sweep commit")], TOKEN),
+    );
+    block_on(independent.issue(append.clone(), &cap)).unwrap();
+    hands.jump(Duration::from_secs(25 * 3600));
+    let (swept, replacement) = block_on(async {
+        futures::join!(gated.issue(request(Verb::Sink, SWEEP, &[]), &cap), async {
+            arrival.await.unwrap();
+            let result = independent.issue(append.clone(), &cap).await;
+            release.send(false).unwrap();
+            result
+        })
+    });
+    swept.unwrap();
+    let replacement = replacement.unwrap().bytes;
+    assert!(text(&replacement).starts_with("#2 "));
+    assert_eq!(receipt_count(&independent, LIVE_GRAPH), 1);
+    assert_eq!(
+        block_on(independent.issue(append, &cap)).unwrap().bytes,
+        replacement
+    );
 }

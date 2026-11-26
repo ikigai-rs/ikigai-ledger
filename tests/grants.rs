@@ -405,6 +405,7 @@ fn script() -> Vec<Step> {
         step("ledger-doctor", Verb::Source, at("doctor"), &[]),
         step("ledger-stalled", Verb::Source, at("stalled"), &[]),
         step("ledger-lapse", Verb::Sink, at("lapse"), &[]),
+        step("ledger-sweep-replays", Verb::Sink, at("sweep-replays"), &[]),
         // The two ledger-less resources. `ledgers` is the one that must not need a broad
         // grant either: it answers what this capability may read, from what it holds.
         step(
