@@ -109,10 +109,13 @@ fn mine(var: &str, holder: &str, principal: Option<&str>) -> String {
 }
 
 /// The pattern "an offer stands on `item` at `now`", binding the place it is to as `?{var}`.
+/// ★ The place must be live: an offer to a place that lapsed is no offer, whether or not a
+/// sweep has removed the place yet (the hub review of PR 157).
 fn standing(item: &str, now: u64, var: &str) -> String {
     format!(
         "<{item}> <{to}> ?{var} ; <{ends}> ?{var}Ends ; <{after}> ?{var}After .\n\
-         ?{var} <{on}> <{item}> .\n\
+         ?{var} <{on}> <{item}> ; <{live}> ?{var}Live .\n\
+         FILTER(?{var}Live > {now})\n\
          OPTIONAL {{ <{item}> <{epoch}> ?{var}Epoch }}\n\
          FILTER(?{var}Ends > {now} && COALESCE(?{var}Epoch, 0) = ?{var}After)\n\
          FILTER NOT EXISTS {{ <{item}> <{by}> ?{var}Held }}",
@@ -120,6 +123,7 @@ fn standing(item: &str, now: u64, var: &str) -> String {
         ends = v::OFFER_EXPIRES,
         after = v::OFFER_AFTER_EPOCH,
         on = v::WAITS_ON,
+        live = v::WAIT_EXPIRES,
         epoch = v::CLAIM_EPOCH,
         by = v::CLAIMED_BY,
         now = datetime(now),
@@ -299,6 +303,105 @@ pub(crate) fn settle_ops(
     vec![passed, cleared, offered]
 }
 
+/// The record of a dispatcher's claim that passed a standing offer to `place`: the claim's own
+/// event names the place as `ledger:overrodeOffer`, in the claim's update, matching only once
+/// `holder` holds the claim taken at `now` and while the offer is still recorded. The event is
+/// the claim event of this item, by this holder, written at `now`.
+pub(crate) fn override_record(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    place: &str,
+    holder: &str,
+    now: u64,
+) -> Result<String> {
+    let place = sparql::iri(place, "place")?;
+    let holder = literal(holder);
+    let at = datetime(now);
+    Ok(format!(
+        "INSERT {{ {} }} WHERE {{ {} }}",
+        client.in_graph(&format!("?event <{}> {place} .", v::OVERRODE_OFFER)),
+        client.in_graph(&format!(
+            "<{item}> <{by}> {holder} ; <{claimed}> {at} ; <{to}> {place} .\n\
+             ?event <{on}> <{item}> ; <{type_}> <{class}> ; <{by}> {holder} ; <{created}> {at} .\n\
+             FILTER NOT EXISTS {{ ?event <{overrode}> ?anyPlace }}",
+            by = v::CLAIMED_BY,
+            claimed = v::CLAIMED_AT,
+            to = v::OFFERED_TO,
+            on = v::ON_ITEM,
+            type_ = v::ext::TYPE,
+            class = v::CLAIM_EVENT_CLASS,
+            created = v::ext::CREATED,
+            overrode = v::OVERRODE_OFFER,
+        ))
+    ))
+}
+
+/// What a close does to the queue, in the close's own update and under its `guard`: the offer
+/// and every place on the item go, since closed work is waited for by nobody (the hub review
+/// of PR 157: 300 closed items had left 302 `offeredTo` quads for every sweep to re-read).
+/// The item keeps its last `waitSeq`, which only counts up.
+///
+/// `places` are the item's places, live or lapsed, as [`place_iris`] read them, listed in a
+/// `VALUES` block: ⚠ an unlisted `?place <p> ?o` pattern would make the store's scoped door
+/// copy every quad of `p` in the graph (ledger #2922). A join cannot add one after the read and
+/// before the close: it needs the item open.
+pub(crate) fn close_ops(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    places: &[String],
+    guard: &str,
+) -> Result<Vec<String>> {
+    let offer_delete: String = OFFER_FIELDS
+        .iter()
+        .enumerate()
+        .map(|(n, p)| format!("<{item}> <{p}> ?closedOffer{n} . "))
+        .collect();
+    let offer_optional: String = OFFER_FIELDS
+        .iter()
+        .enumerate()
+        .map(|(n, p)| format!("OPTIONAL {{ <{item}> <{p}> ?closedOffer{n} }}\n"))
+        .collect();
+    let mut ops = vec![format!(
+        "DELETE {{ {} }} WHERE {{ {} }}",
+        client.in_graph(&offer_delete),
+        client.in_graph(&format!(
+            "<{item}> <{}> ?closedTo .\n{offer_optional}{guard}",
+            v::OFFERED_TO
+        ))
+    )];
+    if !places.is_empty() {
+        let listed = places
+            .iter()
+            .map(|p| sparql::iri(p, "place"))
+            .collect::<Result<Vec<_>>>()?
+            .join(" ");
+        let (delete, optional) = place_removal("closedPlace");
+        ops.push(format!(
+            "DELETE {{ {} }} WHERE {{ {} }}",
+            client.in_graph(&delete),
+            client.in_graph(&format!(
+                "VALUES ?closedPlace {{ {listed} }} ?closedPlace <{}> <{item}> .\n{optional}{guard}",
+                v::WAITS_ON
+            ))
+        ));
+    }
+    Ok(ops)
+}
+
+/// Every place on `item`, live or lapsed, by IRI.
+pub(crate) async fn place_iris(client: &StoreClient<'_, '_>, item: &str) -> Result<Vec<String>> {
+    let rows = client
+        .select(&format!(
+            "SELECT ?place WHERE {{ {} }}",
+            client.in_graph(&format!("?place <{}> <{item}> .", v::WAITS_ON))
+        ))
+        .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get("place").map(|b| b.value.clone()))
+        .collect())
+}
+
 /// [`settle_ops`] as one update of its own, over the queue as it reads now.
 pub(crate) async fn settle(client: &StoreClient<'_, '_>, item: &Item, now: u64) -> Result<()> {
     let queue = read(client, item, now).await?;
@@ -347,8 +450,12 @@ pub(crate) struct Offer {
 pub(crate) struct Queue {
     pub(crate) places: Vec<Place>,
     pub(crate) offer: Option<Offer>,
-    /// An offer is recorded that does not stand (ended, void, or to a place that is gone).
+    /// An offer is recorded that does not stand (ended, void, or to a place that is gone or
+    /// lapsed).
     stale_offer: bool,
+    /// The place whose offer ended unclaimed at the item's current epoch: it leaves the queue
+    /// at the next settle (step 1 of [`settle_ops`]), so it is no longer the head.
+    ended_to: Option<String>,
 }
 
 impl Queue {
@@ -360,14 +467,57 @@ impl Queue {
             && (self.stale_offer || (self.offer.is_none() && !self.places.is_empty()))
     }
 
-    /// The standing offer, when it is to anyone but `holder` as `principal`.
+    /// ★ **The effective offer at `now`**: the one rule the claim guard, `next` and the queue's
+    /// read share (the hub review of PR 157). It is what a [`settle`] at `now` would leave: the
+    /// offer that stands; else, on a free open item, an offer to the first live waiter that is
+    /// not the one whose offer just ended, until `now` plus its [`offer_bound`]; else none, and
+    /// the item is free for anyone. A claim settles before its guard, so the claim refuses
+    /// exactly whom this names.
+    pub(crate) fn effective(&self, item: &Item, now: u64) -> Option<Offer> {
+        if !item.open || item.claimed_by.is_some() {
+            return None;
+        }
+        if let Some(offer) = &self.offer {
+            return Some(offer.clone());
+        }
+        let head = self
+            .places
+            .iter()
+            .find(|p| self.ended_to.as_deref() != Some(p.iri.as_str()))?;
+        let poll = head
+            .poll
+            .as_deref()
+            .and_then(|text| crate::claim::parse_lease(text).ok())
+            .map(|l| l.millis);
+        Some(Offer {
+            place: head.clone(),
+            ends: now + offer_bound(poll),
+            after_epoch: item.claim_epoch.unwrap_or(0),
+        })
+    }
+
+    /// The queue as a [`settle`] at `now` would leave it, without writing: the waiter whose
+    /// offer ended is gone, and the offer is [`Queue::effective`]. What the reads show.
+    pub(crate) fn settled_view(mut self, item: &Item, now: u64) -> Queue {
+        self.offer = self.effective(item, now);
+        if item.open && item.claimed_by.is_none() {
+            if let Some(gone) = self.ended_to.take() {
+                self.places.retain(|p| p.iri != gone);
+            }
+        }
+        self.stale_offer = false;
+        self
+    }
+
+    /// The effective offer, when it is to anyone but `holder` as `principal`.
     pub(crate) fn offered_to_another(
         &self,
+        item: &Item,
+        now: u64,
         holder: &str,
         principal: Option<&str>,
-    ) -> Option<&Offer> {
-        self.offer
-            .as_ref()
+    ) -> Option<Offer> {
+        self.effective(item, now)
             .filter(|offer| !offer.place.is(holder, principal))
     }
 
@@ -434,11 +584,23 @@ pub(crate) async fn read(client: &StoreClient<'_, '_>, item: &Item, now: u64) ->
         ))
         .await?;
     let recorded = !offers.is_empty();
+    let epoch = item.claim_epoch.unwrap_or(0);
+    let free = item.open && item.claimed_by.is_none();
+    let ended_to = offers.iter().find_map(|row| {
+        let to = &row.get("to")?.value;
+        let ends = model::millis(&row.get("ends")?.value)?;
+        let after = u64::try_from(row.get("after")?.as_i64()?).ok()?;
+        (free && ends <= now && after == epoch).then(|| to.clone())
+    });
     let offer = offers.iter().find_map(|row| {
         let to = &row.get("to")?.value;
         let ends = model::millis(&row.get("ends")?.value)?;
         let after = u64::try_from(row.get("after")?.as_i64()?).ok()?;
-        let place = every.iter().find(|p| &p.iri == to)?.clone();
+        // ★ Only a LIVE place: an offer to a lapsed one does not stand.
+        let place = every
+            .iter()
+            .find(|p| &p.iri == to && p.expires > now)?
+            .clone();
         let stands = ends > now
             && after == item.claim_epoch.unwrap_or(0)
             && item.claimed_by.is_none()
@@ -454,6 +616,7 @@ pub(crate) async fn read(client: &StoreClient<'_, '_>, item: &Item, now: u64) ->
         places,
         stale_offer: recorded && offer.is_none(),
         offer,
+        ended_to,
     })
 }
 
@@ -681,7 +844,8 @@ impl WaitEndpoint {
         let want = wanted_face(inv, &WAIT_FACES)?;
         let now = now_ms(inv)?;
         let item = require_item(client, flight::part_id(inv)?).await?;
-        let queue = read(client, &item, now).await?;
+        // As the claim guard decides it: the one rule for an ended offer.
+        let queue = read(client, &item, now).await?.settled_view(&item, now);
         let ledger = client.ledger();
         let repr = if want == JSON {
             json_repr(json::render(&json::WaitQueue {
@@ -771,7 +935,11 @@ impl WaitEndpoint {
         // ★ A free item nobody else is offered is claimed at once (the design's default for
         // its open question): through the claim resource itself, so the claim is exactly a
         // claim, its guard, epoch and events included, and leaves this waiter's place.
-        if item.claimed_by.is_none() && queue.offered_to_another(&holder, caller).is_none() {
+        if item.claimed_by.is_none()
+            && queue
+                .offered_to_another(&item, now, &holder, caller)
+                .is_none()
+        {
             let mut request = ikigai_core::Request::new(
                 Verb::Sink,
                 Iri::parse(ledger.resource("claim")).map_err(|e| Error::Endpoint(e.to_string()))?,
@@ -1277,7 +1445,7 @@ impl Endpoint for OffersEndpoint {
     }
 }
 
-/// One standing offer in a ledger, for `next`.
+/// One effective offer in a ledger, for `next`.
 pub(crate) struct Standing {
     item: String,
     waiter: String,
@@ -1285,44 +1453,51 @@ pub(crate) struct Standing {
     ends: u64,
 }
 
-/// Every offer that stands in this ledger at `now`.
+/// Every effective offer in this ledger at `now` ([`Queue::effective`]): the same rule the
+/// claim guard applies after its settle, so `next` never shows a stranger an item whose claim
+/// would then be refused. The candidates are the free open items with a recorded offer or a
+/// live place; each one's queue is read and decided as a claim would decide it.
 pub(crate) async fn standing_offers(
     client: &StoreClient<'_, '_>,
     now: u64,
 ) -> Result<Vec<Standing>> {
     let rows = client
         .select(&format!(
-            "SELECT ?item ?waiter ?principal ?ends WHERE {{ {} }}",
+            "SELECT DISTINCT ?item WHERE {{ {} }}",
             client.in_graph(&format!(
-                "?item <{to}> ?to ; <{ends}> ?ends ; <{after}> ?after .\n\
-                 ?to <{on}> ?item ; <{waiter}> ?waiter .\n\
-                 OPTIONAL {{ ?to <{principal}> ?principal }}\n\
-                 OPTIONAL {{ ?item <{epoch}> ?epoch }}\n\
-                 FILTER(?ends > {at} && COALESCE(?epoch, 0) = ?after)\n\
+                "{{ ?item <{to}> ?to }} UNION \
+                 {{ ?place <{on}> ?item ; <{expires}> ?live . FILTER(?live > {at}) }}\n\
+                 ?item <{status}> <{open}> .\n\
                  FILTER NOT EXISTS {{ ?item <{by}> ?held }}",
                 to = v::OFFERED_TO,
-                ends = v::OFFER_EXPIRES,
-                after = v::OFFER_AFTER_EPOCH,
                 on = v::WAITS_ON,
-                waiter = v::WAITER,
-                principal = v::WAITER_PRINCIPAL,
-                epoch = v::CLAIM_EPOCH,
+                expires = v::WAIT_EXPIRES,
+                status = v::STATUS,
+                open = v::OPEN,
                 by = v::CLAIMED_BY,
                 at = datetime(now),
             ))
         ))
         .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            Some(Standing {
-                item: row.get("item")?.value.clone(),
-                waiter: row.get("waiter")?.value.clone(),
-                principal: row.get("principal").map(|b| b.value.clone()),
-                ends: model::millis(&row.get("ends")?.value)?,
-            })
-        })
-        .collect())
+    let mut offers = Vec::new();
+    for row in &rows {
+        let Some(iri) = row.get("item") else {
+            continue;
+        };
+        let Some(item) = model::load_item(client, &iri.value).await? else {
+            continue;
+        };
+        let queue = read(client, &item, now).await?;
+        if let Some(offer) = queue.effective(&item, now) {
+            offers.push(Standing {
+                item: item.iri.clone(),
+                waiter: offer.place.waiter,
+                principal: offer.place.principal,
+                ends: offer.ends,
+            });
+        }
+    }
+    Ok(offers)
 }
 
 /// Move every ready item offered to another waiter than `waiter` (as `principal`) out of

@@ -362,21 +362,26 @@ fn bad_arguments_are_refused_before_anything_is_written() {
 
 #[test]
 fn a_head_that_does_not_claim_in_time_leaves_and_the_next_claim_passes_the_offer_on() {
-    let l = held_by_a_with_b_and_c_waiting();
+    let l = Ledger::new();
+    l.at(0);
+    l.claim(&worker(A), "lane-a").unwrap();
+    // Both places outlive B's offer, so it is the offer that ends, not a place.
+    l.at(10);
+    l.join(&worker(B), "lane-b", &[("poll", "120s"), ("ttl", "10m")])
+        .unwrap();
+    l.at(20);
+    l.join(&worker(C), "lane-c", &[("ttl", "10m")]).unwrap();
     l.at(60);
-    l.join(&worker(C), "lane-c", &[]).unwrap(); // C renews; B's place still holds
     l.release(&worker(A), "lane-a");
     assert_eq!(l.offered_to().as_deref(), Some("lane-b"));
-    // B never claims. At the end of its offer (150 s after the release), C's claim settles the
-    // offer: B leaves the queue, C is the head and is offered the item, and its claim lands.
-    // (B's own join would claim it: a join by the waiter an offer stands to is a claim.)
-    l.at(100);
-    l.join(&worker(C), "lane-c", &[]).unwrap();
+    // B never claims. Until its offer ends (150 s after the release) C is refused.
     l.at(209);
     assert!(matches!(
         l.claim(&worker(C), "lane-c"),
         Err(Error::Conflict(_))
     ));
+    // At the end, C's claim settles the offer: B leaves the queue, C is the head and is
+    // offered the item, and its claim lands.
     l.at(210);
     let answer = l.claim(&worker(C), "lane-c").unwrap();
     assert_eq!(epoch_of(&answer), 2);
@@ -384,6 +389,126 @@ fn a_head_that_does_not_claim_in_time_leaves_and_the_next_claim_passes_the_offer
         l.waiters().is_empty(),
         "B left with its offer, and C has the item"
     );
+}
+
+/// ★ The hub review of PR 157, reproduced: B joins with `ttl=30s` at 10, A releases at 20 (an
+/// offer to B), and at 50 B's place has lapsed. C's claim must land, whether or not a sweep
+/// ran first: an offer to a lapsed place is no offer.
+#[test]
+fn an_offer_to_a_lapsed_place_blocks_nobody_with_or_without_a_sweep() {
+    for sweep_first in [false, true] {
+        let l = Ledger::new();
+        l.at(0);
+        l.claim(&worker(A), "lane-a").unwrap();
+        l.at(10);
+        l.join(&worker(B), "lane-b", &[("ttl", "30s")]).unwrap();
+        l.at(20);
+        l.release(&worker(A), "lane-a");
+        assert_eq!(l.offered_to().as_deref(), Some("lane-b"));
+        l.at(50);
+        assert!(l.waiters().is_empty(), "B's place lapsed at 40");
+        assert!(l.offered_to().is_none(), "{}", l.queue());
+        if sweep_first {
+            l.sink(&dispatcher(), "offers", &[]);
+        }
+        let answer = l
+            .claim(&worker(C), "lane-c")
+            .unwrap_or_else(|e| panic!("sweep first {sweep_first}: {e}"));
+        assert_eq!(epoch_of(&answer), 2, "sweep first {sweep_first}");
+    }
+}
+
+/// ★ One rule for an ENDED offer, shared by the claim guard and `next` (the hub review of PR
+/// 157): it passes to the next live waiter, so `next` shows the item to that waiter only, and
+/// a stranger's claim is refused naming the same waiter and end.
+#[test]
+fn next_and_the_claim_guard_agree_on_an_ended_offer() {
+    let l = Ledger::new();
+    l.at(0);
+    l.claim(&worker(A), "lane-a").unwrap();
+    l.at(10);
+    l.join(&worker(B), "lane-b", &[("ttl", "10m")]).unwrap();
+    l.at(20);
+    l.join(&worker(C), "lane-c", &[("ttl", "10m")]).unwrap();
+    l.at(30);
+    l.release(&worker(A), "lane-a");
+    // B (no poll) is offered it for 60 s, until 90, and lets it pass. Nobody sweeps.
+    l.at(100);
+    let next = |cap: &Capability, args: &[(&str, &str)]| -> serde_json::Value {
+        let mut all = vec![("as", "application/json")];
+        all.extend_from_slice(args);
+        serde_json::from_str(&l.try_(cap, Verb::Source, &at("next"), &all).unwrap()).unwrap()
+    };
+    let doc = next(&worker(A), &[("waiter", "lane-a")]);
+    let out = doc["excluded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["item"]["number"] == 1)
+        .unwrap_or_else(|| panic!("a stranger was shown an item it may not claim: {doc}"));
+    assert_eq!(out["why"], "offered");
+    assert_eq!(out["holder"], "lane-c (as urn:iki:gonk:client:cccc)");
+    assert_eq!(out["expires"], "2026-09-15T00:02:40.000Z");
+    assert_eq!(
+        l.waiters(),
+        ["lane-c"],
+        "the read shows B gone, as a settle leaves it"
+    );
+    assert_eq!(l.offered_to().as_deref(), Some("lane-c"));
+    let ranked = next(&worker(C), &[("waiter", "lane-c")]);
+    assert!(
+        ranked["ranking"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["item"]["number"] == 1),
+        "the waiter the offer passed to sees it: {ranked}"
+    );
+    match l.claim(&worker(A), "lane-a") {
+        Err(Error::Conflict(why)) => assert!(
+            why.starts_with(
+                "acme#1 is offered to lane-c (as urn:iki:gonk:client:cccc) until \
+                 2026-09-15T00:02:40.000Z"
+            ),
+            "{why}"
+        ),
+        other => panic!("a stranger claimed an item passed to lane-c: {other:?}"),
+    }
+    assert_eq!(epoch_of(&l.claim(&worker(C), "lane-c").unwrap()), 2);
+}
+
+/// And with no live waiter left, an ended offer leaves the item free for anyone, in `next` and
+/// in the guard alike.
+#[test]
+fn an_ended_offer_with_nobody_left_leaves_the_item_free() {
+    let l = Ledger::new();
+    l.at(0);
+    l.claim(&worker(A), "lane-a").unwrap();
+    l.at(10);
+    l.join(&worker(B), "lane-b", &[("ttl", "10m")]).unwrap();
+    l.at(30);
+    l.release(&worker(A), "lane-a");
+    l.at(100);
+    let doc: serde_json::Value = serde_json::from_str(
+        &l.try_(
+            &worker(C),
+            Verb::Source,
+            &at("next"),
+            &[("as", "application/json")],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        doc["ranking"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["item"]["number"] == 1),
+        "{doc}"
+    );
+    assert!(l.offered_to().is_none());
+    assert_eq!(epoch_of(&l.claim(&worker(C), "lane-c").unwrap()), 2);
 }
 
 #[test]
@@ -639,28 +764,73 @@ fn a_hand_off_is_an_ordinary_grant_and_the_old_epoch_is_fenced_out() {
     assert!(fresh.is_ok(), "{fresh:?}");
 }
 
+/// ★ The dispatcher's override, over the real endpoints (the hub review of PR 157): a claim
+/// under `close:` passes the offer clause, is the next epoch, voids the offer, and is recorded
+/// on its claim event. A worker's claim of the same item is refused.
 #[test]
-fn an_offer_is_void_once_another_grant_has_happened() {
+fn a_dispatchers_claim_passes_the_offer_voids_it_and_is_recorded() {
     let l = held_by_a_with_b_and_c_waiting();
     l.at(60);
     l.release(&worker(A), "lane-a");
     assert_eq!(l.offered_to().as_deref(), Some("lane-b"));
-    // Another grant lands first (here, the epoch an older release's claim would raise),
-    // past the offer.
-    ok(
-        &l.kernel,
-        Verb::Sink,
-        "urn:iki:store:update",
-        &[(
-            "content",
-            "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#> \
-             DELETE { GRAPH <urn:iki:ledger:graph:acme> { ?i ledger:claimEpoch ?e } } \
-             INSERT { GRAPH <urn:iki:ledger:graph:acme> { ?i ledger:claimEpoch 2 } } \
-             WHERE { GRAPH <urn:iki:ledger:graph:acme> { ?i ledger:offeredTo ?w ; ledger:claimEpoch ?e } }",
-        )],
-    );
-    // At epoch 2 the offer made after epoch 1 no longer stands: nobody is offered the item.
+    l.at(61);
+    assert!(matches!(
+        l.claim(&worker(C), "lane-d"),
+        Err(Error::Conflict(_))
+    ));
+    let answer = l.claim(&dispatcher(), "lane-d").unwrap();
+    assert_eq!(epoch_of(&answer), 2, "a hand-off is an ordinary grant");
     assert!(l.offered_to().is_none(), "{}", l.queue());
+    for local in ["offeredTo", "offerExpires", "offerAfterEpoch"] {
+        assert_eq!(l.count(local), 0, "{local} left after the override");
+    }
+    assert_eq!(l.count("overrodeOffer"), 1, "the override is recorded");
+    // B's offer is void: the item is held, and B waits as before.
+    assert_eq!(l.waiters(), ["lane-b", "lane-c"]);
+    assert!(matches!(
+        l.claim(&worker(B), "lane-b"),
+        Err(Error::Conflict(_))
+    ));
+    // Released again, the next offer is a new one, made after epoch 2.
+    l.release(&dispatcher(), "lane-d");
+    assert_eq!(l.offered_to().as_deref(), Some("lane-b"));
+    assert_eq!(l.queue()["offer"]["after_epoch"], 2);
+}
+
+/// A dispatcher's ordinary claim, with no offer standing, records no override.
+#[test]
+fn a_dispatchers_claim_with_no_offer_records_nothing_more() {
+    let l = Ledger::new();
+    l.at(0);
+    l.claim(&dispatcher(), "lane-d").unwrap();
+    assert_eq!(l.count("overrodeOffer"), 0);
+}
+
+/// ★ Closing an item removes its offer and its waiters in the same update (the hub review of
+/// PR 157: 300 closed items had left 302 `offeredTo` quads).
+#[test]
+fn closing_an_item_takes_its_offer_and_its_waiters_with_it() {
+    let l = held_by_a_with_b_and_c_waiting();
+    l.at(60);
+    l.release(&worker(A), "lane-a");
+    assert_eq!(l.count("offeredTo"), 1);
+    l.sink(&dispatcher(), "close", &[("item", "1")]);
+    for local in [
+        "offeredTo",
+        "offerExpires",
+        "offerAfterEpoch",
+        "waitsOn",
+        "waiter",
+        "waiterPrincipal",
+        "askedAt",
+        "waitExpires",
+        "waitPoll",
+    ] {
+        assert_eq!(l.count(local), 0, "{local} left on a closed item");
+    }
+    // The sweep then has nothing to re-read.
+    let swept = l.sink(&dispatcher(), "offers", &[]);
+    assert!(swept.contains("nothing was written"), "{swept}");
 }
 
 #[test]

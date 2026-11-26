@@ -5337,6 +5337,8 @@ impl CloseEndpoint {
         // is made again from a fresh read.
         let mut records = Vec::new();
         let mut attempt = 0;
+        // The item's claim queue, which the close removes (ledger #4455).
+        let places = wait::place_iris(client, &item.iri).await?;
         let closed_here = loop {
             attempt += 1;
             let mut events = counts::StatusEvents::read(client, &item.iri).await?;
@@ -5422,6 +5424,8 @@ impl CloseEndpoint {
                 retract_when(client, &item.iri, v::AWAITING, &fence),
                 replace_one_when(client, &item.iri, v::AWAITING_AT, &datetime(now), &fence),
             ];
+            // And its claim queue: closed work is waited for by nobody (ledger #4455).
+            ops.extend(wait::close_ops(client, &item.iri, &places, &fence)?);
             // The claim last, its holder after every other field: see the fence above.
             ops.extend(
                 CLAIM_FIELDS
@@ -6746,22 +6750,37 @@ impl Endpoint for ClaimEndpoint {
                 // This claim settles an offer that ended first (the next waiter's claim is what
                 // passes it on), and is refused while one stands to another waiter. The cheap
                 // half; the update's own clause below is what holds against a racer.
+                //
+                // ★ The dispatcher's override (the design note: it may "claim for a lane
+                // outright, as it can already release anyone's claim"): a claim under `close:` or
+                // `write:` on the ledger passes the offer clause, voids the standing offer
+                // (the epoch moves past `offerAfterEpoch`) and is recorded on its claim event as
+                // `ledger:overrodeOffer`.
+                let overrides = is_dispatcher(inv, client.ledger());
+                let mut overridden: Option<String> = None;
                 if !takeover && !renew && item.claimed_by.is_none() {
                     let mut queue = wait::read(&client, &item, now).await?;
                     if queue.unsettled(&item) {
                         wait::settle(&client, &item, now).await?;
                         queue = wait::read(&client, &item, now).await?;
                     }
-                    if let Some(offer) = queue.offered_to_another(&holder, caller) {
-                        return Err(wait::offered_refusal(&item, client.ledger(), offer));
+                    if let Some(offer) = queue.offered_to_another(&item, now, &holder, caller) {
+                        if !overrides {
+                            return Err(wait::offered_refusal(&item, client.ledger(), &offer));
+                        }
+                        overridden = Some(offer.place.iri.clone());
                     }
                 }
                 let previous = item.claimed_by.clone();
-                let guarded = format!(
-                    "{}\n{}",
-                    fence_clause(&item.iri, epoch),
-                    wait::claim_clause(&item.iri, &holder, caller_term.as_deref(), now)
-                );
+                let guarded = if overrides {
+                    fence_clause(&item.iri, epoch)
+                } else {
+                    format!(
+                        "{}\n{}",
+                        fence_clause(&item.iri, epoch),
+                        wait::claim_clause(&item.iri, &holder, caller_term.as_deref(), now)
+                    )
+                };
                 let mut ops = vec![claim_update(
                     &client,
                     &item.iri,
@@ -6775,6 +6794,12 @@ impl Endpoint for ClaimEndpoint {
                     &Attribution::committer(inv)?,
                     now,
                 )?];
+                // The override is recorded while the offer it passed is still there to name.
+                if let Some(place) = &overridden {
+                    ops.push(wait::override_record(
+                        &client, &item.iri, place, &holder, now,
+                    )?);
+                }
                 // The offer is spent and the claimant's own place goes, in the same update.
                 ops.extend(wait::after_claim_ops(
                     &client,
@@ -6813,12 +6838,12 @@ impl Endpoint for ClaimEndpoint {
                         return Err(fence_refusal(&after, epoch));
                     }
                 }
-                if after.claimed_by.is_none() && !renew && !takeover {
+                if after.claimed_by.is_none() && !renew && !takeover && !overrides {
                     // The update's offer clause refused it: a release offered the item to a
                     // waiter between the read and the write.
                     let queue = wait::read(&client, &after, now).await?;
-                    if let Some(offer) = queue.offered_to_another(&holder, caller) {
-                        return Err(wait::offered_refusal(&after, client.ledger(), offer));
+                    if let Some(offer) = queue.offered_to_another(&after, now, &holder, caller) {
+                        return Err(wait::offered_refusal(&after, client.ledger(), &offer));
                     }
                 }
                 if after.claimed_by.as_deref() != Some(holder.as_str()) {

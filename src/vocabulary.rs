@@ -368,6 +368,8 @@ term! {
     OFFER_EXPIRES => "offerExpires";
     /// `ledger:offerAfterEpoch` — the claim epoch whose release made the offer.
     OFFER_AFTER_EPOCH => "offerAfterEpoch";
+    /// `ledger:overrodeOffer` — the place whose standing offer a dispatcher's claim passed.
+    OVERRODE_OFFER => "overrodeOffer";
     /// `ledger:awaiting` — who the item waits on after a hand-back (ledger #1199).
     AWAITING => "awaiting";
     /// `ledger:awaitingAt` — when the latest hand-back decision set or cleared awaiting.

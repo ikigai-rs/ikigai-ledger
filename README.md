@@ -1830,8 +1830,9 @@ $ sink urn:iki:ledger:claim item=12 content=lane-b       # an ordinary claim, th
   `ledger:askedAt` (the kernel clock), `ledger:waitSeq` (per item, never lower) and
   `ledger:waitExpires`, plus `ledger:waitPoll`. Joining again with the same label and principal
   renews the place and keeps its order. A place that is not renewed within its `ttl` (default 3
-  minutes, at most an hour) is skipped at once by every read and guard; `sink …:offers` deletes
-  lapsed places in batches of 128. A place grants no authority, unlike a lease.
+  minutes, at most an hour) is skipped at once by every read and guard, an offer to it included,
+  whether or not a sweep has run; `sink …:offers` deletes lapsed places in batches of 128. A
+  place grants no authority, unlike a lease.
 - **The offer** is written by the release, in its own update, whenever a live waiter exists:
   `ledger:offeredTo`, `ledger:offerExpires` and `ledger:offerAfterEpoch` on the item. It lasts the
   waiter's `poll=` plus 30 seconds, at least 60 seconds and at most 5 minutes, so a waiter that
@@ -1839,14 +1840,21 @@ $ sink urn:iki:ledger:claim item=12 content=lane-b       # an ordinary claim, th
   (`Conflict`, naming the waiter and when the offer ends). An empty queue writes nothing: a free
   item nobody waits for is claimed exactly as before.
 - **An offer nobody takes passes on.** Its waiter leaves the queue (it may join again, at the
-  end) and the next live waiter is offered the item. The write comes from the next claim, join
-  or leave on the item, or from the dispatcher's `sink …:offers` when nobody is acting.
+  end) and the next live waiter is offered the item; with no live waiter left, the item is free
+  for anyone. The write comes from the next claim, join or leave on the item, or from the
+  dispatcher's `sink …:offers` when nobody is acting, but the claim guard, `next` and the queue's
+  read all decide by this one rule before it is written, so they always agree.
+- **The dispatcher's override.** A claim under `close:{ledger}` or `write:{ledger}` passes a
+  standing offer to another waiter, as the dispatcher can already release anyone's claim. It is
+  an ordinary grant (the next epoch), so the offer is void, and its claim event names the place
+  it passed as `ledger:overrodeOffer`.
+- **Closing an item** removes its offer and every place on it, in the close's own update.
 - **A join on a free item** that nobody else is offered claims it at once, through the claim
   resource, and answers as the claim does (`lease=` and `purpose=` pass through).
 - **Leaving** (`delete …:wait:item:{id} from=<holder>`) follows a release's principal rules:
   the waiter's own principal, or the dispatcher's override (`close:{ledger}` or
   `write:{ledger}`), which is also how a dispatcher reorders a queue.
-- **`next`** leaves an item with a standing offer out for everyone but its waiter, with
+- **`next`** leaves an item with an offer (the effective one, as above) out for everyone but its waiter, with
   `why: "offered"`, the waiter as `holder` and the end as `expires`; `next waiter=<holder>`
   (with the waiter's principal) sees it ranked as usual.
 - **Fencing.** A hand-off is an ordinary claim, at one more than the released epoch; the old
@@ -1856,6 +1864,9 @@ $ sink urn:iki:ledger:claim item=12 content=lane-b       # an ordinary claim, th
 - **What it does not do.** A queue makes waiting fair and quiet, not short: at the measured
   loads the longest wait is the same as with a wake. Splitting the mutex or changing the plan's
   shape is what shortens waits. `items` and the doctor do not show queue length yet.
+- ⚠ **`wait` and `offers` are reserved ledger names** (the reserved-word rule above): an
+  existing ledger named `wait` or `offers` becomes unreachable through the short forms on
+  upgrade, as `stalled` and `lapse` did in 0.23.0. Rename such a ledger before upgrading.
 
 ### ★ A claim carries a fencing epoch, and a stale holder's writes are refused
 
