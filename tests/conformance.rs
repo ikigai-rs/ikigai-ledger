@@ -374,6 +374,13 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
             Check::Pipeline,
             "the receipt sweep takes no body",
         )
+        // PIPELINE (ledger #4455): leaving a claim queue names its waiter in `from=`, as a
+        // compare-and-set release does, and carries no body for a pipe to deliver.
+        .opt_out_check(
+            "ledger-wait",
+            Check::Pipeline,
+            "a leave names its waiter in `from=` and takes no body",
+        )
         .opt_out_check(
             "ledger-offers",
             Check::Pipeline,
