@@ -408,6 +408,7 @@ mod lapse;
 mod note;
 mod replay;
 mod session;
+mod transition;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
 pub const SPACE_ID: &str = "urn:iki:space:ledger";
@@ -657,6 +658,10 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             },
         )
         .bind(ItemPartGrammar::part("history"), history::HistoryEndpoint)
+        .bind(
+            LedgerGrammar::action("transition"),
+            transition::TransitionFeedEndpoint,
+        )
         .bind(ItemPartGrammar::part("notes"), note::NotesEndpoint)
         .bind(
             LedgerGrammar::action("note"),
@@ -1129,8 +1134,12 @@ fn batch(operations: &[String]) -> String {
 /// subject, so the store's scoped door copies only the item's and the node's quads.
 ///
 /// ⚠ Per item: two items' revisions are unrelated, and no reader compares them.
+///
+/// A node that records a transition (a claim, a release, a hand-back, a lapse, a close or a
+/// reopen) also takes its place in the ledger's transition feed here, in the same update
+/// (ledger #4116, [`transition::record`]).
 pub(crate) fn revise(client: &StoreClient<'_, '_>, item: &str, node: &str) -> String {
-    format!(
+    let revision = format!(
         "DELETE {{ {} }} INSERT {{ {} }} WHERE {{ {} BIND(COALESCE(?revisionWas, 0) + 1 AS ?revisionNext) }}",
         client.in_graph(&format!("<{item}> <{}> ?revisionWas", v::ITEM_REVISION)),
         client.in_graph(&format!(
@@ -1143,7 +1152,8 @@ pub(crate) fn revise(client: &StoreClient<'_, '_>, item: &str, node: &str) -> St
             on = v::ON_ITEM,
             rev = v::ITEM_REVISION
         )),
-    )
+    );
+    batch(&[revision, transition::record(client, item, node)])
 }
 
 /// Remove every value of a property.
@@ -3281,13 +3291,16 @@ impl Selector {
         Ok(Selector::Narrow { item, dependents })
     }
 
-    /// The edges pointing at the item that go with it: every one but another item's history.
+    /// The edges pointing at the item that go with it: every one but another item's history
+    /// and the transition feed's entries, which are immutable (ledger #4116).
     fn inbound_filter(subject: &str, predicate: &str, also: &str) -> String {
         format!(
-            "FILTER({predicate} NOT IN (<{}>, <{}>{also}) && \
+            "FILTER({predicate} NOT IN (<{}>, <{}>, <{}>, <{}>{also}) && \
              ({predicate} != <{}> || NOT EXISTS {{ {subject} <{}> <{}> }}))",
             v::EDIT_TARGET,
             v::EVIDENCE,
+            v::TRANSITION_ITEM,
+            v::TRANSITION_EVENT,
             v::CAUSED_BY,
             v::ext::TYPE,
             v::STATUS_EVENT_CLASS
@@ -3317,10 +3330,12 @@ impl Selector {
             }
             Selector::Whole { item } => format!(
                 "?s ?p ?o . FILTER(?s = {item} || (?o = {item} && ?p NOT IN (<{target}>, \
-                 <{evidence}>) && (?p != <{caused_by}> || NOT EXISTS {{ ?s <{type_}> <{status_event}> }})) || EXISTS {{ {dependent} }})",
+                 <{evidence}>, <{transition_item}>, <{transition_event}>) && (?p != <{caused_by}> || NOT EXISTS {{ ?s <{type_}> <{status_event}> }})) || EXISTS {{ {dependent} }})",
                 dependent = Self::dependent_pattern("?s", item),
                 target = v::EDIT_TARGET,
                 evidence = v::EVIDENCE,
+                transition_item = v::TRANSITION_ITEM,
+                transition_event = v::TRANSITION_EVENT,
                 caused_by = v::CAUSED_BY,
                 type_ = v::ext::TYPE,
                 status_event = v::STATUS_EVENT_CLASS,
@@ -4231,7 +4246,7 @@ impl AppendEndpoint {
         // across ledgers would have leaked the other ledgers' activity through the gaps
         // in the sequence, which is a small thing to leak and an unnecessary one.
         client
-            .update(&append_update(client, &triples, "", &key_guard))
+            .update(&append_update(client, &iri, &triples, "", &key_guard))
             .await?;
 
         // Which item the key names now says what happened: the one just minted (filed), or
@@ -4457,6 +4472,7 @@ impl AppendEndpoint {
                 let record = token.triples(&answer, now);
                 append_update(
                     client,
+                    iri,
                     &format!("{triples}{record}"),
                     &delete,
                     &format!("{key_guard} FILTER(?last = {}) {guard}", integer(last)),
@@ -4485,9 +4501,18 @@ fn append_counter(client: &StoreClient<'_, '_>, value: &str) -> String {
 }
 
 /// The number is allocated per ledger under the same store lock as the filing and its receipt.
-fn append_update(client: &StoreClient<'_, '_>, triples: &str, delete: &str, guard: &str) -> String {
+///
+/// The filing's transition (`filed`, ledger #4116) follows in the same update request, once
+/// the item is in.
+fn append_update(
+    client: &StoreClient<'_, '_>,
+    item: &str,
+    triples: &str,
+    delete: &str,
+    guard: &str,
+) -> String {
     let counter = client.ledger().counter();
-    format!(
+    let filing = format!(
         "DELETE {{ {old_q} {delete} }}\nINSERT {{ {insert} }}\nWHERE {{\n  \
          {{ {{ SELECT ?last WHERE {{ {last_q} }} ORDER BY DESC(?last) LIMIT 1 }}\n    \
          UNION\n    {{ BIND({zero} AS ?last) FILTER NOT EXISTS {{ {any_q} }} }} }}\n  \
@@ -4502,7 +4527,8 @@ fn append_update(client: &StoreClient<'_, '_>, triples: &str, delete: &str, guar
         zero = integer(0),
         any_q = append_counter(client, "?any"),
         old_q = append_counter(client, "?old"),
-    )
+    );
+    batch(&[filing, transition::record(client, item, item)])
 }
 
 /// The keyed append's "nothing was filed": the item the key already names, with its
@@ -6457,9 +6483,13 @@ fn claim_update(
             now,
         )?);
     }
-    if records_a_claim {
-        let event = event_iri(item, "claim", now)?;
-        let mut triples = event_triples(&event, v::CLAIM_EVENT_CLASS, item, who, now);
+    let claim_event = if records_a_claim {
+        Some(event_iri(item, "claim", now)?)
+    } else {
+        None
+    };
+    if let Some(event) = &claim_event {
+        let mut triples = event_triples(event, v::CLAIM_EVENT_CLASS, item, who, now);
         triples.push_str(&format!(
             "\n<{event}> <{}> {} ; <{}> <{}> .",
             v::CLAIMED_BY,
@@ -6493,7 +6523,6 @@ fn claim_update(
             client.in_graph(&triples),
             client.in_graph(&format!("{} {open}\n{unclaimed}", live(item)))
         ));
-        ops.push(revise(client, item, &event));
     }
     ops.push(format!(
         "DELETE {{ {} }}\nINSERT {{ {} }}\nWHERE {{ {} }}",
@@ -6505,6 +6534,12 @@ fn claim_update(
             v::ITEM_CLASS,
         )),
     ));
+    // The claim's revision and its transition entry go after the item takes the claim, so
+    // the entry carries the epoch the claim was given (ledger #4116); a takeover's release,
+    // above, carries the epoch it released.
+    if let Some(event) = &claim_event {
+        ops.push(revise(client, item, event));
+    }
     Ok(batch(&ops))
 }
 

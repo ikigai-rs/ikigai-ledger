@@ -105,6 +105,24 @@ term! {
     EVENT_SEQUENCE => "eventSequence";
     /// `ledger:itemRevision` — an item's durable commit order, allocated in the recording update (ledger #4199).
     ITEM_REVISION => "itemRevision";
+    /// `ledger:Transition` — one entry of a ledger's transition feed (ledger #4116).
+    TRANSITION_CLASS => "Transition";
+    /// `ledger:transitionSeq` — an entry's place in its ledger's transition feed, from 1.
+    TRANSITION_SEQ => "transitionSeq";
+    /// `ledger:transitionHead` — on the feed, the last sequence number allocated.
+    TRANSITION_HEAD => "transitionHead";
+    /// `ledger:transitionKind` — filed, claimed, released, handed back, lapsed, closed or reopened.
+    TRANSITION_KIND => "transitionKind";
+    /// `ledger:transitionEvent` — the node whose write the entry records.
+    TRANSITION_EVENT => "transitionEvent";
+    /// `ledger:transitionItem` — the item an entry's transition happened to; not `ledger:onItem`, as an entry is not one of the item's records.
+    TRANSITION_ITEM => "transitionItem";
+    /// `ledger:transitionEpoch` — on an entry, the item's claim epoch when the transition was written.
+    TRANSITION_EPOCH => "transitionEpoch";
+    /// `ledger:transitionPrincipal` — on an entry, the principal the door minted for the write.
+    TRANSITION_PRINCIPAL => "transitionPrincipal";
+    /// `ledger:transitionFeedEpoch` — on the feed, its incarnation, minted with its first entry.
+    TRANSITION_FEED_EPOCH => "transitionFeedEpoch";
     /// `ledger:closedAt`
     CLOSED_AT => "closedAt";
     /// `ledger:closedAtSource`
@@ -439,7 +457,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 25] = [
+pub const STRUCTURAL_CLASSES: [&str; 26] = [
     COMMENT_CLASS,
     REPLAY_CLASS,
     DISPATCH_NOTE_CLASS,
@@ -465,6 +483,7 @@ pub const STRUCTURAL_CLASSES: [&str; 25] = [
     LAPSE_EVENT_CLASS,
     LINK_CLASS,
     MIRROR_CLASS,
+    TRANSITION_CLASS,
 ];
 
 /// The close reasons, as `(short name, IRI)` — the `one_of` an ArgSpec declares and the
