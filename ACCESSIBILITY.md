@@ -64,6 +64,14 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   what happened, and `(claimed by an importer)` after who did it at the source. A state change
   names the lifecycle's version in words (`lifecycle version 2`), or says it has none
   (`no lifecycle version recorded (written before 0.18.0)`).
+- **The transition feed** (`src/endpoints/transition.rs`, ledger #4116): a first line in words with
+  a real singular or plural, the position read from, how far the read got when that differs, and
+  the last number (`5 transitions after 0. The last is 5.`, `1 transition after 3, read through 4.
+  The last is 9.`, `No transitions after 5. The last is 5.`), then one line per entry: its number,
+  its kind in words (`filed`, `claimed`, `released`, `handed back`, `lapsed`, `closed`,
+  `reopened`), the item's IRI, `at` its authored time, and when known `epoch 2` and `by` the
+  principal. A cursor past the last entry, or from another feed epoch, is refused in one
+  sentence that names the ledger and both positions or epochs and says to resynchronize from 0.
 - **An item's sessions** (`src/endpoints/session.rs`): a first line with the item and a count
   (`acme#1: 2 session(s), newest first`), or the sentence `acme#1 has no recorded sessions`, then
   a block per session: `session {id} recorded {time}` and labeled lines in words (`harness:`,

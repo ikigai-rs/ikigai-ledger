@@ -469,6 +469,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-sessions",
             "ledger-stalled",
             "ledger-sweep-replays",
+            "ledger-transition",
             "ledger-wait",
         ],
         "{report}"

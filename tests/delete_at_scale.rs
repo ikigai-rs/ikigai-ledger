@@ -168,14 +168,16 @@ fn a_delete_in_a_graph_past_the_bound_moves_the_item_and_nothing_else() {
     );
 }
 
-/// The edges still pointing at `target` in `graph`, but its tombstone's and another item's
-/// history (`editTarget`, `evidence`), which stay by design.
+/// The edges still pointing at `target` in `graph`, but its tombstone's, another item's
+/// history (`editTarget`, `evidence`) and the transition feed's entries (`transitionItem`,
+/// `transitionEvent`, immutable since ledger #4116), which stay by design.
 fn edges_to(kernel: &Kernel, graph: &str, target: &str) -> String {
     let json: serde_json::Value = serde_json::from_str(&select(
         kernel,
         &format!(
             "SELECT ?s ?p WHERE {{ GRAPH <{graph}> {{ ?s ?p <{target}> }} \
-             FILTER(?p NOT IN (<{NS}deletedItem>, <{NS}editTarget>, <{NS}evidence>)) }}"
+             FILTER(?p NOT IN (<{NS}deletedItem>, <{NS}editTarget>, <{NS}evidence>, \
+             <{NS}transitionItem>, <{NS}transitionEvent>)) }}"
         ),
     ))
     .expect("JSON");

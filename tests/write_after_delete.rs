@@ -116,8 +116,12 @@ fn request(verb: Verb, iri: &str, args: &[(&str, &str)]) -> Request {
     )
 }
 
-/// Every live triple that names `item`, except the tombstone's `ledger:deletedItem` edge:
-/// what a deleted item may leave behind is its tombstone, and nothing else.
+/// Every live triple that names `item`, except the tombstone's `ledger:deletedItem` edge and
+/// the transition feed's entries (`transitionItem`, `transitionEvent`), which are immutable
+/// and stay by design (ledger #4116): what a deleted item may leave behind is its tombstone
+/// and its feed entries, and nothing else. An entry is written only while its node is live in
+/// the same update, and a live node still shows here by its `onItem`, so a refused write that
+/// recorded an entry is still caught.
 fn leftovers(kernel: &Kernel, item: &str) -> Vec<String> {
     let json: serde_json::Value = serde_json::from_str(&select(
         kernel,
@@ -125,7 +129,9 @@ fn leftovers(kernel: &Kernel, item: &str) -> Vec<String> {
             "SELECT ?s ?p ?o WHERE {{ GRAPH <{LIVE}> {{ ?s ?p ?o . \
              FILTER(?s = <{item}> || ?o = <{item}> || \
              EXISTS {{ ?s <https://ikigai-rs.dev/ns/ledger#onItem> <{item}> }}) \
-             FILTER(?p != <https://ikigai-rs.dev/ns/ledger#deletedItem>) }} }}"
+             FILTER(?p NOT IN (<https://ikigai-rs.dev/ns/ledger#deletedItem>, \
+             <https://ikigai-rs.dev/ns/ledger#transitionItem>, \
+             <https://ikigai-rs.dev/ns/ledger#transitionEvent>)) }} }}"
         ),
     ))
     .expect("the store answers JSON");
