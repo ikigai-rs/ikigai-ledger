@@ -10,9 +10,15 @@
 //! clock runs slow can make earlier than the entry before it (the clock research, rule 3).
 //!
 //! `urn:iki:ledger:{ledger}:transition after={n} limit={k}` reads the entries past `n`, in
-//! sequence order, under the ledger's read grant. ⚠ Not yet built: `wait=` (a long poll), the
-//! entries as their own resources, a renewal (which writes no node of its own) and the claim's
-//! epoch on the entry itself (it is on the item, and on a lapse event).
+//! sequence order, under the ledger's read grant, in the layer feed's shape: `last` is how far
+//! the read got (a follower's next `after=`, past any gap), `epoch` names the feed's
+//! incarnation, and a cursor past the head or from another epoch is refused as `Conflict`.
+//! Each entry carries the item's claim epoch and the principal of the write. ⚠ Not yet built:
+//! `wait=` (a long poll), the entries as their own resources, and a renewal (which writes no
+//! node of its own).
+//!
+//! ★ Entries are immutable: delete and purge take an item's records, never the entries that
+//! name it (`Selector::inbound_filter` leaves `transitionItem` and `transitionEvent` alone).
 
 use super::*;
 
@@ -45,10 +51,14 @@ pub(crate) fn record(client: &StoreClient<'_, '_>, item: &str, node: &str) -> St
             head = v::TRANSITION_HEAD
         )),
         insert = client.in_graph(&format!(
-            "<{feed}> <{head}> ?seq .\n\
+            "<{feed}> <{head}> ?seq ; <{feed_epoch}> ?feedEpoch .\n\
              ?entry <{type_}> <{class}> ; <{seq_p}> ?seq ; <{on_p}> <{item}> ; \
-             <{kind_p}> ?kind ; <{event_p}> <{node}> ; <{created}> ?at .",
+             <{kind_p}> ?kind ; <{event_p}> <{node}> ; <{created}> ?at ; \
+             <{epoch_p}> ?epoch ; <{principal_p}> ?principal .",
             head = v::TRANSITION_HEAD,
+            feed_epoch = v::TRANSITION_FEED_EPOCH,
+            epoch_p = v::TRANSITION_EPOCH,
+            principal_p = v::TRANSITION_PRINCIPAL,
             seq_p = v::TRANSITION_SEQ,
             type_ = v::ext::TYPE,
             class = v::TRANSITION_CLASS,
@@ -63,6 +73,10 @@ pub(crate) fn record(client: &StoreClient<'_, '_>, item: &str, node: &str) -> St
              OPTIONAL {{ <{node}> <{status}> ?status }}\n\
              OPTIONAL {{ <{node}> <{hand_back}> ?handBack }}\n\
              OPTIONAL {{ <{node}> <{created}> ?at }}\n\
+             OPTIONAL {{ <{node}> <{committer}> ?principal }}\n\
+             OPTIONAL {{ <{item}> <{claim_epoch}> ?claimEpoch }}\n\
+             OPTIONAL {{ <{node}> <{lapsed_epoch}> ?lapsedEpoch }}\n\
+             BIND(COALESCE(?lapsedEpoch, ?claimEpoch) AS ?epoch)\n\
              BIND(IF(?class = <{item_c}>, \"filed\", \
                   IF(?class = <{claim_c}>, \"claimed\", \
                   IF(?class = <{release_c}>, \"released\", \
@@ -73,7 +87,9 @@ pub(crate) fn record(client: &StoreClient<'_, '_>, item: &str, node: &str) -> St
                   ?none))))))) AS ?kind)\n\
              FILTER(BOUND(?kind))\n\
              OPTIONAL {{ <{feed}> <{head}> ?headWas }}\n\
+             OPTIONAL {{ <{feed}> <{feed_epoch}> ?feedEpochWas }}\n\
              BIND(COALESCE(?headWas, 0) + 1 AS ?seq)\n\
+             BIND(COALESCE(?feedEpochWas, STRUUID()) AS ?feedEpoch)\n\
              BIND(IRI(CONCAT(\"{feed}:seq:\", STR(?seq))) AS ?entry)",
             type_ = v::ext::TYPE,
             event_p = v::TRANSITION_EVENT,
@@ -89,6 +105,10 @@ pub(crate) fn record(client: &StoreClient<'_, '_>, item: &str, node: &str) -> St
             closed = v::CLOSED,
             open = v::OPEN,
             head = v::TRANSITION_HEAD,
+            feed_epoch = v::TRANSITION_FEED_EPOCH,
+            committer = v::COMMITTER,
+            claim_epoch = v::CLAIM_EPOCH,
+            lapsed_epoch = v::LAPSED_EPOCH,
         )),
     )
 }
@@ -101,50 +121,114 @@ struct Entry {
     item: String,
     kind: String,
     event: String,
+    /// The item's claim epoch when the transition was written; none for an item never claimed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<u64>,
+    /// The principal the door minted for the write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    principal: Option<String>,
     /// Authored time, for display; never the order.
     at: Option<String>,
 }
 
+/// The layer feed's shape (design 8.1): `last` is how far the read got, which a follower
+/// passes back as its next `after=` whatever entries the range held.
 #[derive(serde::Serialize)]
 struct FeedDocument {
     schema: u32,
     ledger: String,
+    /// The feed's incarnation, minted with its first entry; none while it has none.
+    epoch: Option<String>,
     after: u64,
+    last: u64,
     head: u64,
     entries: Vec<Entry>,
 }
 
-async fn read(client: &StoreClient<'_, '_>, after: u64, limit: usize) -> Result<(u64, Vec<Entry>)> {
+/// What a read found: the feed's head and epoch, how far the read got, and the entries.
+struct Page {
+    head: u64,
+    epoch: Option<String>,
+    last: u64,
+    entries: Vec<Entry>,
+}
+
+async fn read(
+    client: &StoreClient<'_, '_>,
+    after: u64,
+    limit: usize,
+    epoch: Option<&str>,
+) -> Result<Page> {
     let feed = format!("{}transition", client.ledger().prefix());
-    let head = client
+    let rows = client
         .select(&format!(
-            "SELECT ?head WHERE {{ {} }}",
-            client.in_graph(&format!("<{feed}> <{}> ?head", v::TRANSITION_HEAD))
+            "SELECT ?head ?epoch WHERE {{ {} }}",
+            client.in_graph(&format!(
+                "<{feed}> <{}> ?head OPTIONAL {{ <{feed}> <{}> ?epoch }}",
+                v::TRANSITION_HEAD,
+                v::TRANSITION_FEED_EPOCH
+            ))
         ))
-        .await?
-        .first()
+        .await?;
+    let row = rows.first();
+    let head: u64 = row
         .and_then(|row| row.get("head")?.value.parse().ok())
         .unwrap_or(0);
-    // The entries are named by their sequence, so the page is a VALUES list over the
-    // subjects: the read names every subject it touches.
+    let feed_epoch = row.and_then(|row| Some(row.get("epoch")?.value.clone()));
+    let ledger = client.ledger().name().to_string();
+    if let Some(asked) = epoch {
+        if Some(asked) != feed_epoch.as_deref() {
+            return Err(Error::Conflict(format!(
+                "the cursor on ledger `{ledger}`'s transitions is from feed epoch {asked}, and \
+                 this feed is {}: it is not the feed the cursor came from (restored, or another \
+                 store), so resynchronize from 0{}",
+                feed_epoch
+                    .as_deref()
+                    .map_or("empty, with no epoch yet".to_string(), |e| format!(
+                        "epoch {e}"
+                    )),
+                feed_epoch
+                    .as_deref()
+                    .map_or(String::new(), |e| format!(" with epoch={e}")),
+            )));
+        }
+    }
+    if after > head {
+        return Err(Error::Conflict(format!(
+            "cursor {after} is past ledger `{ledger}`'s last transition, {head}: this feed is not \
+             the one the cursor came from (restored, or another store), so resynchronize from 0"
+        )));
+    }
+    // How far this read gets: a gap in the range (an entry a write through the broad door
+    // removed) still moves the follower on, so it never stalls below the head.
     let last = head.min(after.saturating_add(limit as u64));
     if last <= after {
-        return Ok((head, Vec::new()));
+        return Ok(Page {
+            head,
+            epoch: feed_epoch,
+            last,
+            entries: Vec::new(),
+        });
     }
+    // The entries are named by their sequence, so the page is a VALUES list over the
+    // subjects: the read names every subject it touches.
     let subjects: String = (after + 1..=last)
         .map(|n| format!("<{feed}:seq:{n}> "))
         .collect();
     let rows = client
         .select(&format!(
-            "SELECT ?entry ?seq ?item ?kind ?event ?at WHERE {{ {} }} ORDER BY ?seq",
+            "SELECT ?entry ?seq ?item ?kind ?event ?epoch ?principal ?at WHERE {{ {} }} ORDER BY ?seq",
             client.in_graph(&format!(
                 "VALUES ?entry {{ {subjects}}} ?entry <{seq}> ?seq ; <{on}> ?item ; \
-                 <{kind}> ?kind ; <{event}> ?event . OPTIONAL {{ ?entry <{created}> ?at }}",
+                 <{kind}> ?kind ; <{event}> ?event . OPTIONAL {{ ?entry <{created}> ?at }} \
+                 OPTIONAL {{ ?entry <{epoch}> ?epoch }} OPTIONAL {{ ?entry <{principal}> ?principal }}",
                 seq = v::TRANSITION_SEQ,
                 on = v::TRANSITION_ITEM,
                 kind = v::TRANSITION_KIND,
                 event = v::TRANSITION_EVENT,
                 created = v::ext::CREATED,
+                epoch = v::TRANSITION_EPOCH,
+                principal = v::TRANSITION_PRINCIPAL,
             ))
         ))
         .await?;
@@ -160,10 +244,17 @@ async fn read(client: &StoreClient<'_, '_>, after: u64, limit: usize) -> Result<
             item: get("item").unwrap_or_default(),
             kind: get("kind").unwrap_or_default(),
             event: get("event").unwrap_or_default(),
+            epoch: get("epoch").and_then(|e| e.parse().ok()),
+            principal: get("principal"),
             at: get("at"),
         });
     }
-    Ok((head, entries))
+    Ok(Page {
+        head,
+        epoch: feed_epoch,
+        last,
+        entries,
+    })
 }
 
 /// `urn:iki:ledger:{ledger}:transition`.
@@ -183,28 +274,45 @@ impl Endpoint for TransitionFeedEndpoint {
             0 => MAX_LIMIT,
             n => n.min(MAX_LIMIT),
         };
-        let (head, entries) = read(&client, after, limit).await?;
+        let epoch = inv.optional_str("epoch")?.map(str::trim);
+        let page = read(&client, after, limit, epoch).await?;
         if want == JSON {
             let doc = serde_json::to_vec_pretty(&FeedDocument {
                 schema: json::SCHEMA,
                 ledger: client.ledger().name().to_string(),
+                epoch: page.epoch,
                 after,
-                head,
-                entries,
+                last: page.last,
+                head: page.head,
+                entries: page.entries,
             })
             .map_err(|e| Error::Endpoint(format!("the transition feed did not serialize: {e}")))?;
             return Ok(json_face(doc));
         }
-        let mut text = match entries.len() {
-            0 => format!("No transitions after {after}. The last is {head}.\n"),
-            n => format!("{n} transition(s) after {after}. The last is {head}.\n"),
+        let (head, last) = (page.head, page.last);
+        let count = match page.entries.len() {
+            0 => "No transitions".to_string(),
+            1 => "1 transition".to_string(),
+            n => format!("{n} transitions"),
         };
-        for entry in &entries {
+        let mut text = if last == after {
+            format!("{count} after {after}. The last is {head}.\n")
+        } else {
+            format!("{count} after {after}, read through {last}. The last is {head}.\n")
+        };
+        for entry in &page.entries {
             let at = entry.at.as_deref().unwrap_or("an unknown time");
             text.push_str(&format!(
-                "{}  {}  {}  at {at}\n",
+                "{}  {}  {}  at {at}",
                 entry.seq, entry.kind, entry.item
             ));
+            if let Some(epoch) = entry.epoch {
+                text.push_str(&format!("  epoch {epoch}"));
+            }
+            if let Some(principal) = &entry.principal {
+                text.push_str(&format!("  by {principal}"));
+            }
+            text.push('\n');
         }
         face(text, None, PLAIN)
     }
@@ -227,8 +335,10 @@ impl Endpoint for TransitionFeedEndpoint {
                 ikigai_core::ActionSpec::new(Verb::Source)
                     .input(ledger_arg("transition"))
                     .summary(
-                        "One line per entry in text (its number, kind, item and time), under a \
-                         count and the last number; in JSON, the entries and `head`.",
+                        "One line per entry in text (its number, kind, item, time, epoch and \
+                         principal), under a count, how far the read got and the last number; in \
+                         JSON, `ledger`, `epoch`, `last` (pass it back as `after=`), `head` and \
+                         the entries.",
                     )
                     .input(
                         ArgSpec::new("after")
@@ -242,6 +352,16 @@ impl Endpoint for TransitionFeedEndpoint {
                             .summary("At most this many entries (default and most 500; `0` means 500).")
                             .class(v::ext::XSD_INTEGER)
                             .default_value("500")
+                            .optional(),
+                    )
+                    .input(
+                        ArgSpec::new("epoch")
+                            .summary(
+                                "The feed epoch the cursor came from, as the JSON face named it: \
+                                 a cursor from another epoch is refused as Conflict, as is one \
+                                 past the last entry, so resynchronize from 0.",
+                            )
+                            .class(v::ext::XSD_STRING)
                             .optional(),
                     )
                     .input(as_arg(&FEED_FACES))

@@ -3291,13 +3291,16 @@ impl Selector {
         Ok(Selector::Narrow { item, dependents })
     }
 
-    /// The edges pointing at the item that go with it: every one but another item's history.
+    /// The edges pointing at the item that go with it: every one but another item's history
+    /// and the transition feed's entries, which are immutable (ledger #4116).
     fn inbound_filter(subject: &str, predicate: &str, also: &str) -> String {
         format!(
-            "FILTER({predicate} NOT IN (<{}>, <{}>{also}) && \
+            "FILTER({predicate} NOT IN (<{}>, <{}>, <{}>, <{}>{also}) && \
              ({predicate} != <{}> || NOT EXISTS {{ {subject} <{}> <{}> }}))",
             v::EDIT_TARGET,
             v::EVIDENCE,
+            v::TRANSITION_ITEM,
+            v::TRANSITION_EVENT,
             v::CAUSED_BY,
             v::ext::TYPE,
             v::STATUS_EVENT_CLASS
@@ -3327,10 +3330,12 @@ impl Selector {
             }
             Selector::Whole { item } => format!(
                 "?s ?p ?o . FILTER(?s = {item} || (?o = {item} && ?p NOT IN (<{target}>, \
-                 <{evidence}>) && (?p != <{caused_by}> || NOT EXISTS {{ ?s <{type_}> <{status_event}> }})) || EXISTS {{ {dependent} }})",
+                 <{evidence}>, <{transition_item}>, <{transition_event}>) && (?p != <{caused_by}> || NOT EXISTS {{ ?s <{type_}> <{status_event}> }})) || EXISTS {{ {dependent} }})",
                 dependent = Self::dependent_pattern("?s", item),
                 target = v::EDIT_TARGET,
                 evidence = v::EVIDENCE,
+                transition_item = v::TRANSITION_ITEM,
+                transition_event = v::TRANSITION_EVENT,
                 caused_by = v::CAUSED_BY,
                 type_ = v::ext::TYPE,
                 status_event = v::STATUS_EVENT_CLASS,
@@ -6478,9 +6483,13 @@ fn claim_update(
             now,
         )?);
     }
-    if records_a_claim {
-        let event = event_iri(item, "claim", now)?;
-        let mut triples = event_triples(&event, v::CLAIM_EVENT_CLASS, item, who, now);
+    let claim_event = if records_a_claim {
+        Some(event_iri(item, "claim", now)?)
+    } else {
+        None
+    };
+    if let Some(event) = &claim_event {
+        let mut triples = event_triples(event, v::CLAIM_EVENT_CLASS, item, who, now);
         triples.push_str(&format!(
             "\n<{event}> <{}> {} ; <{}> <{}> .",
             v::CLAIMED_BY,
@@ -6514,7 +6523,6 @@ fn claim_update(
             client.in_graph(&triples),
             client.in_graph(&format!("{} {open}\n{unclaimed}", live(item)))
         ));
-        ops.push(revise(client, item, &event));
     }
     ops.push(format!(
         "DELETE {{ {} }}\nINSERT {{ {} }}\nWHERE {{ {} }}",
@@ -6526,6 +6534,12 @@ fn claim_update(
             v::ITEM_CLASS,
         )),
     ));
+    // The claim's revision and its transition entry go after the item takes the claim, so
+    // the entry carries the epoch the claim was given (ledger #4116); a takeover's release,
+    // above, carries the epoch it released.
+    if let Some(event) = &claim_event {
+        ops.push(revise(client, item, event));
+    }
     Ok(batch(&ops))
 }
 

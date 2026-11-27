@@ -117,6 +117,12 @@ term! {
     TRANSITION_EVENT => "transitionEvent";
     /// `ledger:transitionItem` — the item an entry's transition happened to; not `ledger:onItem`, as an entry is not one of the item's records.
     TRANSITION_ITEM => "transitionItem";
+    /// `ledger:transitionEpoch` — on an entry, the item's claim epoch when the transition was written.
+    TRANSITION_EPOCH => "transitionEpoch";
+    /// `ledger:transitionPrincipal` — on an entry, the principal the door minted for the write.
+    TRANSITION_PRINCIPAL => "transitionPrincipal";
+    /// `ledger:transitionFeedEpoch` — on the feed, its incarnation, minted with its first entry.
+    TRANSITION_FEED_EPOCH => "transitionFeedEpoch";
     /// `ledger:closedAt`
     CLOSED_AT => "closedAt";
     /// `ledger:closedAtSource`
