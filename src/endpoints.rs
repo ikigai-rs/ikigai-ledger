@@ -5337,10 +5337,12 @@ impl CloseEndpoint {
         // is made again from a fresh read.
         let mut records = Vec::new();
         let mut attempt = 0;
-        // The item's claim queue, which the close removes (ledger #4455).
-        let places = wait::place_iris(client, &item.iri).await?;
         let closed_here = loop {
             attempt += 1;
+            // The item's claim queue, which the close removes (ledger #4455), read afresh on
+            // every attempt. A join may still add a place before this update lands: the
+            // stragglers are swept once the item is closed, below.
+            let places = wait::place_iris(client, &item.iri).await?;
             let mut events = counts::StatusEvents::read(client, &item.iri).await?;
             let event_iri = events.mint(now)?;
             let fence = format!("{} {}", fence_clause(&item.iri, epoch), events.unchanged());
@@ -5456,6 +5458,12 @@ impl CloseEndpoint {
                 return Err(fence_refusal_now(client, &item, epoch).await);
             }
         }
+        // ★ AND NO PLACE OUTLIVES THE CLOSE (the hub re-review of PR 157). The item stays open
+        // until the close's update lands, so a join that read it open could add a place after
+        // the places were read above. Once the close stands, nothing more can join (a join's
+        // insert requires the item open in its own update), so one more read finds every
+        // straggler, and one update takes them, under the condition that the item is closed.
+        wait::sweep_closed(client, &item.iri).await?;
         // Even when another close got there first: a write from the latest snapshot is never
         // wrong, and it repairs a mirror an interrupted writer left behind.
         let unreached = across::sync(inv, client, &item.iri, None, true, now).await?;

@@ -833,6 +833,42 @@ fn closing_an_item_takes_its_offer_and_its_waiters_with_it() {
     assert!(swept.contains("nothing was written"), "{swept}");
 }
 
+/// ★ A join racing a close leaves no place on the closed item (the hub re-review of PR 157:
+/// a join that lands after the close read its places, and before the close's update, was
+/// left in the queue of a closed item, 30 times of 30). Each round starts a held item with one
+/// waiter, then a join and a close at once.
+#[test]
+fn a_join_racing_a_close_leaves_no_place_on_the_closed_item() {
+    for round in 0..24 {
+        let l = Ledger::new();
+        l.at(0);
+        l.claim(&worker(A), "lane-a").unwrap();
+        l.join(&worker(C), "lane-c", &[]).unwrap();
+        l.at(10);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let (l, barrier) = (&l, &barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                // Refused or answered: either way no place may outlive the close.
+                let _ = l.join(&worker(B), "lane-b", &[]);
+            });
+            scope.spawn(move || {
+                barrier.wait();
+                l.sink(&dispatcher(), "close", &[("item", "1")]);
+            });
+        });
+        for local in ["waitsOn", "waiter", "waitExpires", "offeredTo"] {
+            assert_eq!(
+                l.count(local),
+                0,
+                "round {round}: {local} left on a closed item"
+            );
+        }
+        assert!(l.waiters().is_empty(), "round {round}: {:?}", l.waiters());
+    }
+}
+
 #[test]
 fn deleting_an_item_takes_its_queue_with_it() {
     let l = held_by_a_with_b_and_c_waiting();

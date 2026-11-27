@@ -343,8 +343,9 @@ pub(crate) fn override_record(
 ///
 /// `places` are the item's places, live or lapsed, as [`place_iris`] read them, listed in a
 /// `VALUES` block: ⚠ an unlisted `?place <p> ?o` pattern would make the store's scoped door
-/// copy every quad of `p` in the graph (ledger #2922). A join cannot add one after the read and
-/// before the close: it needs the item open.
+/// copy every quad of `p` in the graph (ledger #2922). ⚠ A join CAN add a place after that read
+/// and before the close's update lands, since the item is open until then: the close calls
+/// [`sweep_closed`] once its update has landed, to take any such straggler.
 pub(crate) fn close_ops(
     client: &StoreClient<'_, '_>,
     item: &str,
@@ -386,6 +387,26 @@ pub(crate) fn close_ops(
         ));
     }
     Ok(ops)
+}
+
+/// After a close has landed: the offer and every place still on `item`, read again and taken
+/// in one update, which holds only while the item is closed. A join that lands after the close
+/// is refused by its own open check, so no place can be added after this read.
+pub(crate) async fn sweep_closed(client: &StoreClient<'_, '_>, item: &str) -> Result<()> {
+    let places = place_iris(client, item).await?;
+    let offered = client
+        .ask(&format!(
+            "ASK {{ {} }}",
+            client.in_graph(&format!("<{item}> <{}> ?to", v::OFFERED_TO))
+        ))
+        .await?;
+    if places.is_empty() && !offered {
+        return Ok(());
+    }
+    let closed = format!("<{item}> <{}> <{}> .", v::STATUS, v::CLOSED);
+    client
+        .update(&batch(&close_ops(client, item, &places, &closed)?))
+        .await
 }
 
 /// Every place on `item`, live or lapsed, by IRI.
