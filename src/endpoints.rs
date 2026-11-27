@@ -17,6 +17,8 @@
 //! urn:iki:ledger:{ledger}:purge          Delete              destroy, leaving a tombstone
 //! urn:iki:ledger:{ledger}:next           Source              the ready set, ranked
 //! urn:iki:ledger:{ledger}:doctor         Source              what is wrong; no repair
+//! urn:iki:ledger:{ledger}:wait:item:{id} Source Sink Delete  the claim queue / join / leave
+//! urn:iki:ledger:{ledger}:offers         Sink                pass on ended offers
 //! urn:iki:ledger:ledgers                 Source              which ledgers exist
 //! urn:iki:ledger:policy:{name}           Source              what a policy weighs
 //! urn:iki:ledger:lifecycle:{name}        Source Exists       the legal states, in order
@@ -409,6 +411,7 @@ mod note;
 mod replay;
 mod session;
 mod transition;
+mod wait;
 
 /// The name [`space`] claims: `urn:iki:space:ledger`.
 pub const SPACE_ID: &str = "urn:iki:space:ledger";
@@ -675,6 +678,10 @@ pub fn space_with(config: SpaceConfig) -> EndpointSpace {
             LedgerGrammar::action("sessions"),
             session::SessionSetEndpoint,
         )
+        // ⚠ Ahead of `item:{id}` too: unbound, `urn:iki:ledger:wait:item:5` would be read as item
+        // 5 of a ledger called `wait`, which is why `wait` is reserved.
+        .bind(LedgerGrammar::with_id("wait:item"), wait::WaitEndpoint)
+        .bind(LedgerGrammar::action("offers"), wait::OffersEndpoint)
         .bind(
             LedgerGrammar::with_id("item"),
             ItemEndpoint {
@@ -3257,9 +3264,11 @@ impl Selector {
     /// removing only a new dependent's inbound edge would strand the rest of its quads.
     fn dependent_pattern(subject: &str, item: &str) -> String {
         format!(
-            "{{ {{ {subject} <{}> {item} }} UNION {{ {subject} <{}> {item} }} }}",
+            "{{ {{ {subject} <{}> {item} }} UNION {{ {subject} <{}> {item} }} UNION \
+             {{ {subject} <{}> {item} }} }}",
             v::ON_ITEM,
-            v::SESSION_ITEM
+            v::SESSION_ITEM,
+            v::WAITS_ON
         )
     }
 
@@ -3367,7 +3376,12 @@ impl Selector {
                         Self::inbound_filter(
                             "?s1",
                             "?p1",
-                            &format!(", <{}>, <{}>", v::ON_ITEM, v::SESSION_ITEM),
+                            &format!(
+                                ", <{}>, <{}>, <{}>",
+                                v::ON_ITEM,
+                                v::SESSION_ITEM,
+                                v::WAITS_ON
+                            ),
                         )
                     ),
                 ];
@@ -5351,6 +5365,10 @@ impl CloseEndpoint {
         let mut attempt = 0;
         let closed_here = loop {
             attempt += 1;
+            // The item's claim queue, which the close removes (ledger #4455), read afresh on
+            // every attempt. A join may still add a place before this update lands: the
+            // stragglers are swept once the item is closed, below.
+            let places = wait::place_iris(client, &item.iri).await?;
             let mut events = counts::StatusEvents::read(client, &item.iri).await?;
             let event_iri = events.mint(now)?;
             let fence = format!("{} {}", fence_clause(&item.iri, epoch), events.unchanged());
@@ -5434,6 +5452,8 @@ impl CloseEndpoint {
                 retract_when(client, &item.iri, v::AWAITING, &fence),
                 replace_one_when(client, &item.iri, v::AWAITING_AT, &datetime(now), &fence),
             ];
+            // And its claim queue: closed work is waited for by nobody (ledger #4455).
+            ops.extend(wait::close_ops(client, &item.iri, &places, &fence)?);
             // The claim last, its holder after every other field: see the fence above.
             ops.extend(
                 CLAIM_FIELDS
@@ -5464,6 +5484,12 @@ impl CloseEndpoint {
                 return Err(fence_refusal_now(client, &item, epoch).await);
             }
         }
+        // ★ AND NO PLACE OUTLIVES THE CLOSE (the hub re-review of PR 157). The item stays open
+        // until the close's update lands, so a join that read it open could add a place after
+        // the places were read above. Once the close stands, nothing more can join (a join's
+        // insert requires the item open in its own update), so one more read finds every
+        // straggler, and one update takes them, under the condition that the item is closed.
+        wait::sweep_closed(client, &item.iri).await?;
         // Even when another close got there first: a write from the latest snapshot is never
         // wrong, and it repairs a mirror an interrupted writer left behind.
         let unreached = across::sync(inv, client, &item.iri, None, true, now).await?;
@@ -6763,22 +6789,69 @@ impl Endpoint for ClaimEndpoint {
                         _ => Guard::FreeOrMine(&holder),
                     }
                 };
+                // ★ The claim queue (ledger #4455): a free item may stand offered to a waiter.
+                // This claim settles an offer that ended first (the next waiter's claim is what
+                // passes it on), and is refused while one stands to another waiter. The cheap
+                // half; the update's own clause below is what holds against a racer.
+                //
+                // ★ The dispatcher's override (the design note: it may "claim for a lane
+                // outright, as it can already release anyone's claim"): a claim under `close:` or
+                // `write:` on the ledger passes the offer clause, voids the standing offer
+                // (the epoch moves past `offerAfterEpoch`) and is recorded on its claim event as
+                // `ledger:overrodeOffer`.
+                let overrides = is_dispatcher(inv, client.ledger());
+                let mut overridden: Option<String> = None;
+                if !takeover && !renew && item.claimed_by.is_none() {
+                    let mut queue = wait::read(&client, &item, now).await?;
+                    if queue.unsettled(&item) {
+                        wait::settle(&client, &item, now).await?;
+                        queue = wait::read(&client, &item, now).await?;
+                    }
+                    if let Some(offer) = queue.offered_to_another(&item, now, &holder, caller) {
+                        if !overrides {
+                            return Err(wait::offered_refusal(&item, client.ledger(), &offer));
+                        }
+                        overridden = Some(offer.place.iri.clone());
+                    }
+                }
                 let previous = item.claimed_by.clone();
-                client
-                    .update(&claim_update(
-                        &client,
-                        &item.iri,
-                        guard,
-                        &fence_clause(&item.iri, epoch),
-                        &holder,
-                        caller_term.as_deref(),
-                        purpose,
-                        kind,
-                        lease.as_ref(),
-                        &Attribution::committer(inv)?,
-                        now,
-                    )?)
-                    .await?;
+                let guarded = if overrides {
+                    fence_clause(&item.iri, epoch)
+                } else {
+                    format!(
+                        "{}\n{}",
+                        fence_clause(&item.iri, epoch),
+                        wait::claim_clause(&item.iri, &holder, caller_term.as_deref(), now)
+                    )
+                };
+                let mut ops = vec![claim_update(
+                    &client,
+                    &item.iri,
+                    guard,
+                    &guarded,
+                    &holder,
+                    caller_term.as_deref(),
+                    purpose,
+                    kind,
+                    lease.as_ref(),
+                    &Attribution::committer(inv)?,
+                    now,
+                )?];
+                // The override is recorded while the offer it passed is still there to name.
+                if let Some(place) = &overridden {
+                    ops.push(wait::override_record(
+                        &client, &item.iri, place, &holder, now,
+                    )?);
+                }
+                // The offer is spent and the claimant's own place goes, in the same update.
+                ops.extend(wait::after_claim_ops(
+                    &client,
+                    &item.iri,
+                    &holder,
+                    caller_term.as_deref(),
+                    now,
+                ));
+                client.update(&batch(&ops)).await?;
                 let after = model::load_item(&client, &item.iri)
                     .await?
                     .ok_or_else(|| Error::NotFound(format!("no ledger item at `{}`", item.iri)))?;
@@ -6806,6 +6879,14 @@ impl Endpoint for ClaimEndpoint {
                 if let Some(epoch) = epoch {
                     if !takeover && after.claim_epoch != Some(epoch) {
                         return Err(fence_refusal(&after, epoch));
+                    }
+                }
+                if after.claimed_by.is_none() && !renew && !takeover && !overrides {
+                    // The update's offer clause refused it: a release offered the item to a
+                    // waiter between the read and the write.
+                    let queue = wait::read(&client, &after, now).await?;
+                    if let Some(offer) = queue.offered_to_another(&after, now, &holder, caller) {
+                        return Err(wait::offered_refusal(&after, client.ledger(), &offer));
                     }
                 }
                 if after.claimed_by.as_deref() != Some(holder.as_str()) {
@@ -6981,6 +7062,8 @@ impl ClaimEndpoint {
                         ));
                     }
                 }
+                // The queue as it stands, for the offer this release makes (ledger #4455).
+                let queue = wait::read(client, &item, now).await?;
                 // The release event first, under the same guard, while the claim is there to
                 // read (ledger #2819).
                 let event = event_iri(&item.iri, "release", now)?;
@@ -6996,6 +7079,10 @@ impl ClaimEndpoint {
                             now,
                         ),
                         release_update(client, &item.iri, &guard, now),
+                        // ★ The offer, in the release's own update (ledger #4455): when a live
+                        // waiter exists, the head is offered the item it just freed. An empty
+                        // queue matches nothing, and the item is free exactly as before.
+                        batch(&wait::settle_ops(client, &item.iri, now, &queue)),
                     ]))
                     .await?;
                 // A fenced release that found its claim gone wrote no event: the claim changed
@@ -8209,12 +8296,21 @@ impl Endpoint for NextEndpoint {
             ..Filter::default()
         };
         let limit = parse_limit(inv, 3)?;
+        let waiter = inv
+            .optional_str("waiter")?
+            .map(str::trim)
+            .filter(|w| !w.is_empty());
         // ★ Slim records unless the face shows every excluded item whole (ledger #3257).
         let mut set = if want == JSON {
             select::ready_full_at(&client, &filter, now).await?
         } else {
             select::ready_at(&client, &filter, now).await?
         };
+        // ★ An item offered to a waiter (ledger #4455) is left out for everyone else, and
+        // ranked as usual for that waiter: `waiter=` names it, with this capability's principal.
+        let offers = wait::standing_offers(&client, now).await?;
+        let offer_ends =
+            wait::exclude_offered(&mut set, &offers, waiter, inv.capability.principal());
         // ★ After the ready set, like `labels=`: blocked, the cycle check and leverage have been
         // computed over the whole ledger, so these only choose which items are being asked about.
         // Before the horizons below, because an item this leaves out cannot change this answer.
@@ -8227,13 +8323,15 @@ impl Endpoint for NextEndpoint {
         // ★ A lease running out changes this answer with nothing written — an exclusion's
         // `claimed` becomes `lease-expired` — so the answer holds only until the earliest
         // running lease ends, whatever the policy says. Same trap as leverage's age points.
-        let valid_until = match (
+        let valid_until = [
             select::valid_until(&set, policy.as_ref(), now),
             select::next_lease_expiry(&set, now),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+            // An offer ending changes this answer with nothing written, too.
+            offer_ends,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let mut selection = select::rank(client.ledger(), set, policy.as_ref(), now, limit);
         if want != JSON {
             select::complete(&client, &mut selection).await?;
@@ -8361,6 +8459,19 @@ impl Endpoint for NextEndpoint {
                     )
                     .class(v::ext::XSD_STRING)
                     .one_of(self.lifecycles.state_names())
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("waiter")
+                    .summary(
+                        "The holder label asking, as it waits in claim queues \
+                         (`urn:iki:ledger:{ledger}:wait:item:{id}`). An item released and \
+                         offered to a waiter is left out for everyone else with why \
+                         `offered`, the waiter and when the offer ends; the waiter it is \
+                         offered to (this label, and this capability's principal) sees it \
+                         ranked as usual.",
+                    )
+                    .class(v::ext::XSD_STRING)
                     .optional(),
             )
             .input(

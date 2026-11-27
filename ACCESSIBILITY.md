@@ -105,6 +105,17 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   recorded 1 lapse(s)` and the same sentence per lapse, indented, ending `; labeled needs-person`
   when the ledger's route added a label; a sweep that wrote nothing says so and why. An item's
   history names a lapse in words: `lapse worker-1 at epoch 1, whose lease ran out at …`.
+- **The claim queue** (`src/endpoints/wait.rs`, ledger #4455): `wait:item:{id}` answers a first
+  line with the item and a count (`acme#1: 2 waiting; offered to lane-b (as …) until …`), or
+  `acme#1: nobody is waiting`, then one numbered line per waiter (`  1. lane-b, asked …, place
+  until …, offered`), where `offered` is said in a word and not marked by a sign. A join answers
+  `acme#1 waited for by lane-b: place 1 of 2, until …; held by lane-a`, or `…; offered to lane-b
+  until …: claim it now` when the offer is the joiner's; a join that claims answers as a claim
+  does. A leave answers `acme#1 no longer waited for by lane-b`, or `lane-b is not waiting for
+  acme#1, so there was no place to leave`. The sweep, `offers`, answers `acme: removed 2 lapsed
+  place(s); settled the offer on 1 item(s)` and one sentence per item (`  acme#1 offered to
+  lane-c until …`, `  acme#1 no longer offered: nobody is waiting`), or says nothing was written
+  and why. `next` names an offered item's exclusion `offered to lane-b until …`.
 - **Replay receipt sweep** (`src/endpoints/replay.rs`): `sweep-replays` names the ledger
   and says the sweep completed without claiming how many receipts were removed. A missing
   graph grant names the exact grant to add and says no receipts were removed.
@@ -132,6 +143,18 @@ that people read in a terminal, and it also answers JSON (`as=application/json`)
   epoch 2, not epoch 1: a write fenced with `epoch=` lands only while that claim is current, so
   nothing was written ``), or that nobody holds it (`#1 is not claimed (its last claim was epoch
   2), so epoch 1 is not current and nothing was written`).
+  A claim while an item is offered to a waiter is a `Conflict` sentence naming the waiter, when
+  the offer ends, why, and what to do (`` acme#1 is offered to lane-b until …: it was released
+  while waiters were queued, and the first in the queue may claim it until then. Join the queue
+  (`sink urn:iki:ledger:acme:wait:item:1 content=<holder>`) to be offered it in turn ``). When an
+  offer has ended unclaimed, the sentence names the waiter it passes to and that offer's end,
+  the same waiter and end `next` gives as its `offered to … until …` reason. A join
+  refuses a closed item (`… closed work is held by nobody, so nobody waits for it`) and an item
+  the joiner holds (`acme#1 is already held by lane-a: a waiter waits for a claim it does not
+  hold. Renew the claim (…) instead`); a leave by another principal is `Denied` in one sentence
+  naming the waiter, its principal, the caller's, and the override grants; `ttl` and `poll`
+  refusals name the argument and say what is accepted (`` `2h` is longer than an hour, the
+  longest this takes … ``).
 - **The epoch check** (`source urn:iki:ledger:claim item=… epoch=…`): one sentence giving the
   state in a word, `current`, `superseded` or `not current`, and who holds the item
   (`#1 epoch 1 is superseded: held by worker-2 at epoch 2`). A claimed item's detail has an
@@ -237,6 +260,8 @@ accessibility run is promoted to Pass.
 | 2026-11-16 | `omit=` and `comments=` on `items` and `next` (ledger #3781) shape the JSON face only; every JSON item gains the `omitted` field. No plain face changed: `tests/faces.rs` passes with only `omitted` added to its JSON literals. New refusals, one sentence each, name the argument and say in words what it accepts (`omit` names body, comments, attribution; `comments` names all, last, none), that `omit=comments` and `comments=last` contradict, or that a shape applies to the JSON face only and nothing was read. `tests/listing_shape.rs` checks them. No browser, automated accessibility checker or assistive technology was used. |
 | 2026-11-17 | Text search over bodies and comments (ledger #3803): `match=`, `search=`, `search_mode=` and `whole_word=` on `items`, `count` and `next`. The plain `items` face gains, only under a search of bodies or comments, a line per matching field that names the item and says in words where it matched (`#1 matched in the body:`, `#2 matched in a comment:`), so the line is not tied to its item by indentation alone; the excerpt folds every run of whitespace, newlines included, to one space, so a comment's words cannot make a line of their own. No existing plain face changed: `tests/faces.rs` passes unchanged, and `tests/text_search.rs` pins the new lines and that a read naming none of the new inputs is byte-identical on every face. New refusals, one sentence each, name the argument and what it accepts (`match` names title, body, comments; `search_mode` names all, any; `whole_word` says `true` or `false`). No browser, automated accessibility checker or assistive technology was used. |
 | 2026-11-24 | Commit order (ledger #4199): an item's comments in its detail and its history are listed in the order the store committed them, by `ledger:itemRevision`, not by their stamps. No plain face gains or loses text: the lines are the same and only their order can differ, on an item written from hosts whose clocks disagree; a comment's stamp still shows the time its host's clock gave. The JSON face says `"order": "approximate"` on a record written before revisions. `tests/faces.rs` passes unchanged; `tests/skew_research.rs` pins the order. No browser, automated accessibility checker or assistive technology was used. |
+| 2026-11-26 | The fair claim queue (ledger #4455) adds the `wait:item:{id}` face, a join's and a leave's answers, the `offers` sweep's answer, the `next` reason `offered to … until …`, and refusals, each one sentence that names the item, the waiter (and its principal), when the offer or the place ends, and what to do. Whether a waiter is offered is said in a word. No existing plain face changed: `tests/faces.rs` passes unchanged; `tests/claim_queue.rs` pins the new sentences. No browser, automated accessibility checker or assistive technology was used. |
+| 2026-11-26 | The fair claim queue's rework (hub review of PR 157): no new sentence shape. The offer refusal and `next`'s `offered to … until …` now name the same waiter and end for an offer that ended (the one it passed to); an offer to a lapsed place is no longer named at all. A dispatcher's claim that passes an offer answers as any claim does. `tests/claim_queue.rs` pins both sentences against each other; `tests/faces.rs` passes unchanged. No browser, automated accessibility checker or assistive technology was used. |
 | 2026-10-31 | First version. |
 | 2026-11-01 | `close closed-at=` (ledger #2819) adds refusals; each names the argument, the reason and the remedy in words. No plain face changed: `tests/faces.rs` passes unchanged. |
 | 2026-11-01 | Aliases (ledger #2828) add write answers (`scheme gh owned by …`, `gh:acme/web#12 names acme#12 …`, `… no longer names …`) and refusals, each naming in words the alias, the scheme, its owner or the item that already holds it, and the grant that would do. An alias value appears percent-encoded in an IRI (`acme%2Fweb%2312`), which may be cumbersome when read aloud; the decoded value is what every answer shows. No existing plain face changed: `tests/faces.rs` passes unchanged. |

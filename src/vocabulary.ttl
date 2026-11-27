@@ -44,7 +44,7 @@
 
 <https://ikigai-rs.dev/ns/ledger> a owl:Ontology ;
     rdfs:label "ikigai-ledger" ;
-    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841); ledger:evidence: what closed an item, on that close's StatusEvent, beside its ledger:closedReason, which therefore drops its rdfs:domain (ledger #2842); ledger:eventKey: an imported event's id at its source, on claim, release, edit and status events an import principal records with claimed dates, which change nothing on the item (ledger #2843); ledger:movesTo: the moves a lifecycle allows from each state, which the state Sink enforces when any are declared (ledger #2863); ledger:lifecycleVersion: the version of the lifecycle a state event was checked against, read from the document (ledger #2864); ledger:claimedModified: the dcterms:modified an import principal last claimed, which the claim holds while dcterms:modified equals (ledger #2932). And 0.20.0 adds ledger:claimEpoch: a claim's fencing epoch, raised by every grant and takeover and never lowered, which a holder's write may name to be refused once its claim is no longer current (ledger #3205). And 0.22.0 adds ledger:SessionSummary, ledger:SessionSummaryShape and the summary's properties (ledger:sessionId, ledger:sessionItem, ledger:handBackEvent, ledger:machineName, ledger:harness, ledger:model, ledger:exitStatus, ledger:wallClockMs, ledger:turns, ledger:toolCalls, ledger:inputTokens, ledger:cachedInputTokens, ledger:cacheCreationTokens, ledger:outputTokens): the raw, content-free facts of an agent run, recorded on its hand-back (ledger #3022). And ledger:sessionItemNumber: a summary's item number, written by the ledger, since summaries live in a graph of their own that holds no item (ledger #3661). And 0.23.0 adds ledger:LapseEvent, ledger:lapsedAt and ledger:lapsedEpoch: a lease that ran out on an item still in progress, recorded once in its history (ledger #3709); and ledger:DispatchNote, ledger:noteTo, ledger:noteHolder, ledger:noteEpoch, ledger:noteGrant and ledger:acks: a note from the dispatcher to a claim's holder at its epoch, and the holder's acknowledgment (ledger #3718)." ;
+    rdfs:comment "The work ledger's terms: items, comments, labels, links, claims, and the events that say who claimed, released, handed back and edited each item. 0.15.0 adds ledger:ClaimEvent, ledger:ReleaseEvent, ledger:EditEvent, ledger:takeoverFrom, ledger:releaseReason, ledger:handedBackBy and ledger:editKind, drops rdfs:domain from ledger:claimedBy, ledger:claimedAt, ledger:claimKind and ledger:claimPrincipal (an event carries them too), and lets ledger:closedAtSource say import (ledger #2819). It also adds ledger:AliasScheme, ledger:Alias, ledger:schemeName, ledger:schemeOwner, ledger:aliasScheme, ledger:aliasValue and ledger:aliasOf: an item resolvable by an external id, in a scheme one principal owns (ledger #2828). And 0.17.0 adds ledger:Link, ledger:Mirror, ledger:linkType, ledger:linkTarget, ledger:mirrorOf, ledger:subjectOpen, ledger:linkPresent and ledger:mirrorVersion: typed links across ledgers (ledger #2829). And 0.18.0 adds ledger:stateFrom, ledger:stateTo, ledger:editLabel, ledger:editTarget, ledger:editLinkType and ledger:editField: an edit event names what it changed (ledger #2841); ledger:evidence: what closed an item, on that close's StatusEvent, beside its ledger:closedReason, which therefore drops its rdfs:domain (ledger #2842); ledger:eventKey: an imported event's id at its source, on claim, release, edit and status events an import principal records with claimed dates, which change nothing on the item (ledger #2843); ledger:movesTo: the moves a lifecycle allows from each state, which the state Sink enforces when any are declared (ledger #2863); ledger:lifecycleVersion: the version of the lifecycle a state event was checked against, read from the document (ledger #2864); ledger:claimedModified: the dcterms:modified an import principal last claimed, which the claim holds while dcterms:modified equals (ledger #2932). And 0.20.0 adds ledger:claimEpoch: a claim's fencing epoch, raised by every grant and takeover and never lowered, which a holder's write may name to be refused once its claim is no longer current (ledger #3205). And 0.22.0 adds ledger:SessionSummary, ledger:SessionSummaryShape and the summary's properties (ledger:sessionId, ledger:sessionItem, ledger:handBackEvent, ledger:machineName, ledger:harness, ledger:model, ledger:exitStatus, ledger:wallClockMs, ledger:turns, ledger:toolCalls, ledger:inputTokens, ledger:cachedInputTokens, ledger:cacheCreationTokens, ledger:outputTokens): the raw, content-free facts of an agent run, recorded on its hand-back (ledger #3022). And ledger:sessionItemNumber: a summary's item number, written by the ledger, since summaries live in a graph of their own that holds no item (ledger #3661). And 0.23.0 adds ledger:LapseEvent, ledger:lapsedAt and ledger:lapsedEpoch: a lease that ran out on an item still in progress, recorded once in its history (ledger #3709); and ledger:DispatchNote, ledger:noteTo, ledger:noteHolder, ledger:noteEpoch, ledger:noteGrant and ledger:acks: a note from the dispatcher to a claim's holder at its epoch, and the holder's acknowledgment (ledger #3718). And 0.26.4 adds ledger:WaitPlace, ledger:waitsOn, ledger:waiter, ledger:waiterPrincipal, ledger:askedAt, ledger:waitSeq, ledger:waitExpires, ledger:waitPoll, ledger:offeredTo, ledger:offerExpires and ledger:offerAfterEpoch: a fair claim queue, whose head is offered a released item, and ledger:overrodeOffer: the place whose offer a dispatcher's claim passed (ledger #4455)." ;
     owl:versionInfo "0.26.4" .
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -588,6 +588,79 @@ ledger:claimEpoch a rdf:Property ;
     rdfs:range xsd:integer ;
     rdfs:label "claimEpoch" ;
     rdfs:comment "The fencing epoch of the item's latest claim: every grant of a claim and every takeover sets it to one more than it was (from 1), and a renewal by the same holder keeps it. ★ It is never lowered and never retracted, not by a release and not by a close, so a later claim always has a higher epoch than any earlier one. While the item is claimed it is the current claim's epoch; a holder's comment, hand-back, close, renewal or release that names `epoch=` is refused (Conflict) and writes nothing unless it is this value and the item is claimed. Absent on an item never claimed since 0.20.0." .
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The claim queue (ledger #4455; the design is docs/design/fair-claim-queue.md)
+# ═══════════════════════════════════════════════════════════════════════════
+
+ledger:WaitPlace a rdfs:Class ;
+    rdfs:label "wait place" ;
+    rdfs:comment "One waiter's place in an item's claim queue, at urn:iki:ledger:{ledger}:wait:item:{id}: who waits (ledger:waiter, and ledger:waiterPrincipal when its capability carried one), when it asked (ledger:askedAt), its order (ledger:waitSeq) and when it lapses unless renewed (ledger:waitExpires). Skolemized as {item}:wait:{seq}. A place grants no authority: it only decides who is OFFERED the item when its claim is released. A place whose ledger:waitExpires has passed is skipped by every read and guard, and deleted by the offers sweep." .
+
+ledger:waitsOn a rdf:Property ;
+    rdfs:domain ledger:WaitPlace ;
+    rdfs:range ledger:Item ;
+    rdfs:label "waits on" ;
+    rdfs:comment "The item a place in a claim queue waits on. A place goes with its item when the item is deleted or purged." .
+
+ledger:waiter a rdf:Property ;
+    rdfs:domain ledger:WaitPlace ;
+    rdfs:range xsd:string ;
+    rdfs:label "waiter" ;
+    rdfs:comment "The holder label the waiter will claim the item under, as a claim's ledger:claimedBy." .
+
+ledger:waiterPrincipal a rdf:Property ;
+    rdfs:domain ledger:WaitPlace ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "waiter principal" ;
+    rdfs:comment "The principal the waiter joined as, from the capability its host minted, never an argument. As for a claim, the same waiter means the same label AND the same principal." .
+
+ledger:askedAt a rdf:Property ;
+    rdfs:domain ledger:WaitPlace ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "asked at" ;
+    rdfs:comment "When the waiter took its place, from the kernel clock. A renewal keeps it." .
+
+ledger:waitSeq a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "wait sequence" ;
+    rdfs:comment "On a ledger:WaitPlace, its order in the item's queue: first asked, first offered. On the item, the last sequence it issued. It counts up from 1 per item and never goes down, like ledger:claimEpoch, so two waiters that ask in the same millisecond still have an order." .
+
+ledger:waitExpires a rdf:Property ;
+    rdfs:domain ledger:WaitPlace ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "wait expires" ;
+    rdfs:comment "When the place lapses unless the waiter renews it (by joining again). Unlike a lease, a lapsed place takes nothing from anyone: it is skipped at once." .
+
+ledger:waitPoll a rdf:Property ;
+    rdfs:domain ledger:WaitPlace ;
+    rdfs:range xsd:dayTimeDuration ;
+    rdfs:label "wait poll" ;
+    rdfs:comment "How often the waiter said it looks (`poll=`). An offer to it lasts this plus 30 seconds, at least 60 seconds and at most 5 minutes, so a waiter that only polls still sees its offer in time. PT0S for a waiter that gave none, whose offer lasts 60 seconds." .
+
+ledger:offeredTo a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range ledger:WaitPlace ;
+    rdfs:label "offered to" ;
+    rdfs:comment "The place a free item is offered to: written by the release that freed it, in the same update, when a live waiter exists. While the offer stands (ledger:offerExpires not passed, ledger:offerAfterEpoch still the item's ledger:claimEpoch, the item unclaimed), a claim by anyone but that waiter is refused (Conflict), and `next` leaves the item out for everyone else with why \"offered\". An offer that ends unclaimed passes to the next waiter, and its waiter leaves the queue." .
+
+ledger:offerExpires a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "offer expires" ;
+    rdfs:comment "When the standing offer ends: the release's time plus the waiter's poll and a margin (see ledger:waitPoll)." .
+
+ledger:offerAfterEpoch a rdf:Property ;
+    rdfs:domain ledger:Item ;
+    rdfs:range xsd:integer ;
+    rdfs:label "offer after epoch" ;
+    rdfs:comment "The ledger:claimEpoch whose release made the offer (0 for an item never claimed). An offer is void once the item's epoch has moved past it: any other grant that happened first voids it, so it can never be used to take a later epoch." .
+
+ledger:overrodeOffer a rdf:Property ;
+    rdfs:domain ledger:ClaimEvent ;
+    rdfs:range ledger:WaitPlace ;
+    rdfs:label "overrode offer" ;
+    rdfs:comment "On a claim event: the place whose standing offer the claim passed. Only a dispatcher's claim (under close: or write: on the ledger) passes an offer to another waiter; it voids the offer, since the claim moves the epoch past ledger:offerAfterEpoch, and says so here." .
 
 ledger:awaiting a rdf:Property ;
     rdfs:domain ledger:Item ;

@@ -313,6 +313,20 @@ fn script() -> Vec<Step> {
             at("claim"),
             &[("item", "#1"), ("content", "session-a"), ("lease", "30m")],
         ),
+        // The claim queue (ledger #4455): a place behind the holder, read, and left.
+        step(
+            "ledger-wait",
+            Verb::Sink,
+            at("wait:item:1"),
+            &[("content", "session-b"), ("poll", "2m")],
+        ),
+        step("ledger-wait", Verb::Source, at("wait:item:1"), &[]),
+        step(
+            "ledger-wait",
+            Verb::Delete,
+            at("wait:item:1"),
+            &[("from", "session-b")],
+        ),
         // The epoch check (ledger #3205), a read: the claim above was epoch 1.
         step(
             "ledger-claim",
@@ -407,6 +421,7 @@ fn script() -> Vec<Step> {
         step("ledger-stalled", Verb::Source, at("stalled"), &[]),
         step("ledger-lapse", Verb::Sink, at("lapse"), &[]),
         step("ledger-sweep-replays", Verb::Sink, at("sweep-replays"), &[]),
+        step("ledger-offers", Verb::Sink, at("offers"), &[]),
         // The two ledger-less resources. `ledgers` is the one that must not need a broad
         // grant either: it answers what this capability may read, from what it holds.
         step(

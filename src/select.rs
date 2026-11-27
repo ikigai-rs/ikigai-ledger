@@ -88,6 +88,15 @@ pub enum Excluded {
         /// The open blockers in other ledgers, by IRI, sorted.
         elsewhere: Vec<String>,
     },
+    /// Released while waiters were queued, and offered to the first of them until `ends`
+    /// (ledger #4455): left out for everyone but that waiter, which `next waiter=` names.
+    /// Added in 0.26.4.
+    Offered {
+        /// The waiter it is offered to, as the plain faces name it.
+        waiter: String,
+        /// When the offer ends (ms since the epoch).
+        ends: u64,
+    },
 }
 
 impl Excluded {
@@ -110,6 +119,9 @@ impl Excluded {
                 sparql::iso8601(*expires)
             ),
             Excluded::AwaitingDispatcher => "handed back, awaiting the dispatcher".to_string(),
+            Excluded::Offered { waiter, ends } => {
+                format!("offered to {waiter} until {}", sparql::iso8601(*ends))
+            }
             Excluded::Deferred => "deferred".to_string(),
             Excluded::Blocked(numbers) => format!(
                 "blocked by {}",

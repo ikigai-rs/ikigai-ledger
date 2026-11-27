@@ -76,6 +76,8 @@ pub mod ext {
     pub const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
     /// `xsd:duration`
     pub const XSD_DURATION: &str = "http://www.w3.org/2001/XMLSchema#duration";
+    /// `xsd:dayTimeDuration` — a waiter's poll, which an offer's end is computed from.
+    pub const XSD_DAY_TIME_DURATION: &str = "http://www.w3.org/2001/XMLSchema#dayTimeDuration";
     /// `xsd:boolean`
     pub const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
     /// `xsd:date`
@@ -362,6 +364,30 @@ term! {
     CLAIM_PRINCIPAL => "claimPrincipal";
     /// `ledger:claimEpoch` — the fencing epoch of the item's latest claim (ledger #3205).
     CLAIM_EPOCH => "claimEpoch";
+    /// `ledger:WaitPlace` — one waiter's place in an item's claim queue (ledger #4455).
+    WAIT_PLACE_CLASS => "WaitPlace";
+    /// `ledger:waitsOn` — the item a place in a claim queue waits on.
+    WAITS_ON => "waitsOn";
+    /// `ledger:waiter` — the holder label a waiter will claim under.
+    WAITER => "waiter";
+    /// `ledger:waiterPrincipal` — the principal a waiter joined as, from its capability.
+    WAITER_PRINCIPAL => "waiterPrincipal";
+    /// `ledger:askedAt` — when a waiter took its place, from the kernel clock.
+    ASKED_AT => "askedAt";
+    /// `ledger:waitSeq` — a place's order in its item's queue; on the item, the last issued.
+    WAIT_SEQ => "waitSeq";
+    /// `ledger:waitExpires` — when a place lapses unless renewed.
+    WAIT_EXPIRES => "waitExpires";
+    /// `ledger:waitPoll` — how often a waiter said it looks, which bounds its offer.
+    WAIT_POLL => "waitPoll";
+    /// `ledger:offeredTo` — the place a released item is offered to.
+    OFFERED_TO => "offeredTo";
+    /// `ledger:offerExpires` — when the standing offer ends.
+    OFFER_EXPIRES => "offerExpires";
+    /// `ledger:offerAfterEpoch` — the claim epoch whose release made the offer.
+    OFFER_AFTER_EPOCH => "offerAfterEpoch";
+    /// `ledger:overrodeOffer` — the place whose standing offer a dispatcher's claim passed.
+    OVERRODE_OFFER => "overrodeOffer";
     /// `ledger:awaiting` — who the item waits on after a hand-back (ledger #1199).
     AWAITING => "awaiting";
     /// `ledger:awaitingAt` — when the latest hand-back decision set or cleared awaiting.
@@ -457,7 +483,7 @@ pub const PREFIXES: &str = concat!(
 
 /// This crate's own classes other than [`ITEM_CLASS`] — the bookkeeping a ledger keeps
 /// about itself. None of them is a LEVEL of item, so `append kind=` refuses them.
-pub const STRUCTURAL_CLASSES: [&str; 26] = [
+pub const STRUCTURAL_CLASSES: [&str; 27] = [
     COMMENT_CLASS,
     REPLAY_CLASS,
     DISPATCH_NOTE_CLASS,
@@ -481,6 +507,7 @@ pub const STRUCTURAL_CLASSES: [&str; 26] = [
     RELEASE_EVENT_CLASS,
     EDIT_EVENT_CLASS,
     LAPSE_EVENT_CLASS,
+    WAIT_PLACE_CLASS,
     LINK_CLASS,
     MIRROR_CLASS,
     TRANSITION_CLASS,

@@ -328,6 +328,20 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
                 .arg("content", "key:urn:test:backfill"),
         )
         .fixture(Fixture::new("ledger-sweep-replays", Verb::Sink))
+        .fixture(Fixture::new("ledger-offers", Verb::Sink))
+        // The claim queue (ledger #4455) on #6, which stays held: a join takes a place (a
+        // renewal when fired again) and a leave gives it up (nothing to do when fired again).
+        .fixture(Fixture::new("ledger-wait", Verb::Source).binding("id", "6"))
+        .fixture(
+            Fixture::new("ledger-wait", Verb::Sink)
+                .binding("id", "6")
+                .arg("content", "the conformance walk"),
+        )
+        .fixture(
+            Fixture::new("ledger-wait", Verb::Delete)
+                .binding("id", "6")
+                .arg("from", "the conformance walk"),
+        )
         // What the reads promise.
         .cacheable("ledger-items")
         .cacheable("ledger-count")
@@ -359,6 +373,18 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
             "ledger-sweep-replays",
             Check::Pipeline,
             "the receipt sweep takes no body",
+        )
+        // PIPELINE (ledger #4455): leaving a claim queue names its waiter in `from=`, as a
+        // compare-and-set release does, and carries no body for a pipe to deliver.
+        .opt_out_check(
+            "ledger-wait",
+            Check::Pipeline,
+            "a leave names its waiter in `from=` and takes no body",
+        )
+        .opt_out_check(
+            "ledger-offers",
+            Check::Pipeline,
+            "the offers sweep takes no body: it settles every queue in its ledger",
         )
         .opt_out_check(
             "ledger-doctor",
@@ -436,6 +462,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-link",
             "ledger-next",
             "ledger-note",
+            "ledger-offers",
             "ledger-policy",
             "ledger-purge",
             "ledger-reopen",
@@ -443,6 +470,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
             "ledger-stalled",
             "ledger-sweep-replays",
             "ledger-transition",
+            "ledger-wait",
         ],
         "{report}"
     );
