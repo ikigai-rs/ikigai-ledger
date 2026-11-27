@@ -71,13 +71,14 @@ fn dispatcher(principal: &str) -> Capability {
 /// import principal, with one item filed.
 fn kernel() -> Kernel {
     let ledger = ikigai_ledger::space_with(SpaceConfig::default().participants(PARTICIPANTS));
+    let clock = Arc::new(TickingClock::default());
     let space = Fallback::new(vec![
-        Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>,
+        store_with_clock(DurableStore::in_memory().unwrap(), clock.clone()),
         Arc::new(ledger) as Arc<dyn Space>,
     ]);
     let kernel =
         Kernel::with_meta_renderer(Arc::new(space), Arc::new(ikigai_vocab::TurtleRenderer))
-            .with_clock(Arc::new(TickingClock::default()));
+            .with_clock(clock);
     sink(
         &kernel,
         "urn:iki:store:update",

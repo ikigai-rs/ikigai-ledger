@@ -953,9 +953,6 @@ const CHECKS: [(&str, &str); 7] = [
     ),
 ];
 
-/// When the doctor's answer next changes with nothing written.
-const NEXT_EXPIRY: &str = include_str!("../doctor/next_expiry.rq");
-
 /// A stored query with its placeholders filled.
 ///
 /// ⚠ `$NAME` is also how SPARQL spells a variable, so a placeholder left unfilled would not
@@ -1008,7 +1005,6 @@ impl Endpoint for DoctorEndpoint {
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv, &STATE_FACES)?;
         let lifecycle = self.lifecycles.for_ledger(client.ledger());
-        let now = now_ms(inv)?;
         let awaiting_age =
             crate::claim::parse_lease(inv.optional_str("awaiting-age")?.unwrap_or("24h"))
                 .map_err(|error| match error {
@@ -1019,7 +1015,7 @@ impl Endpoint for DoctorEndpoint {
                     other => other,
                 })?
                 .millis;
-        let mut awaiting_deadline: Option<u64> = None;
+        let now = client.authority_now().await?;
         let ledger = client.ledger().clone();
         let claim = ledger.resource("claim");
         let name_of = |value: &str| match lifecycle.state_by_iri(value) {
@@ -1042,13 +1038,6 @@ impl Endpoint for DoctorEndpoint {
                     // Strictly older than the threshold. Saturation also keeps future
                     // stamps from becoming overdue through unsigned subtraction.
                     if now.saturating_sub(since) <= awaiting_age {
-                        if let Some(deadline) = since
-                            .checked_add(awaiting_age)
-                            .and_then(|t| t.checked_add(1))
-                        {
-                            awaiting_deadline =
-                                Some(awaiting_deadline.map_or(deadline, |was| was.min(deadline)));
-                        }
                         continue;
                     }
                 }
@@ -1243,25 +1232,9 @@ impl Endpoint for DoctorEndpoint {
             plain(text)
         };
 
-        // ★ Cached under the store's write threads AND until the earliest running lease ends:
-        // that moment adds a `lease-expired` problem with nothing written, and reading the
-        // clock records no dependency. Hand-backs also expire the cache when their wait
-        // exceeds awaiting-age, even if no lease is running.
-        let next = client
-            .select(&fill(NEXT_EXPIRY, &client, lifecycle, now)?)
-            .await?
-            .first()
-            .and_then(|row| row.get("next"))
-            .and_then(|b| model::millis(&b.value));
-        let next = next.into_iter().chain(awaiting_deadline).min();
-        let repr = match next {
-            None => repr.cacheable(),
-            Some(deadline) if deadline > now => {
-                repr.cacheable_until(ikigai_core::Time::from_millis(deadline))
-            }
-            Some(_) => repr,
-        };
+        // The caller's cache clock cannot enforce a store-clock deadline.
         Ok(repr
+            .with_uncached_reason(ikigai_core::UncachedReason::Declared)
             .depends_on(ikigai_store::UPDATE_THREAD)
             .depends_on(ikigai_store::LOAD_THREAD)
             .depends_on(ikigai_store::GRAPH_UPDATE_THREAD))

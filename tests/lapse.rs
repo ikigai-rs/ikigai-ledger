@@ -6,7 +6,7 @@
 //! RECORDED the lapse: the item's history showed the claim and then nothing, so "which items
 //! stalled, and how often" was not a query, and no lapse ever queued a person.
 //!
-//! Time is the kernel's clock, moved by the test, as in `tests/leases_doctor.rs`.
+//! The store and kernel clocks are moved together by the test, as in `tests/leases_doctor.rs`.
 
 mod common;
 
@@ -39,9 +39,10 @@ impl Clock for HandClock {
 fn kernel_with(config: SpaceConfig) -> (Kernel, HandClock) {
     let clock = HandClock(Arc::new(AtomicU64::new(T0)));
     let space = Fallback::new(vec![
-        Arc::new(ikigai_store::space(
-            ikigai_store::DurableStore::in_memory().expect("an in-memory store"),
-        )) as Arc<dyn Space>,
+        store_with_clock(
+            ikigai_store::DurableStore::in_memory().unwrap(),
+            Arc::new(clock.clone()),
+        ),
         Arc::new(ikigai_ledger::space_with(config)) as Arc<dyn Space>,
     ]);
     let kernel =

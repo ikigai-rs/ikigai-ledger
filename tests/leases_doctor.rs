@@ -39,9 +39,10 @@ impl Clock for HandClock {
 fn kernel_with(config: SpaceConfig) -> (Kernel, HandClock) {
     let clock = HandClock::at(T0);
     let space = Fallback::new(vec![
-        Arc::new(ikigai_store::space(
-            ikigai_store::DurableStore::in_memory().expect("an in-memory store"),
-        )) as Arc<dyn Space>,
+        store_with_clock(
+            ikigai_store::DurableStore::in_memory().unwrap(),
+            Arc::new(clock.clone()),
+        ),
         Arc::new(ikigai_ledger::space_with(config)) as Arc<dyn Space>,
     ]);
     let kernel =
@@ -115,7 +116,7 @@ fn raw(kernel: &Kernel, triples: &str) {
 // --------------------------------------------------------------------- leases
 
 #[test]
-fn a_lease_records_its_expiry_from_the_kernel_clock() {
+fn a_lease_records_its_expiry_from_the_store_clock() {
     let (kernel, _clock) = hand_kernel();
     append(&kernel, "Ship it", &[]);
     let answer = claim(
@@ -181,8 +182,7 @@ fn a_malformed_lease_is_refused_before_anything_is_written() {
 }
 
 /// ★ An expired lease is never silently free: `next` still excludes the item, says why, and
-/// names the holder and the expiry — and a cached `next` turns over AT the expiry, with
-/// nothing written, because the answer changes then.
+/// names the holder and the expiry. A fresh `next` turns over exactly at expiry.
 #[test]
 fn an_expired_lease_is_excluded_by_next_with_its_holder_and_expiry() {
     let (kernel, clock) = hand_kernel();
@@ -202,17 +202,10 @@ fn an_expired_lease_is_excluded_by_next_with_its_holder_and_expiry() {
 
     let request = Request::new(Verb::Source, Iri::parse("urn:iki:ledger:next").unwrap());
     source(&kernel, "urn:iki:ledger:next", &[]);
-    assert!(kernel.is_cached(&request, &Capability::root()));
+    assert!(!kernel.is_cached(&request, &Capability::root()));
     clock.advance(29 * MINUTE);
-    assert!(
-        kernel.is_cached(&request, &Capability::root()),
-        "still true a minute before the lease ends"
-    );
+    assert_eq!(next_json(&kernel)["excluded"][0]["why"], "claimed");
     clock.advance(MINUTE);
-    assert!(
-        !kernel.is_cached(&request, &Capability::root()),
-        "a cached `next` outlived the lease it reported as running"
-    );
 
     let after = next_json(&kernel);
     let excluded = &after["excluded"][0];
@@ -766,10 +759,9 @@ fn a_claim_with_no_recorded_kind_is_a_machines() {
     assert_eq!(findings(&kernel), [("orphaned".to_string(), 1)]);
 }
 
-/// The doctor's answer changes when a lease ends, with nothing written, so its cache must
-/// end there too.
+/// The doctor bypasses the caller's cache and sees expiry without a write.
 #[test]
-fn a_cached_doctor_turns_over_when_a_lease_ends() {
+fn doctor_turns_over_when_a_lease_ends() {
     let (kernel, clock) = hand_kernel();
     append(&kernel, "Ship it", &[]);
     sink(
@@ -785,7 +777,7 @@ fn a_cached_doctor_turns_over_when_a_lease_ends() {
     assert!(findings(&kernel).is_empty());
     let request = Request::new(Verb::Source, Iri::parse("urn:iki:ledger:doctor").unwrap());
     source(&kernel, "urn:iki:ledger:doctor", &[]);
-    assert!(kernel.is_cached(&request, &Capability::root()));
+    assert!(!kernel.is_cached(&request, &Capability::root()));
     clock.advance(10 * MINUTE);
     assert!(!kernel.is_cached(&request, &Capability::root()));
     assert_eq!(findings(&kernel), [("lease-expired".to_string(), 1)]);
@@ -895,7 +887,7 @@ fn worker_chatter_does_not_reset_the_handback_clock_but_a_new_handback_does() {
 }
 
 #[test]
-fn a_cached_doctor_expires_when_a_handback_becomes_stale() {
+fn doctor_turns_over_when_a_handback_becomes_stale() {
     let (kernel, clock) = hand_kernel();
     append(&kernel, "Waiting", &[]);
     worker_comment(

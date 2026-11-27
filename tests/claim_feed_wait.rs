@@ -31,9 +31,10 @@ impl Clock for HandClock {
 fn fixture() -> (Kernel, Arc<AtomicU64>) {
     let now = Arc::new(AtomicU64::new(T0));
     let space = Fallback::new(vec![
-        Arc::new(ikigai_store::space(
+        store_with_clock(
             ikigai_store::DurableStore::in_memory().unwrap(),
-        )) as Arc<dyn Space>,
+            Arc::new(HandClock(now.clone())),
+        ),
         Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
     ]);
     let kernel = Kernel::new(Arc::new(space)).with_clock(Arc::new(HandClock(now.clone())));

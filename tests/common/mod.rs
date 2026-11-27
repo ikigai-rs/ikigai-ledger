@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_core::{
-    ArgRef, Capability, Clock, Error, Fallback, Iri, Kernel, Request, Space, Time, Verb,
+    ArgRef, Capability, Clock, Description, Endpoint, Error, Fallback, Invocation, Iri, Kernel,
+    ReprType, Representation, Request, Resolution, Scope, Space, Time, UncachedReason, Verb,
 };
 use ikigai_store::DurableStore;
 
@@ -36,6 +37,81 @@ impl Clock for TickingClock {
     }
 }
 
+/// Inject the store evaluator's clock at the graph-select door. The test request
+/// still goes through the store's normal resolution and capability checks.
+pub fn store_with_clock(store: DurableStore, clock: Arc<dyn Clock>) -> Arc<dyn Space> {
+    store_with_time(store, move || Ok(clock.now()))
+}
+
+pub fn store_with_time(
+    store: DurableStore,
+    time: impl Fn() -> Result<Time, Error> + Send + Sync + 'static,
+) -> Arc<dyn Space> {
+    Arc::new(ClockedStore {
+        inner: Arc::new(ikigai_store::space(store)),
+        time: Arc::new(time),
+    })
+}
+
+type TimeSource = Arc<dyn Fn() -> Result<Time, Error> + Send + Sync>;
+
+struct ClockedStore {
+    inner: Arc<dyn Space>,
+    time: TimeSource,
+}
+
+impl Space for ClockedStore {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let resolution = self.inner.resolve(request, scope);
+        if request.verb == Verb::Source && request.target.as_str() == "urn:iki:store:graph-select" {
+            resolution.map_endpoint(|inner| {
+                Arc::new(ClockedSelect {
+                    inner,
+                    time: self.time.clone(),
+                })
+            })
+        } else {
+            resolution
+        }
+    }
+}
+
+struct ClockedSelect {
+    inner: Arc<dyn Endpoint>,
+    time: TimeSource,
+}
+
+#[async_trait::async_trait]
+impl Endpoint for ClockedSelect {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation, Error> {
+        let response = self.inner.invoke(inv).await?;
+        if inv.inline_str("query").ok() != Some("SELECT (NOW() AS ?authorityNow) WHERE {}") {
+            return Ok(response);
+        }
+        let stamp = ikigai_ledger::sparql::iso8601((self.time)()?.as_millis());
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "head": { "vars": ["authorityNow"] },
+            "results": { "bindings": [{ "authorityNow": {
+                "type": "literal", "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+                "value": stamp
+            }}] },
+        }))
+        .unwrap();
+        Ok(
+            Representation::new(ReprType::new("application/sparql-results+json"), bytes)
+                .with_uncached_reason(UncachedReason::Declared),
+        )
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> Description {
+        self.inner.describe()
+    }
+}
+
 /// A kernel over an in-memory store with the ledger bound beside it.
 pub fn kernel() -> Kernel {
     kernel_over(DurableStore::in_memory().expect("an in-memory store"))
@@ -43,12 +119,13 @@ pub fn kernel() -> Kernel {
 
 /// A kernel over a caller-supplied store — the durable suite passes `DurableStore::open`.
 pub fn kernel_over(store: DurableStore) -> Kernel {
+    let clock = Arc::new(TickingClock::default());
     let space = Fallback::new(vec![
-        Arc::new(ikigai_store::space(store)) as Arc<dyn Space>,
+        store_with_clock(store, clock.clone()),
         Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
     ]);
     Kernel::with_meta_renderer(Arc::new(space), Arc::new(ikigai_vocab::TurtleRenderer))
-        .with_clock(Arc::new(TickingClock::default()))
+        .with_clock(clock)
 }
 
 /// A kernel with the ledger bound and NO store — the composition failure a host hits.

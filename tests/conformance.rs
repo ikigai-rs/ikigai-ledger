@@ -341,8 +341,6 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-item-history")
         .cacheable("ledger-item-sessions")
         .cacheable("ledger-sessions")
-        .cacheable("ledger-doctor")
-        .cacheable("ledger-stalled")
         .pure("ledger-policy")
         .pure("ledger-lifecycle")
         // RECOMPUTE (conformance 0.9, ledger #1567 — decided 2026-10-15): the doctor's text

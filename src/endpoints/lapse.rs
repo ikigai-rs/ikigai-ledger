@@ -13,7 +13,7 @@
 //! A lease runs out at an instant nobody asks about, and the ledger acts only when asked. Three
 //! candidates, and why the sweep is the one:
 //!
-//! - **a sweep on read** would make `next`, `items` and the doctor writes: they are cached reads
+//! - **a sweep on read** would make `next`, `items` and the doctor writes: they are reads
 //!   under the read grant, and a read that writes is invalidated by its own write;
 //! - **the next claim attempt** comes only when someone already wants the item, which is exactly
 //!   what does not happen to a stalled one, and the takeover it ends in already records its
@@ -185,26 +185,6 @@ async fn stalled(client: &StoreClient<'_, '_>, now: u64) -> Result<Vec<Found>> {
     Ok(found)
 }
 
-/// The earliest lease still running at `now`: when the stalled view changes with nothing
-/// written.
-async fn next_lapse(client: &StoreClient<'_, '_>, now: u64) -> Result<Option<u64>> {
-    let query = format!(
-        "SELECT (MIN(?expires) AS ?next) WHERE {{ {} }}",
-        client.in_graph(&format!(
-            "?item <{by}> ?holder ; <{expires}> ?expires .\nFILTER(?expires > {now})",
-            by = v::CLAIMED_BY,
-            expires = v::LEASE_EXPIRES,
-            now = datetime(now),
-        ))
-    );
-    Ok(client
-        .select(&query)
-        .await?
-        .first()
-        .and_then(|row| row.get("next"))
-        .and_then(|b| model::millis(&b.value)))
-}
-
 /// `urn:iki:ledger:{ledger}:stalled` — read-only.
 #[derive(Clone)]
 pub(super) struct StalledEndpoint;
@@ -217,7 +197,7 @@ impl Endpoint for StalledEndpoint {
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Read)?);
         let want = wanted_face(inv, &LAPSE_FACES)?;
-        let now = now_ms(inv)?;
+        let now = client.authority_now().await?;
         let ledger = client.ledger().clone();
         let found = stalled(&client, now).await?;
         let repr = if want == JSON {
@@ -257,16 +237,9 @@ impl Endpoint for StalledEndpoint {
             ));
             plain(text)
         };
-        // ★ Cached under the store's write threads AND until the earliest running lease ends:
-        // that moment adds a stalled item with nothing written, as it does a doctor problem.
-        let repr = match next_lapse(&client, now).await? {
-            None => repr.cacheable(),
-            Some(deadline) if deadline > now => {
-                repr.cacheable_until(ikigai_core::Time::from_millis(deadline))
-            }
-            Some(_) => repr,
-        };
+        // The caller's cache clock cannot enforce a store-clock deadline.
         Ok(repr
+            .with_uncached_reason(ikigai_core::UncachedReason::Declared)
             .depends_on(ikigai_store::UPDATE_THREAD)
             .depends_on(ikigai_store::LOAD_THREAD)
             .depends_on(ikigai_store::GRAPH_UPDATE_THREAD))
@@ -376,7 +349,7 @@ impl Endpoint for LapseEndpoint {
         }
         let client = StoreClient::new(inv, ledger_for(inv, Need::Close)?);
         let want = wanted_face(inv, &LAPSE_FACES)?;
-        let now = now_ms(inv)?;
+        let now = client.authority_now().await?;
         let who = Attribution::committer(inv)?;
         let ledger = client.ledger().clone();
         let route = self.routes.get(ledger.name()).map(String::as_str);

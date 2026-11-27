@@ -576,7 +576,7 @@ ledger:leaseExpires a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range xsd:dateTime ;
     rdfs:label "leaseExpires" ;
-    rdfs:comment "When the claim's lease runs out, from the kernel's clock. ⚠ An expired lease is NOT a free item: the claim stays, `next` excludes the item as lease-expired naming the holder and this time, and only `claim takeover=true from=<holder>` takes it — a compare-and-set against that holder. A lease that expired silently would make \"owned\" mean \"owned as of an unspecified time\"." .
+    rdfs:comment "When the claim's lease runs out, from the store host's clock. ⚠ An expired lease is NOT a free item: the claim stays, `next` excludes the item as lease-expired naming the holder and this time, and only `claim takeover=true from=<holder>` takes it — a compare-and-set against that holder. A lease that expired silently would make \"owned\" mean \"owned as of an unspecified time\"." .
 
 ledger:claimPrincipal a rdf:Property ;
     rdfs:range rdfs:Resource ;
@@ -603,7 +603,7 @@ ledger:awaitingAt a rdf:Property ;
     rdfs:domain ledger:Item ;
     rdfs:range xsd:dateTime ;
     rdfs:label "awaiting decision at" ;
-    rdfs:comment "The kernel time of the latest hand-back decision (since 0.13.1). Written atomically with handback=true, rejects=true, a dispatcher comment, close or reopen. While awaiting the dispatcher, this is when the hand-back set that state; ordinary worker comments do not reset it. Retained when cleared so the doctor does not mistake older legacy Evidence: comments for unanswered hand-backs." .
+    rdfs:comment "The time of the latest hand-back decision. New hand-backs use the store clock. Older hand-backs and decisions that clear the wait use the writer's kernel clock. Written atomically with the decision. Ordinary worker comments do not reset it. Retained when cleared so the doctor does not mistake older legacy Evidence: comments for unanswered hand-backs." .
 
 ledger:closedAt a rdf:Property ;
     rdfs:range xsd:dateTime ;

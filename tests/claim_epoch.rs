@@ -611,7 +611,8 @@ impl Endpoint for BeforeLiveUpdate {
 fn scheduled() -> (Arc<OnceLock<Kernel>>, Arc<Schedule>) {
     let cell = Arc::new(OnceLock::new());
     let schedule = Arc::new(Schedule::default());
-    let store = Arc::new(ikigai_store::space(DurableStore::in_memory().unwrap())) as Arc<dyn Space>;
+    let clock = Arc::new(TickingClock::default());
+    let store = store_with_clock(DurableStore::in_memory().unwrap(), clock.clone());
     let space = Fallback::new(vec![
         Arc::new(Interleave {
             inner: store,
@@ -622,7 +623,7 @@ fn scheduled() -> (Arc<OnceLock<Kernel>>, Arc<Schedule>) {
     ]);
     let kernel =
         Kernel::with_meta_renderer(Arc::new(space), Arc::new(ikigai_vocab::TurtleRenderer))
-            .with_clock(Arc::new(TickingClock::default()));
+            .with_clock(clock);
     assert!(cell.set(kernel).is_ok());
     (cell, schedule)
 }
